@@ -507,7 +507,7 @@ vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth){
   float ceilHit=step(side.y,min(back,side.x))*step(0.,ray.y);
   float backHit=step(back,min(side.x,side.y));
   vec3 wallC=mix(vec3(.55,.52,.46),vec3(.42,.47,.48),seed);
-  vec3 col=wallC*mix(.62,.9,backHit);
+  vec3 col=wallC*mix(.74,.9,backHit);
   col=mix(col,vec3(.22,.18,.15)*(1.+seed*.4),floorHit);
   col=mix(col,vec3(.72,.71,.66),ceilHit);
   float furniture=backHit*step(abs(hit.x+.18-seed*.3),.22)*step(hit.y,-.12);
@@ -900,9 +900,14 @@ void main(){
         vec2 rid=floor(uv)+floor(vPos.xz*.1);
         float seed=hash12(rid+floor(vPos.y/3.));
         float on=step(.62,hash12(rid*1.7+3.))*mix(.35,1.,zoneInterior);
-        vec3 room=roomBehind(fract(uv),vec3(vt.x,vt.y,vt.z)*vec3(1.,1.,1.),seed,on,kind==6?2.2:1.6);
+#ifdef SAFE
+        vec3 room=vec3(.2,.21,.2)*(.7+seed*.5);
+#else
+        vec3 room=roomBehind(fract(uv),vt,seed,on,kind==6?2.2:1.6);
+#endif
         float fres=.04+.96*pow(1.-max(dot(n,V),0.),5.);
-        m.emit=room*(1.-fres)*mix(.38,.9,zoneInterior)*(1.-dirt*.3);
+        m.emit=room*(1.-fres)*mix(kind==6?.22:.34,.9,zoneInterior)*(1.-dirt*.3);
+        m.f0=kind==6?.07:m.f0;
         float blind=kind==6?step(.7,seed)*smoothstep(.0,.02,fract(uv.y)-.6):0.;
         m.emit*=1.-blind*.7;
         m.albedo=mix(m.albedo,vec3(.62,.6,.55),blind);
@@ -946,7 +951,11 @@ void main(){
       float reveal=sat(max(rev.x,rev.y))*detailVis;
       float seed=hash12(cid+floor(vPos.xz*.37));
       float on=step(.7,hash12(cid*3.1+1.7));
+#ifdef SAFE
+      vec3 room=vec3(.18,.2,.21)*(.8+seed*.4);
+#else
       vec3 room=detailVis>.01 && !lite?roomBehind(sat(wuv),vt,seed,on,1.4):vec3(.18,.2,.21)*(.8+seed*.4);
+#endif
       float mull=1.-smoothstep(.006,.014,abs(wuv.x-.5));
       float pane=hash12(cid+.3);
       vec3 glassTint=curtain?mix(vec3(.025,.04,.05),vec3(.04,.05,.045),pane):vec3(.03);
@@ -1194,6 +1203,9 @@ void main(){
     vec3 amb=mix(vec3(.112,.112,.106),vec3(.094,.094,.089),n.y*.5+.5);
     float a=max(m.rough*m.rough,.002);
     bool inCabin=cabin;
+#ifdef SAFE
+    amb*=2.2;
+#else
     for (int k=0;k<4;k++) {
       vec3 c; float halfLen; float I;
       if (inCabin) {
@@ -1243,6 +1255,7 @@ void main(){
         sl+=ggxD(max(dot(n,h),0.),a3)*(ac*ac)/(a3*a3)*visSmith(nv,nl,a3)*fresnel(vec3(.04),max(dot(V,h),0.))*nl*I/(ds2+.35)*window*m.clear;
       }
     }
+#endif
     vec3 lampTint=vec3(1.,.95,.86);
     direct+=(dl+sl)*lampTint*zoneInterior;
     float ceilY=inCabin?uCabinY+2.7:uUnderY+6.9;

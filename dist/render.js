@@ -500,7 +500,15 @@ export class Renderer {
     this.anisotropy=gl.getExtension('EXT_texture_filter_anisotropic');
     this.renderLimit = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE);
     this.textureLimit = gl.getParameter(gl.MAX_TEXTURE_SIZE);
-    this.scene = program(gl,SCENE_VERTEX,SCENE_FRAGMENT);
+    try {
+      this.scene = program(gl,SCENE_VERTEX,SCENE_FRAGMENT);
+    } catch (error) {
+      // Some older mobile drivers reject very long shaders; drop the room
+      // interiors and per-lamp lighting instead of failing to start.
+      console.warn('Using the reduced scene shader',error);
+      this.scene = program(gl,SCENE_VERTEX,SCENE_FRAGMENT.replace('#version 300 es','#version 300 es\n#define SAFE 1'));
+      this.reducedShader=true;
+    }
     this.shadow = program(gl,SHADOW_VERTEX,SHADOW_FRAGMENT);
     this.sky = program(gl,FULLSCREEN_VERTEX,SKY_FRAGMENT);
     this.u = uniforms(gl,this.scene,SCENE_UNIFORMS);
