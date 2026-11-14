@@ -1,0 +1,45 @@
+export const SUPERS = {
+  shield:{name:'シールド',seconds:10,detail:'10秒間、シールドの耐久がある間は被ダメージを抑える。'},
+  giant:{name:'ダイオウイカ',seconds:9,detail:'9秒間、大きなイカに変身。高速で泳ぎ、接触した相手を攻撃する。'},
+  range:{name:'スーパー射程',seconds:16,detail:'16秒間、インク弾の射程が1.75倍になる。'},
+  slam:{name:'スーパーチャクチ',seconds:1.05,detail:'飛び上がってから着地し、周囲を塗りながら敵に衝撃を与える。'},
+  health:{name:'タイリョクバイ',seconds:20,detail:'20秒間、最大体力が100から200に増える。'},
+  wave:{name:'インクウェーブ',seconds:2.25,detail:'扇形の波が進み、地面を塗りながら敵を押し返す。'},
+  vortex:{name:'ボルテックス',seconds:2.62,detail:'渦が周囲の敵とインクを引き寄せ、最後に弾けて広く塗る。'},
+  beam:{name:'プリズムビーム',seconds:3.5,detail:'溜めたあと、照準に追従する光線を照射。遮蔽物で止まる。'}
+};
+
+export const INK_COST_FACTOR=.5;
+export const PAINT_RADIUS_FACTOR=1.5;
+export const INK_EPSILON=1e-9;
+
+export const WEAPONS = [
+  {id:'jet',name:'シューター',role:'連射・万能',detail:'移動しながら安定して塗り広げる連射武器。',special:'shield',
+    speed:54.1,gravity:8,range:33,damage:29,cost:2.45,delay:.118,radius:1.22,depth:.043,pellets:1,spread:.012,arc:0,size:.246},
+  {id:'fan',name:'スプレッダー',role:'拡散・近距離',detail:'一度に5発。近距離を扇形に塗る。',special:'giant',
+    speed:40.1,gravity:11,range:18,damage:15,cost:4.5,delay:.37,radius:.84,depth:.035,pellets:5,spread:.24,arc:0,size:.156},
+  {id:'charge',name:'チャージャー',role:'溜め・長距離',detail:'長押しで溜めて、離すと撃つ。',special:'range',
+    speed:95.7,gravity:5.1,range:52,damage:99,cost:7,delay:.34,radius:1.38,depth:.062,pellets:1,spread:.001,arc:0,size:.174,charge:.78},
+  {id:'lob',name:'ロブキャノン',role:'曲射・広域',detail:'山なりの大きなインク弾で広く塗る。',special:'vortex',
+    speed:30.9,gravity:16,range:35,damage:72,cost:9,delay:.76,radius:2.43,depth:.062,pellets:1,spread:.018,arc:.33,size:.432},
+  {id:'blast',name:'インパクトブラスター',role:'重弾・中距離',detail:'重いインク弾を発射し、まとまった範囲を塗る。',special:'slam',
+    speed:46.3,gravity:9,range:26,damage:63,cost:6,delay:.49,radius:1.93,depth:.059,pellets:1,spread:.009,arc:.025,size:.365},
+  {id:'dual',name:'デュアルシューター',role:'2連弾・中距離',detail:'左右に分かれる2連弾を素早く連射する。',special:'health',
+    speed:60.2,gravity:8,range:30,damage:20,cost:3.15,delay:.159,radius:1.03,depth:.041,pellets:2,spread:.053,arc:0,size:.184},
+  {id:'surge',name:'ウェーブポンプ',role:'3連流・広がり',detail:'低い弾道の3連流で、横に広く塗れる。',special:'wave',
+    speed:47.8,gravity:10.4,range:24,damage:17,cost:4.35,delay:.27,radius:1.07,depth:.048,pellets:3,spread:.127,arc:0,size:.197},
+  {id:'coil',name:'スパイラルガン',role:'旋回弾・塗り',detail:'左右に振れる弾で曲がり角付近を塗り広げる。',special:'vortex',
+    speed:46.3,gravity:8.7,range:28,damage:34,cost:3.75,delay:.234,radius:1.54,depth:.053,pellets:1,spread:.056,arc:.062,size:.263,swirl:2.1},
+  {id:'prism',name:'プリズムランス',role:'高速弾・精密',detail:'集弾性の高い高速弾で、中距離から正確に狙う。',special:'beam',
+    speed:80.3,gravity:5.5,range:39,damage:43,cost:4.5,delay:.316,radius:1.01,depth:.051,pellets:1,spread:.004,arc:0,size:.16},
+  {id:'roller',name:'ストリートローラー',role:'帯状の塗り・近距離',detail:'短押しで扇状に振る。長押ししながら前進すると床を転がして塗る。消費はシューターの1.1倍。',special:'slam',
+    speed:28,gravity:12,range:11,damage:33,cost:2.695,delay:.43,radius:1.04,depth:.052,pellets:5,spread:.48,arc:.06,size:.24,roller:true}
+].map(weapon=>({...weapon,cost:weapon.cost*INK_COST_FACTOR,radius:weapon.radius*PAINT_RADIUS_FACTOR}));
+
+export const weaponById=id=>WEAPONS.find(weapon=>weapon.id===id) ?? WEAPONS[0];
+
+export function shotTravel(weapon,horizontal,rangeFactor=1,power=1) {
+  const range=weapon.range*rangeFactor*(weapon.charge?.38+.62*power:1);
+  const speed=weapon.speed*(weapon.charge?.66+.34*power:1);
+  return Math.max(.047,(horizontal+.5*Math.max(0,horizontal-range))/speed+weapon.arc);
+}

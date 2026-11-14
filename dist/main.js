@@ -1,0 +1,1372 @@
+import {Renderer,clamp,forward,mix,sub,unit} from './render.js';
+import {World,randomGenerator} from './world.js';
+import {Paint} from './ink.js';
+import {WEAPONS,SUPERS,weaponById} from './weapons.js';
+import {BASE_TANK,CITY_RADIUS,METRO,RAIL,SCENE_FILE,SCENE_VERSION,STATIONS,TRACK_LAYER,ZONES,isCabin,localX,sameLevel,zoneOf} from './layout.js';
+import {Transit} from './transit.js';
+import {TouchControls} from './touch.js';
+import {Battle,drawCrew} from './battle.js';
+import {SoftwareRenderer} from './software.js';
+import {RemoteMatch,createCloudRoom,detectCloud,forgetRoom,rememberRoom,savedRoom} from './remote-match.js';
+import {REST_PITCH,aerialView,crewView} from './cloud-view.js';
+import {fullscreenElement,setFullscreen} from './fullscreen.js';
+import {STAIRS,stairLane,stairPoint} from './stairs.js';
+import {SUBWEAPONS,subweaponById} from './subweapons.js';
+import {inkReadout,inkResult} from './ink-hud.js';
+import {TRAIN_DOORS} from './train-model.js';
+import {BOSS_BODY_HEIGHT} from './boss-model.js';
+import {StageObjects} from './stage-objects.js';
+
+const $ = id => document.getElementById(id);
+const arena=$('arena'), game=$('game'), mini=$('minimap'), miniCtx=mini.getContext('2d');
+const title=$('title-screen'), hud=$('hud'), dialog=$('dialog'), rotate=$('rotate'), damageFlash=$('damage-flash');
+const embeddedApp=navigator.userAgent.includes('InkShiftAndroid/');
+const cloudRequired=document.querySelector('meta[name=inkshift-compute]')?.content==='cloud-required';
+game.classList.toggle('native-android',embeddedApp);
+$('apk-download').hidden=embeddedApp;
+$('android-cloud').hidden=!embeddedApp;
+const mapTabs=[...document.querySelectorAll('[data-map-level]')];
+const keys=new Set();
+const PREF_KEY='inkshift-controls-v2';
+const portrait=window.matchMedia('(orientation: portrait)');
+let renderer, world, demoStage, paint, localPaint, battle=null, camera=null, yaw=Math.PI/2, pitch=REST_PITCH;
+let state='title', dialogKind=null, activeClock=0, prevTime=0, hudTime=0, mapTime=0, watchYaw=0;
+let usingTouch=matchMedia('(pointer: coarse)').matches;
+let mute=true, audio, noise, jumpQueued=false, shotQueued=false, desktopFire=false, rotationGate=false, hadPointerLock=false;
+let viewActor=null, viewZone=-1, viewHeight=0, cameraReach=1, watchAerial=true;
+let focus=null;
+let superQueued=false, droneQueued=false, useQueued=false, subQueued=false, demoTrain;
+let remote=null, connecting=null, accessCode='', cloudCheck=null, cloud=null;
+let sceneData, graphicsLost=false, graphicsTimeout=0;
+let renderedWidth=0, renderedHeight=0;
+const prefs=readPrefs();
+let mapImage, mapLevel='auto', lastMessage='';
+const mapLayers=[];
+let demoActors=[];
+const tags=[];
+const scoreNodes=[$('cyan-score'),$('orange-score')];
+const teamBars=[$('cyan-bar'),$('orange-bar')];
+
+const canControl=()=>!!battle?.player && battle.player.down<=0 && state==='match' && !dialogKind && !rotationGate && !graphicsLost;
+const touch=new TouchControls(arena,$('stick'),{fire:$('touch-fire'),swim:$('touch-swim'),jump:$('touch-jump')},{
+  enabled:()=>usingTouch && canControl(),
+  aim:aimMove,press:()=>{shotQueued=true;},jump:()=>{jumpQueued=true;}
+});
+
+function readPrefs() {
+  let saved={};
+  try { saved=JSON.parse(localStorage.getItem(PREF_KEY) || '{}') ?? {}; } catch { /* Use defaults. */ }
+  return {
+    weapon:weaponById(saved.weapon).id,
+    sub:subweaponById(saved.sub).id,
+    teamSize:saved.teamSize===4?4:8,
+    sensitivity:Number.isFinite(saved.sensitivity)?clamp(saved.sensitivity,.55,1.75):1,
+    quality:['lite','high'].includes(saved.quality)?saved.quality:'auto'
+  };
+}
+
+function lightQuality() {
+  return prefs.quality==='lite' || (prefs.quality==='auto' && (usingTouch || !!renderer?.cpuRenderer));
+}
+
+function applyQuality() {
+  const light=lightQuality();
+  renderer?.setQuality(light);
+  $('quality').querySelector('b').textContent=light?'軽量・影なし':'高画質';
+  $('quality').setAttribute('aria-pressed',String(light));
+}
+
+function createRenderer() {
+  try {
+    return new Renderer(arena,paint);
+  } catch (error) {
+    if (error.name!=='WebGLUnavailable') throw error;
+    return new SoftwareRenderer(arena);
+  }
+}
+
+function savePrefs() {
+  try { localStorage.setItem(PREF_KEY,JSON.stringify(prefs)); } catch { /* Private browsing may restrict storage. */ }
+  const versus=prefs.teamSize+' VS '+prefs.teamSize;
+  $('match-tag').textContent=versus;
+  $('watch-caption').textContent='WATCH '+versus;
+  $('active-weapon').textContent=weaponById(prefs.weapon).name+' / '+subweaponById(prefs.sub).name;
+  applyQuality();
+}
+
+function configureTouch() {
+  game.classList.toggle('touch-active',usingTouch);
+  applyQuality();
+  updateOrientation();
+}
+
+function updateOrientation() {
+  const gated=usingTouch && portrait.matches && state==='match' && !dialogKind;
+  const opening=gated && !rotationGate, closing=!gated && rotationGate;
+  rotationGate=gated;
+  rotate.hidden=!gated;
+  title.inert=!!dialogKind || graphicsLost;
+  hud.inert=arena.inert=gated || !!dialogKind || graphicsLost;
+  const full=embeddedApp || !!fullscreenElement(), label=full?'全画面を解除':'全画面';
+  $('fullscreen').querySelector('b').textContent=label;
+  for (const id of ['fullscreen','hud-fullscreen']) {
+    $(id).setAttribute('aria-label',label);
+    $(id).setAttribute('aria-pressed',String(full));
+    $(id).title=label;
+  }
+  $('rotate-fullscreen').hidden=full;
+  if (opening) {
+    suspendInput();
+    $(full?'exit-rotate':'rotate-fullscreen').focus({preventScroll:true});
+  } else if (closing && !dialogKind && state==='match') arena.focus({preventScroll:true});
+}
+
+function initAudio() {
+  if (mute) return;
+  try {
+    const Context=window.AudioContext || window.webkitAudioContext;
+    if (!Context) return;
+    audio ||= new Context();
+    if (audio.state==='suspended') audio.resume().catch(()=>{});
+    if (!noise) {
+      noise=audio.createBuffer(1,Math.ceil(audio.sampleRate*.22),audio.sampleRate);
+      const wave=noise.getChannelData(0);
+      for (let i=0;i<wave.length;i++) wave[i]=(Math.random()*2-1)*(1-i/wave.length);
+    }
+  } catch {
+    audio=null;
+  }
+}
+
+function sound(kind) {
+  if (!audio || mute || audio.state!=='running') return;
+  const now=audio.currentTime;
+  const out=audio.createGain();
+  out.connect(audio.destination);
+  const hit=['shot','lob','damage','hit'].includes(kind);
+  const duration={shot:.11,lob:.19,hit:.10,damage:.19,tick:.13,go:.31,down:.29,super:.30,drone:.22,boss:.65,bossDown:.59,finish:.5}[kind] || .14;
+  out.gain.setValueAtTime(.001,now);
+  out.gain.exponentialRampToValueAtTime(kind==='shot'?.08:.12,now+.006);
+  out.gain.exponentialRampToValueAtTime(.001,now+duration);
+  const oscillator=audio.createOscillator();
+  oscillator.type=kind==='shot'?'sine':kind==='damage'?'triangle':'sine';
+  const freq={shot:260,lob:142,hit:840,damage:127,tick:554,go:830,down:730,super:620,drone:440,boss:110,bossDown:493,finish:660}[kind] || 440;
+  oscillator.frequency.setValueAtTime(freq,now);
+  oscillator.frequency.exponentialRampToValueAtTime(freq*(kind==='shot'?.44:kind==='damage'?.58:1.34),now+duration*.73);
+  oscillator.connect(out);
+  oscillator.start(now);
+  oscillator.stop(now+duration);
+  if (hit) {
+    const burst=audio.createBufferSource(), filter=audio.createBiquadFilter();
+    burst.buffer=noise;
+    filter.type='bandpass';
+    filter.frequency.value=kind==='shot'?980:520;
+    filter.Q.value=.76;
+    burst.connect(filter).connect(out);
+    burst.start(now);
+    burst.stop(now+duration);
+  }
+}
+
+async function fullScreen(toggle=false,help=false) {
+  const result=await setFullscreen(game,{toggle,landscape:usingTouch});
+  updateOrientation();
+  if (result!=='blocked' || !help) return;
+  const content=document.createElement('div'), hint=document.createElement('p');
+  hint.textContent=window.top===window
+    ?'この表示では全画面に切り替えられませんでした。スマホではブラウザのメニューからホーム画面に追加し、追加したアイコンから横向きで開けます。'
+    :'ゲームを新しいタブで開き、そちらで全画面ボタンを押してください。';
+  content.append(hint);
+  const actions=[];
+  if (window.top!==window) {
+    const link=document.createElement('a');
+    link.className='primary fullscreen-link';
+    link.href=location.href;
+    link.target='_blank';
+    link.rel='noopener';
+    link.textContent='新しいタブで開く';
+    actions.push(link);
+  }
+  const wasPaused=dialogKind==='pause';
+  actions.push(button('閉じる','secondary',()=>{
+    hideDialog();
+    if (wasPaused) pause();
+  }));
+  showDialog('fullscreen','横画面でプレイ',content,actions);
+}
+
+function clearControls() {
+  keys.clear();
+  desktopFire=false;
+  jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=false;
+  touch.clear();
+  battle?.clearPlayerInput();
+}
+
+function suspendInput() {
+  clearControls();
+  remote?.input(null,true);
+  remote?.flush();
+}
+
+function aimMove(dx,dy,isTouch=false) {
+  if (!canControl()) return;
+  const screenScale=isTouch?clamp(430/arena.clientHeight,.76,1.21):1;
+  const sensitivity=prefs.sensitivity*screenScale;
+  yaw=(yaw+dx*(isTouch?.0052:.0031)*sensitivity)%(Math.PI*2);
+  pitch=clamp(pitch-dy*(isTouch?.0043:.0031)*sensitivity,-.86,.70);
+}
+
+function getInput() {
+  const x=touch.x+(keys.has('KeyD')||keys.has('ArrowRight')?1:0)-(keys.has('KeyA')||keys.has('ArrowLeft')?1:0);
+  const z=touch.z+(keys.has('KeyW')||keys.has('ArrowUp')?1:0)-(keys.has('KeyS')||keys.has('ArrowDown')?1:0);
+  const jump=jumpQueued, press=shotQueued, superMove=superQueued, drone=droneQueued, use=useQueued, subMove=subQueued;
+  jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=false;
+  return {x,z,yaw,pitch,press,super:superMove,drone,use,sub:subMove,fire:touch.fire||desktopFire||keys.has('KeyF'),
+    swim:touch.swim||keys.has('ShiftLeft')||keys.has('ShiftRight'),jump,overview:watchAerial};
+}
+
+function requestPointer() {
+  if (usingTouch || document.pointerLockElement || !arena.requestPointerLock) return;
+  try { arena.requestPointerLock()?.catch(()=>{}); } catch { /* Drag aiming stays available. */ }
+}
+
+function releasePointer() {
+  if (document.pointerLockElement) document.exitPointerLock?.();
+}
+
+function button(label,style,action) {
+  const element=document.createElement('button');
+  element.className=style;
+  element.type='button';
+  element.textContent=label;
+  element.addEventListener('click',action);
+  return element;
+}
+
+function showDialog(kind,heading,content,actions) {
+  dialogKind=kind;
+  suspendInput();
+  releasePointer();
+  $('dialog-title').textContent=heading;
+  $('dialog-content').replaceChildren(content);
+  $('dialog-actions').replaceChildren(...actions);
+  dialog.hidden=false;
+  updateOrientation();
+  actions[0]?.focus({preventScroll:true});
+}
+
+function hideDialog() {
+  dialogKind=null;
+  dialog.hidden=true;
+  updateOrientation();
+}
+
+function settings() {
+  const block=document.createElement('div');
+  block.className='controls-settings';
+  const row=document.createElement('label');
+  const label=document.createElement('span');
+  label.textContent='照準感度';
+  const range=document.createElement('input');
+  range.type='range';
+  range.min='.55';
+  range.max='1.75';
+  range.step='.05';
+  range.value=String(prefs.sensitivity);
+  const value=document.createElement('output');
+  const read=()=>{value.textContent=Math.round(prefs.sensitivity*100)+'%';};
+  read();
+  range.addEventListener('input',()=>{
+    prefs.sensitivity=Number(range.value);
+    read();
+    savePrefs();
+  });
+  row.append(label,range,value);
+  const graphics=document.createElement('label');
+  graphics.className='graphics-setting';
+  const labelGraphics=document.createElement('span');
+  labelGraphics.textContent='描画品質';
+  const quality=document.createElement('select');
+  for (const [value,name] of [['auto','自動（スマホは軽量）'],['lite','軽量・影なし'],['high','高画質']]) {
+    const option=document.createElement('option');
+    option.value=value;
+    option.textContent=name;
+    quality.append(option);
+  }
+  quality.value=prefs.quality;
+  quality.addEventListener('change',()=>{prefs.quality=quality.value;savePrefs();});
+  graphics.append(labelGraphics,quality);
+  block.append(row,graphics);
+  return block;
+}
+
+function guide() {
+  const content=document.createElement('div');
+  content.innerHTML=`<dl class="guide">
+    <dt>移動・照準</dt><dd>左のスティックで移動。右をスワイプ、または撃つボタンをドラッグして照準を動かせます。照準が敵に重なると追跡枠が出て、弾が命中すると当たった位置に輪と飛沫が広がります。弾の狙いは手動です。</dd>
+    <dt>潜水・壁登り</dt><dd>未塗装の床でもイカになれます。自チームのインクで回復が速くなり、塗った壁に向かって移動すると登れます。敵インクに立ち続けると、移動・回復・スーパーの蓄積が1秒ごとに少し落ちます。</dd>
+    <dt>ジャンプ射撃・インク</dt><dd>撃つボタンを押したまま、別の指でジャンプできます。ゲージの黄色い部分が次の射撃で使うインクです。攻撃を受けると画面の縁が赤く光ります。</dd>
+    <dt>武器選択</dt><dd>タイトルの「武器を選ぶ」か、対戦中の「武器変更」でメインとサブを選べます。装備を変えてもインク残量と待ち時間は引き継ぎます。</dd>
+    <dt>ローラー・サブ</dt><dd>ローラーは短押しで振り、長押ししながら前進すると転がして塗れます。ジャンプ中に押すと空中でインクを振り飛ばします。メインとは別にサブを1つ選択。画面左上のサブボタンかGで使います。敵の時限ボムの輪からは離れましょう。</dd>
+    <dt>外周街区・高架道路</dt><dd>街区は中心から半径500mです。中央通りから外周道路へ歩いて探索できます。高架道路の上り口は南側の ROUTE 07 標識が目印です。</dd>
+    <dt>4駅直通列車</dt><dd>地上西駅→地上東駅→地下東駅→地下西駅の順に巡回します。停車中に乗車ボタンかR、または開いた扉へ歩いて乗れます。車内では移動・射撃・塗りができ、停車駅で降車ボタンか扉へ歩いて降ります。乗降しても視点の向きは維持されます。広いB1へは街の4か所の階段からも歩いて降りられます。</dd>
+    <dt>スーパー・ドローン</dt><dd>塗りと攻撃でスーパーがたまると、画面左上のボタンで発動できます。武器ごとに技が異なります。ドローンは1人1機で、塗りを広げ、召喚から60秒で再使用できます。</dd>
+    <dt>スーパーギガチップ</dt><dd>ステージに落ちたチップを拾うと、その試合中は持てるインクが2倍になります。</dd>
+    <dt>街の遮蔽物</dt><dd>木箱、レンガ、コンクリートブロックや、マンションと店舗のガラスはインク弾で壊せます。舗装路の先にある3棟は、1試合につき各キャラ1棟1回入れて室内を塗れます。</dd>
+    <dt>タイムレスバトル</dt><dd>時間無制限の4対4。最初の襲撃は80秒後で、以降118秒ごとにオクトパスゼイアン4体が現れます。</dd>
+    <dt>7分のナワバリ戦</dt><dd>床の塗り面積で勝敗が決まり、開始3分でオオモノイカが乱入します。</dd>
+    <dt>PC</dt><dd>WASD、マウス、左クリックまたはFで射撃、Shiftで潜る、Spaceでジャンプ、Gでサブ、Qでスーパー、Eでドローン。</dd>
+  </dl>`;
+  content.append(settings());
+  showDialog('guide','操作ガイド',content,[button('閉じる','primary',()=>{
+    hideDialog();
+    $('how').focus({preventScroll:true});
+  })]);
+}
+
+function loadout(inMatch=false) {
+  if (inMatch && (!battle?.player || battle.finished || rotationGate)) return;
+  const player=inMatch?battle.player:null;
+  const draft={
+    weapon:inMatch?remote?.pendingLoadout?.weapon??player.weapon.id:prefs.weapon,
+    sub:inMatch?remote?.pendingLoadout?.sub??player.subId:prefs.sub,
+    teamSize:prefs.teamSize
+  };
+  const kind=inMatch?(dialogKind==='pause'?'pause-loadout':'match-loadout'):'loadout';
+  const content=document.createElement('div');
+  const teamOptions=document.createElement('div');
+  teamOptions.className='team-options';
+  const weapons=document.createElement('div');
+  weapons.className='weapon-options';
+  const description=document.createElement('p');
+  description.className='super-description';
+  const subOptions=document.createElement('div');
+  subOptions.className='weapon-options sub-options';
+  function refresh() {
+    for (const option of teamOptions.children) option.setAttribute('aria-pressed',String(Number(option.dataset.size)===draft.teamSize));
+    for (const option of weapons.children) option.setAttribute('aria-pressed',String(option.dataset.weapon===draft.weapon));
+    for (const option of subOptions.children) option.setAttribute('aria-pressed',String(option.dataset.sub===draft.sub));
+    const special=SUPERS[weaponById(draft.weapon).special];
+    description.textContent=special.name+'　'+special.detail;
+  }
+  if (!inMatch) for (const size of [4,8]) {
+    const option=button(size+'対'+size,'option',()=>{draft.teamSize=size;refresh();});
+    option.dataset.size=String(size);
+    teamOptions.append(option);
+  }
+  for (const weapon of WEAPONS) {
+    const option=button('','weapon-card',()=>{draft.weapon=weapon.id;refresh();});
+    option.dataset.weapon=weapon.id;
+    const name=document.createElement('b'), role=document.createElement('span'), detail=document.createElement('small');
+    name.textContent=weapon.name;
+    role.textContent=weapon.role;
+    detail.textContent=weapon.detail;
+    option.append(name,role,detail);
+    weapons.append(option);
+  }
+  for (const sub of SUBWEAPONS) {
+    const option=button('','weapon-card',()=>{draft.sub=sub.id;refresh();});
+    option.dataset.sub=sub.id;
+    const name=document.createElement('b'), cost=document.createElement('span'), detail=document.createElement('small');
+    name.textContent=sub.name;
+    cost.textContent=sub.role+' · '+sub.cooldown+'秒';
+    detail.textContent=sub.detail;
+    option.append(name,cost,detail);
+    subOptions.append(option);
+  }
+  const heading=document.createElement('h3');
+  heading.className='loadout-heading';
+  heading.textContent='サブウェポンを1つ選択';
+  if (!inMatch) content.append(teamOptions);
+  content.append(weapons,description,heading,subOptions);
+  refresh();
+  showDialog(kind,inMatch?'プレイヤーの装備を変更':'プレイヤーの武器と対戦人数',content,[
+    button(inMatch?'装備して対戦に戻る':'この装備を選ぶ','primary',()=>{
+      Object.assign(prefs,draft);
+      savePrefs();
+      if (inMatch) {
+        if (remote) remote.equip(draft.weapon,draft.sub);
+        else battle.equipPlayer(draft.weapon,draft.sub);
+        updateHud();
+        resumeBattle();
+      } else closeLoadout();
+    }),
+    button('キャンセル','secondary',closeLoadout)
+  ]);
+}
+
+function resumeBattle() {
+  hideDialog();
+  arena.focus({preventScroll:true});
+  if (battle.player) requestPointer();
+}
+
+function closeLoadout() {
+  if (dialogKind==='pause-loadout') pause();
+  else if (dialogKind==='match-loadout') resumeBattle();
+  else {
+    hideDialog();
+    $('loadout').focus({preventScroll:true});
+  }
+}
+
+function pause() {
+  if (state!=='match' || battle.finished) return;
+  if (dialogKind==='pause') {
+    resumeBattle();
+    return;
+  }
+  const info=settings();
+  const actions=[button('対戦に戻る','primary',pause)];
+  if (battle.player) actions.push(button('武器を変更','secondary',()=>loadout(true)));
+  if (!embeddedApp && !fullscreenElement()) actions.push(button('全画面','secondary',()=>fullScreen(false,true)));
+  actions.push(button('タイトルへ','secondary',showTitle));
+  showDialog('pause','一時停止',info,actions);
+}
+
+function finish() {
+  state='result';
+  if (remote) forgetRoom(remote.ticket,battle.mode);
+  const {scores,title}=inkResult(paint);
+  drawMap();
+  const content=document.createElement('div');
+  content.innerHTML='<div class="result-scores"><div>CYAN<b>'+scores[0]+'</b></div><div>AMBER<b>'+scores[1]+'</b></div></div>';
+  if (battle.player) {
+    const p=battle.player, pText=document.createElement('p');
+    const area=p.painted*paint.boundX*2/paint.w*paint.boundZ*2/paint.h;
+    pText.textContent='あなたの記録　塗り '+Math.round(area)+' m²　撃破 '+p.kills+'　ダウン '+p.downs;
+    content.append(pText);
+  }
+  showDialog('result',title,content,[
+    button('もう一戦','primary',()=>start(battle.mode,'new')),
+    button('タイトルへ','secondary',showTitle)
+  ]);
+}
+
+function resetSquads() {
+  for (const id of ['cyan-squad','orange-squad']) $(id).replaceChildren();
+  $('floaters').replaceChildren();
+  tags.length=0;
+  for (const actor of battle.actors) {
+    const dot=document.createElement('span');
+    dot.className='squad-dot'+(actor.isPlayer?' you':'');
+    dot.title=actor.name;
+    (actor.team===0?$('cyan-squad'):$('orange-squad')).append(dot);
+    const label=document.createElement('span');
+    label.className=actor.team===1?'enemy':'';
+    label.textContent=actor.name;
+    label.hidden=true;
+    $('floaters').append(label);
+    tags.push({actor,dot,label});
+  }
+}
+
+function setCompute(text) {
+  const badge=$('compute-state');
+  if (badge.textContent!==text) badge.textContent=text;
+}
+
+function setPaint(next) {
+  if (paint===next) return;
+  paint=next;
+  renderer.configureWorld?.(world,paint);
+  mapSetup();
+}
+
+function enterAccess(mode,note='') {
+  const content=document.createElement('div');
+  content.className='access-panel';
+  const label=document.createElement('label'), field=document.createElement('input');
+  label.textContent='Cloudflare 対戦接続キー';
+  field.type='password';
+  field.autocomplete='off';
+  field.maxLength=160;
+  const hint=document.createElement('p');
+  hint.textContent=note || '設定した接続キーを入力して、サーバーで対戦を開始します。';
+  const enter=()=>{
+    if (!field.value) {field.focus();return;}
+    accessCode=field.value;
+    field.value='';
+    start(mode,'new');
+  };
+  field.addEventListener('keydown',event=>{if (event.key==='Enter') enter();});
+  label.append(field);
+  content.append(hint,label);
+  showDialog('access','サーバーに接続',content,[button('接続','primary',enter),button('戻る','secondary',hideDialog)]);
+  field.focus();
+}
+
+function syncTravel(actor,previous,respawned) {
+  if (respawned) ({yaw,pitch}={yaw:actor.yaw,pitch:REST_PITCH});
+  if (respawned || isCabin(previous)!==isCabin(actor.x)) viewActor=null;
+}
+
+async function start(mode,request='choose') {
+  if (!renderer || connecting) return;
+  const token={client:null,canceled:false,controller:new AbortController()};
+  connecting=token;
+  const p=document.createElement('p');
+  try {
+    if (usingTouch) fullScreen();
+    initAudio();
+    cloud=await (cloudCheck ??= detectCloud(cloudRequired));
+    if (token.canceled) return;
+    if (!cloud || !cloud.ready) cloudCheck=null;
+    setCompute(cloud?(cloud.ready?'CLOUDFLARE · サーバー演算':'CLOUDFLARE · 設定待ち'):'LOCAL · 端末内演算');
+    if (!cloud) {
+      remote?.close();
+      remote=null;
+      setPaint(localPaint);
+      mount(mode,new Battle(world,paint,mode,{sound,finish,spawn:actor=>{
+        yaw=actor.yaw;
+        pitch=REST_PITCH;
+        viewActor=null;
+      }},{teamSize:prefs.teamSize,weapon:prefs.weapon,sub:prefs.sub}));
+      return;
+    }
+    if (!cloud.ready) {
+      p.textContent=cloud.unreachable?'対戦サーバーに応答がありません。接続を確認してから再試行してください。':
+        cloud.outdated?'ゲームの更新後にページを再読み込みしてください。':'Workerで GAME_ACCESS_CODE を設定すると開始できます。';
+      showDialog('server',cloud.unreachable?'対戦サーバーに接続できません':'Cloudflareの設定待ち',p,[button('閉じる','primary',hideDialog)]);
+      return;
+    }
+    const prior=savedRoom(mode);
+    if (request==='choose' && prior) {
+      if (remote && !remote.closed && battle?.mode===mode) return;
+      p.textContent='このタブで中断した対戦を再開できます。';
+      showDialog('server','対戦を再開',p,[button('続きから','primary',()=>start(mode,'resume')),
+        button('新しく始める','secondary',()=>start(mode,'new')),button('戻る','secondary',hideDialog)]);
+      return;
+    }
+    const resume=request==='resume'?prior:null;
+    if (!resume && !accessCode) {enterAccess(mode);return;}
+    p.textContent=resume?'保存した対戦へ接続しています。':'対戦ルームとインク場を準備しています。';
+    const cancel=()=>{
+      token.canceled=true;
+      token.controller.abort();
+      token.client?.close();
+      if (connecting===token) {
+        connecting=null;
+        hideDialog();
+      }
+    };
+    showDialog('server','サーバーに接続中',p,[button('戻る','secondary',cancel)]);
+    const ticket=resume ?? await createCloudRoom({mode,teamSize:prefs.teamSize,weapon:prefs.weapon,sub:prefs.sub},accessCode,token.controller);
+    if (token.canceled) return;
+    const client=token.client=new RemoteMatch(ticket,world,{sound,onTravel:syncTravel,status:(state,note)=>{
+      setCompute(state==='connected'?'CLOUDFLARE · 接続中':state==='reconnecting'?'CLOUDFLARE · 再接続中':'CLOUDFLARE · 接続切れ');
+      $('network-note').hidden=state==='connected';
+      $('network-note').textContent=state==='reconnecting'?'サーバーに再接続しています':note ?? '';
+      if (state==='error' && remote===client && battle) {
+        const text=document.createElement('p');
+        text.textContent=note;
+        showDialog('server','サーバーとの接続が終了',text,[button('タイトルへ','primary',showTitle)]);
+      }
+    }});
+    const scene=await client.ready;
+    if (token.canceled) {client.close();return;}
+    remote?.close();
+    remote=client;
+    if (!scene.finished) rememberRoom(ticket,mode);
+    else forgetRoom(ticket,mode);
+    setPaint(client.paint);
+    mount(mode,scene,!!resume);
+  } catch (error) {
+    if (token.canceled) return;
+    if (error.invalidAccess) {accessCode='';enterAccess(mode,error.message);}
+    else {
+      p.textContent=error.message;
+      showDialog('server','接続できませんでした',p,[button('閉じる','primary',hideDialog)]);
+    }
+  } finally {
+    if (connecting===token) connecting=null;
+  }
+}
+
+function mount(mode,scene,resumed=false) {
+  hideDialog();
+  clearControls();
+  battle=scene;
+  yaw=battle.player?.yaw ?? Math.PI/2;
+  pitch=resumed && Number.isFinite(battle.player?.pitch)?battle.player.pitch:REST_PITCH;
+  watchYaw=battle.cameraActor().yaw;
+  viewActor=null;
+  state='match';
+  mapLevel='auto';
+  watchAerial=true;
+  focus=null;
+  lastMessage='';
+  title.hidden=true;
+  hud.hidden=false;
+  game.classList.add('in-battle');
+  game.classList.toggle('spectating',mode==='watch');
+  updateWatchControls();
+  $('player-meter').hidden=mode==='watch';
+  $('spectator-label').hidden=mode!=='watch';
+  $('combat-tools').hidden=mode==='watch';
+  $('change-loadout').hidden=!battle.player;
+  $('transit-action').hidden=true;
+  $('reticle').hidden=mode==='watch';
+  $('stairs-note').hidden=true;
+  const versus=battle.teamSize+' VS '+battle.teamSize;
+  $('hud-mode').textContent=versus+(battle.timeless?' / TIMELESS':mode==='watch'?' / NPC戦':' / ナワバリ戦');
+  $('clock-label').textContent=battle.timeless?'TIMELESS':'残り時間';
+  $('squads').classList.toggle('expanded',battle.teamSize>4);
+  resetSquads();
+  updateOrientation();
+  updateHud();
+  drawMap();
+  if (!rotationGate) {
+    arena.focus({preventScroll:true});
+    if (battle.player) requestPointer();
+  }
+}
+
+function titlePaint() {
+  paint.reset();
+  const rng=randomGenerator(20220828);
+  const pools=[[-16.5,1.5,0],[-10.5,-1.0,0],[-4.9,4.2,0],[-20.5,-6.2,0],[8.8,-5.9,1],[12.8,2.1,1],[2.7,2.9,1],[17,7.8,1]];
+  for (const [x,z,t] of pools) for (let j=0;j<11;j++) {
+    const px=x+(rng()-.5)*7.0,pz=z+(rng()-.5)*4.9;
+    paint.stamp(px,pz,.42+rng()*1.33,t,world.floor(px,pz).layer,rng()*6.28);
+  }
+  demoActors=[{x:-15.6,z:-.3,yaw:1.43,team:0},{x:-6.0,z:1.53,yaw:1.75,team:0},
+    {x:10.0,z:-4.1,yaw:-1.58,team:1},{x:19.1,z:7.33,yaw:-1.42,team:1}]
+    .map((a,i)=>({...a,y:world.floor(a.x,a.z).y,index:i,steps:i*.54,vx:0,vz:0,damageAge:99,tank:92,pitch:-.07,recoil:0}));
+}
+
+function showTitle() {
+  remote?.close();
+  remote=null;
+  $('network-note').hidden=true;
+  setPaint(localPaint);
+  hideDialog();
+  clearControls();
+  releasePointer();
+  battle=null;
+  state='title';
+  title.hidden=false;
+  hud.hidden=true;
+  game.classList.remove('in-battle','spectating','in-transit');
+  $('floaters').replaceChildren();
+  tags.length=0;
+  focus=null;
+  $('focus-lock').hidden=true;
+  titlePaint();
+  updateOrientation();
+  $('start').focus({preventScroll:true});
+}
+
+function mapSetup() {
+  const width=mini.width,height=mini.height;
+  mapImage=miniCtx.createImageData(width,height);
+  for (const [level,zone] of ZONES.entries()) {
+    const indices=new Int32Array(width*height).fill(-1);
+    const colors=new Uint8Array(width*height*3);
+    const [boundX,boundZ]=zone.bounds;
+    for (let iz=0;iz<height;iz++) for (let ix=0;ix<width;ix++) {
+      const i=iz*width+ix;
+      const x=((ix+.5)/width*2-1)*boundX+zone.x,z=((iz+.5)/height*2-1)*boundZ;
+      const onTrack=level===0 && Math.abs(x)<RAIL.edge && Math.abs(z-RAIL.z)<RAIL.halfWidth;
+      const layer=onTrack?TRACK_LAYER:world.floor(x,z).layer, index=paint.index(x,z,layer);
+      const allowed=paint.mask[index];
+      if (allowed) indices[i]=index;
+      colors.set(allowed?(layer===1 || layer===3 || onTrack || level>=2?[97,117,116]:[62,82,87]):[24,41,47],i*3);
+    }
+    mapLayers[level]={indices,colors,boundX,boundZ};
+  }
+}
+
+function drawMap() {
+  if (!battle || !mapImage) return;
+  const view=battle.cameraActor(), level=mapLevel==='auto'?(watchingAerial()?0:zoneOf(view.x)):Number(mapLevel);
+  const cabin=level>=2?battle.cabinTrain(view.x):null;
+  const {indices,colors,boundX,boundZ}=mapLayers[level];
+  const {data}=mapImage;
+  for (let i=0;i<indices.length;i++) {
+    const owner=indices[i]===-1?0:paint.owner[indices[i]];
+    const c=owner===1?[40,209,190]:owner===2?[244,118,68]:null;
+    for (let j=0;j<3;j++) data[i*4+j]=c?c[j]:colors[i*3+j];
+    data[i*4+3]=255;
+  }
+  miniCtx.putImageData(mapImage,0,0);
+  const outer=level===0 && zoneOf(view.x)===0 && (Math.abs(view.x)>boundX || Math.abs(view.z)>boundZ);
+  $('map-floor').textContent=cabin?(cabin.connection?'直通トンネル':cabin.metro?'地下側 車内':'高架側 車内'):
+    outer?'外周 '+Math.min(CITY_RADIUS,Math.round(Math.hypot(view.x,view.z)))+' m':
+    mapLevel==='auto' && view.ride && !watchingAerial()?'高架線':ZONES[level].name;
+  $('map-cyan').textContent=paint.percent(0,level).toFixed(1);
+  $('map-amber').textContent=paint.percent(1,level).toFixed(1);
+  for (const tab of mapTabs) tab.setAttribute('aria-pressed',String(tab.dataset.mapLevel===mapLevel));
+  const px=x=>(x/boundX+1)*.5*mini.width;
+  const pz=z=>(z/boundZ+1)*.5*mini.height;
+  if (level<2) {
+    if (level===0) {
+      miniCtx.strokeStyle='#94b9ad';
+      miniCtx.lineWidth=1;
+      miniCtx.beginPath();miniCtx.moveTo(px(10.9),pz(-35));miniCtx.lineTo(px(10.9),pz(35));miniCtx.stroke();
+    }
+    for (const stair of STAIRS) {
+      const l=stairPoint(stair,level);
+      miniCtx.fillStyle='#f2d99d';
+      miniCtx.fillRect(px(localX(l.x))-2.5,pz(l.z)-2.5,5,5);
+    }
+    const line=level===0?RAIL:METRO;
+    miniCtx.strokeStyle=level===0?'#f4d08c':'#dba6be';
+    miniCtx.lineWidth=1.3;
+    miniCtx.beginPath();
+    miniCtx.moveTo(px(-line.x),pz(line.z));
+    miniCtx.lineTo(px(line.x),pz(line.z));
+    miniCtx.stroke();
+    miniCtx.font='bold 9px sans-serif';
+    miniCtx.textAlign='center';
+    for (const station of STATIONS.filter(stop=>stop.level===level)) {
+      const x=px(localX(station.x)),z=pz(station.z);
+      miniCtx.fillStyle='#f4e9c4';
+      miniCtx.beginPath();miniCtx.arc(x,z,5,0,Math.PI*2);miniCtx.fill();
+      miniCtx.fillStyle='#153c35';miniCtx.fillText(String(station.number),x,z+3);
+    }
+    for (const rail of [battle.transit,battle.metro]) if (rail.visibleIn(level)) {
+      const train=rail.train;
+      miniCtx.fillStyle=['derailed','recover','return'].includes(train.phase)?'#fb9a75':'#fff0c6';
+      miniCtx.fillRect(px(train.x)-5,pz(line.z+train.lateral)-1.8,10,3.6);
+    }
+    if (level===0 && battle.boss.active) {
+      miniCtx.fillStyle='#d091e8';
+      miniCtx.beginPath();
+      miniCtx.arc(px(battle.boss.x),pz(battle.boss.z),4.5,0,Math.PI*2);
+      miniCtx.fill();
+    }
+  } else {
+    const open=cabin.train.stop && cabin.train.doorOpen>.70 && !cabin.failed();
+    for (const side of [-1,1]) {
+      miniCtx.fillStyle=side===cabin.line.doorSide && open?'#e5c180':'#78908b';
+      for (const door of TRAIN_DOORS) miniCtx.fillRect(px(door)-6,side>0?mini.height-6:2,12,4);
+    }
+  }
+  for (const a of battle.actors) {
+    if (a.down>0 || zoneOf(a.x)!==level || (battle.player && a.team!==0)) continue;
+    const x=clamp(px(localX(a.x)),6,mini.width-6),z=clamp(pz(a.z),6,mini.height-6);
+    miniCtx.fillStyle=a.isPlayer?'#ffffff':a.team===0?'#8ffff0':'#ffe4c7';
+    miniCtx.strokeStyle='#17323a';
+    miniCtx.lineWidth=1.5;
+    miniCtx.beginPath();
+    miniCtx.arc(x,z,a.isPlayer?4.4:2.8,0,Math.PI*2);
+    miniCtx.stroke();
+    miniCtx.fill();
+    if (a.isPlayer) {
+      const d=forward(yaw);
+      miniCtx.beginPath();
+      miniCtx.moveTo(x+d[0]*9,z+d[2]*9);
+      miniCtx.lineTo(x-d[2]*3,z+d[0]*3);
+      miniCtx.lineTo(x+d[2]*3,z-d[0]*3);
+      miniCtx.fill();
+    }
+  }
+}
+
+function message(big,small) {
+  const key=big+'|'+small;
+  if (lastMessage===key) return;
+  lastMessage=key;
+  const section=$('battle-message');
+  if (!big) {
+    section.replaceChildren();
+    return;
+  }
+  const b=document.createElement('b'), line=document.createElement('small');
+  b.textContent=big;
+  line.textContent=small;
+  section.replaceChildren(b,line);
+}
+
+function updateWeaponHud(weapon) {
+  const label=$('hud-weapon');
+  if (label.textContent===weapon.name) return;
+  label.textContent=weapon.name;
+  $('charge-track').hidden=!weapon.charge;
+  $('fire-caption').textContent=weapon.roller?'振る・転がす':weapon.charge?'溜め撃ち':'撃つ';
+  $('reticle').classList.toggle('wide',weapon.id==='fan');
+  $('reticle').classList.toggle('charged',!!weapon.charge);
+}
+
+function updateAbilities(p) {
+  const active=Math.ceil(p.superUntil-battle.clock);
+  const special=SUPERS[(active>0?p.activeSpecial:null)??p.weapon.special]??SUPERS[p.weapon.special];
+  const superButton=$('super-action'), droneButton=$('drone-action');
+  const superReady=battle.abilities.canActivate(p);
+  const cramped=p.weapon.special==='giant' && p.superCharge>=100 && !p.ride && !p.lift && p.down<=0 && !superReady;
+  $('super-name').textContent=special.name;
+  $('super-state').textContent=active>0?'発動 '+active+'秒':superReady?'発動可能':cramped?'広い場所で発動':Math.floor(p.superCharge)+'%';
+  $('super-bar').style.width=(active>0?Math.min(100,active/special.seconds*100):p.superCharge)+'%';
+  superButton.disabled=!superReady;
+  superButton.classList.toggle('ready',superReady);
+  const wait=Math.max(0,Math.ceil(p.droneReady-battle.clock));
+  $('drone-state').textContent=p.drone?'飛行中':wait>0?wait+'秒':'準備OK';
+  droneButton.disabled=!!p.drone || wait>0 || p.down>0 || !!p.ride || !!p.lift;
+  droneButton.classList.toggle('ready',!droneButton.disabled);
+  const sub=subweaponById(p.subId), subButton=$('sub-action');
+  const subWait=Math.max(0,Math.ceil((p.subReady??0)-battle.clock));
+  $('sub-name').textContent=sub.name;
+  $('sub-state').textContent=subWait>0?subWait+'秒':p.tank<sub.cost?'INK不足':
+    p.swimming?'潜水解除で使用':p.airborne && sub.id!=='throw'?'着地して使う':'準備OK';
+  subButton.disabled=!battle.subweapons.canUse(p);
+  subButton.classList.toggle('ready',!subButton.disabled);
+  const cabin=isCabin(p.x);
+  const stairs=stairLane(p.x,p.z,1.3);
+  $('stairs-note').hidden=!stairs || p.down>0;
+  if (stairs) $('stairs-note').textContent=stairs.level===0?'階段を歩いて B1 へ':'階段を歩いて地上へ';
+  const option=p.down<=0?battle.transportOption(p):null;
+  $('transit-action').hidden=!option;
+  $('transit-action').disabled=option?.kind==='busy';
+  $('transit-label').textContent=option?.label ?? '';
+  $('transit-action').setAttribute('aria-label',option?.label ?? '列車に乗る・降りる');
+  const inTransit=!!p.ride || !!p.lift;
+  $('reticle').hidden=inTransit;
+  game.classList.toggle('in-transit',inTransit);
+}
+
+function updateHud() {
+  if (!battle) return;
+  const time=Math.ceil(battle.left);
+  const format=s=>Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
+  $('time').textContent=battle.timeless?'∞':format(time);
+  $('time').classList.toggle('urgent',time<=30);
+  const boss=battle.boss, raiders=battle.raiders, view=battle.cameraActor(), level=watchingAerial()?0:zoneOf(view.x);
+  $('boss-hud').hidden=!boss.active;
+  const stationService=!watchingAerial() && level<2?battle.transportService(view):null;
+  const transit=level>=2?battle.cabinTrain(view.x):stationService?.rail ??
+    [battle.transit,battle.metro].find(rail=>rail.section===level && (rail.failed() || rail.alertUntil>rail.time)) ??
+    (level===0?battle.transit:battle.metro), trainAlert=$('train-alert');
+  const trainRecovering=transit.train.phase==='recover';
+  const trainReturning=transit.train.phase==='return';
+  trainAlert.hidden=!trainRecovering && !trainReturning && transit.alertUntil<=transit.time;
+  if (!trainAlert.hidden) {
+    const note=trainRecovering?transit.line.name+' · 復旧まで '+Math.ceil(transit.train.wait)+'秒':
+      trainReturning?transit.line.name+' · 復旧運転中':transit.alert;
+    if (trainAlert.textContent!==note) trainAlert.textContent=note;
+  }
+  const raidStatus=$('raid-status');
+  raidStatus.hidden=!battle.timeless;
+  if (battle.timeless) {
+    const active=raiders.live().length;
+    const note=active?'襲撃 '+raiders.wave+'　ゼイアン残り '+active+' / 4':
+      '次の襲撃まで '+format(Math.max(0,Math.ceil(raiders.next-battle.elapsed)));
+    if (raidStatus.textContent!==note) raidStatus.textContent=note;
+  }
+  const metroStatus=$('metro-status');
+  metroStatus.hidden=level<2 && !stationService;
+  if (!metroStatus.hidden) {
+    const health=clamp(transit.integrity/(transit.line.integrity??720),0,1);
+    $('train-line-name').textContent=transit.line.name;
+    $('metro-hp').textContent='車体 '+Math.ceil(health*100)+'%';
+    $('metro-hp-bar').style.transform='scaleX('+health+')';
+  }
+  const route=$('train-route');
+  route.hidden=level<2 && !stationService;
+  if (!route.hidden) {
+    const info=transit.stopInfo(), prefix=info.docked?'停車 ':transit.connection?'直通 · ':'次は ';
+    const status=info.status ?? prefix+info.station.name+' · '+(info.docked?'発車 ':'約')+info.seconds+'秒';
+    if ($('train-next').textContent!==status) $('train-next').textContent=status;
+    for (const node of $('train-stops').children) {
+      const selected=!info.status && node.dataset.stop===info.station.id;
+      node.classList.toggle('current',selected && info.docked);
+      node.classList.toggle('next',selected && !info.docked);
+    }
+  }
+  if (boss.active) {
+    $('boss-phase').textContent='第'+boss.phase+'段階';
+    const ratio=boss.hp/boss.maxHp;
+    $('boss-pct').textContent=Math.ceil(ratio*100)+'%';
+    $('boss-bar').style.transform='scaleX('+ratio+')';
+  }
+  const hazard=battle.timeless?raiders:boss, alert=$('boss-alert');
+  alert.hidden=hazard.alertUntil<=battle.clock;
+  if (!alert.hidden && alert.textContent!==hazard.alert) alert.textContent=hazard.alert;
+  for (let i=0;i<2;i++) {
+    const value=paint.percent(i);
+    scoreNodes[i].firstChild.nodeValue=value.toFixed(1);
+    teamBars[i].style.width=value+'%';
+  }
+  for (const {actor,dot} of tags) dot.classList.toggle('down',actor.down>0);
+  const p=battle.player;
+  if (p) {
+    const readout=inkReadout(p),ratio=readout.ratio,giga=p.tankMax>BASE_TANK;
+    $('player-meter').setAttribute('aria-label',readout.empty?'インク不足':readout.low?'インク残りわずか':'インクと体力のゲージ');
+    $('player-meter').classList.toggle('ink-low',readout.low);
+    $('player-meter').classList.toggle('ink-empty',readout.empty);
+    $('ink-next-shot').style.bottom=readout.after*100+'%';
+    $('ink-next-shot').style.height=Math.min(ratio,readout.cost)*100+'%';
+    $('player-meter').classList.toggle('giga',giga);
+    $('ink-bar').style.transform='scaleY('+ratio+')';
+    $('hp-bar').style.transform='scaleX('+p.hp/p.maxHp+')';
+    updateWeaponHud(p.weapon);
+    updateAbilities(p);
+    const floor=world.support(p.x,p.y,p.z);
+    const own=p.y<=floor.y+.12 && battle.surfaceInk(p,floor)===p.team+1;
+    $('touch-swim').classList.toggle('available',own && p.down<=0 && !p.ride && !p.lift);
+    $('charge-bar').style.transform='scaleX('+p.charge+')';
+    $('reticle').style.setProperty('--charge',p.charge);
+    $('meter-tip').textContent=p.climbing?'インク壁を登っています':p.swimming?(p.inkSwimming?'自インク · 高速回復':'イカ状態 · ゆっくり回復'):
+      p.inkPenalty?'敵インク · 移動と回復低下':p.charge>.03?(p.charge>=1?'最大チャージ · 離して発射':'チャージ中'):
+      readout.empty?'インク不足':p.rolling?'ローラーで塗装中':p.weapon.roller?'短押しで振る · 長押し＋前進で転がす':own?'自インクで高速回復':'未塗装の床でも潜水できます';
+  } else {
+    $('viewing').textContent=watchingAerial()?'地上の全景':view.name+' · '+(view.intent || ZONES[level].name);
+  }
+  if (battle.countdown>0) message(String(Math.ceil(battle.countdown)),battle.timeless?'タイムレスバトル':'ナワバリ戦');
+  else if (battle.clock<3.77) message('GO!','街区を塗り広げろ');
+  else if (p?.down>0) message(String(Math.ceil(p.down)),'復帰まで');
+  else message('','');
+  const log=battle.events.map(event=>{
+    const entry=document.createElement('span');
+    entry.className='feed-entry'+(event.team===1?' amber':event.team===-1?' neutral':'');
+    entry.textContent=event.label;
+    return entry;
+  });
+  $('feed').replaceChildren(...log);
+}
+
+function cameraFor(dt) {
+  if (!battle) {
+    const t=activeClock, drift=Math.sin(t*.092)*1.45;
+    const mobile=arena.clientWidth<arena.clientHeight;
+    return {eye:[-33.4+drift,3.66+Math.sin(t*.14)*.23,13.84+Math.sin(t*.13)*1.65],
+      target:mobile?[4.4,5.7,-12.4]:[3.85,5.36,-13.4]};
+  }
+  if (watchingAerial()) return aerialView(arena.clientWidth/Math.max(1,arena.clientHeight));
+  const actor=battle.cameraActor(), zone=zoneOf(actor.x);
+  if (viewActor!==actor || viewZone!==zone) {
+    viewActor=actor;
+    viewZone=zone;
+    viewHeight=actor.y;
+    cameraReach=1;
+    if (!battle.player) watchYaw=actor.yaw;
+  }
+  if (!battle.player) {
+    const change=Math.atan2(Math.sin(actor.yaw-watchYaw),Math.cos(actor.yaw-watchYaw));
+    watchYaw+=change*(1-Math.exp(-dt*4.1));
+  }
+  viewHeight=mix(viewHeight,actor.y,1-Math.exp(-dt*16));
+  const authoritative=!!(battle.player && remote);
+  const pose=crewView(battle,actor,{
+    yaw:battle.player?yaw:watchYaw,
+    pitch:battle.player?pitch:clamp(actor.pitch-.075,-.49,.24),
+    height:authoritative?actor.y:clamp(viewHeight,actor.y-.24,actor.y+.24),
+    reach:authoritative?1:mix(cameraReach,1,1-Math.exp(-dt*9.4)),
+    watch:!battle.player
+  });
+  cameraReach=pose.reach ?? 1;
+  return pose;
+}
+
+function watchingAerial() {
+  return battle?.mode==='watch' && watchAerial;
+}
+
+function updateWatchControls() {
+  const spectating=battle?.mode==='watch', toggle=$('watch-view');
+  toggle.hidden=!spectating;
+  toggle.textContent=watchAerial?'NPCを追う':'全景に戻る';
+  $('cycle').hidden=!spectating || watchAerial;
+}
+
+function drawFocus(now) {
+  const marker=$('focus-lock'), reticle=$('reticle'), p=battle?.player;
+  if (!canControl() || p.swimming || p.ride || p.lift || battle.countdown>0) {
+    focus=null;
+    marker.hidden=true;
+    reticle.classList.remove('enemy');
+    return;
+  }
+  const snapshot=remote?.targetLock;
+  let hit, contact, direct;
+  if (remote) {
+    if (snapshot && Math.cos(yaw-snapshot.yaw)>.981 && Math.abs(pitch-snapshot.pitch)<.16) {
+      const target=snapshot.type==='boss'?battle.boss:snapshot.type==='raider'?
+        battle.raiders.members.find(actor=>actor.index===snapshot.index):battle.actors[snapshot.index];
+      if (target) {
+        hit={actor:target,shift:snapshot.shift};
+        contact=snapshot.offset;
+        direct=snapshot.direct;
+      }
+    }
+    if (!hit) focus=null;
+  } else {
+    hit=battle.focusTarget(camera.eye,unit(sub(camera.target,camera.eye)),p.team,p.weapon.range*p.rangeFactor+4);
+    direct=!!hit;
+  }
+  if (hit) {
+    const shift=hit.shift??0;
+    if (focus?.actor!==hit.actor || focus.shift!==shift || now>focus.until) {
+      focus={actor:hit.actor,shift,born:now,lastFrame:now,box:null};
+    }
+    focus.until=now+285;
+    focus.contact=contact??[hit.point[0]+shift-hit.actor.x,hit.point[1]-hit.actor.y,hit.point[2]-hit.actor.z];
+  }
+  reticle.classList.toggle('enemy',!!direct);
+  const target=focus?.actor;
+  if (!target || now>focus.until || target.down>0 || target.shield>0 || target.ride || target.lift ||
+      (target.isBoss || target.isRaider) && !target.active ||
+      target.isRaider && !battle.raiders.members.includes(target) ||
+      !sameLevel(target.x-focus.shift,camera.eye[0])) {
+    marker.hidden=true;
+    return;
+  }
+  const x=target.x-focus.shift, y=target.y, z=target.z;
+  if (!hit && !remote) {
+    const [dx,dy,dz]=focus.contact;
+    const contact=[x+dx,y+dy,z+dz];
+    if (battle.traceShot(camera.eye,contact,true)?.t<.986 || battle.subweapons.block(camera.eye,contact,p.team)?.t<.986) {
+      focus=null;
+      marker.hidden=true;
+      return;
+    }
+  }
+  const height=target.isBoss?BOSS_BODY_HEIGHT:target.giant?2.76:target.climbing?1.04:target.swimming?.47:1.97-(target.brace??0)*.36;
+  const top=renderer.project([x,y+height,z]), bottom=renderer.project([x,y+.06,z]);
+  if (!top || !bottom) {
+    marker.hidden=true;
+    return;
+  }
+  const u=(top[0]+bottom[0])*.5, v=(top[1]+bottom[1])*.5;
+  if (u<.03 || u>.97 || v<.06 || v>.94) {
+    marker.hidden=true;
+    return;
+  }
+  const h=clamp(Math.abs(bottom[1]-top[1])*arena.clientHeight+17,33,arena.clientHeight*.70);
+  const w=h*(target.climbing?.72:target.swimming?1.46:target.giant || target.isBoss?.93:.75);
+  const frame=clamp(now-focus.lastFrame,0,72), box=[u,v,w,h];
+  const blend=1-Math.exp(-frame*.071);
+  focus.box=focus.box && Math.hypot(u-focus.box[0],v-focus.box[1])<.14?
+    focus.box.map((value,i)=>value+(box[i]-value)*blend):box;
+  focus.lastFrame=now;
+  const [bx,by,bw,bh]=focus.box;
+  const age=Math.max(0,now-focus.born);
+  const arrival=clamp(age/210,0,1), after=clamp((age-52)/360,0,1);
+  marker.style.left=bx*100+'%';
+  marker.style.top=by*100+'%';
+  marker.style.width=bw+'px';
+  marker.style.height=bh+'px';
+  marker.style.setProperty('--lock-zoom',1+.51*(1-arrival)**3);
+  marker.style.setProperty('--lock-halo',.78+after*.64);
+  marker.style.setProperty('--lock-wave',.73*Math.sin(Math.PI*after));
+  marker.style.setProperty('--lock-glint',arrival<1?.78:.26);
+  marker.style.setProperty('--lock-scan',(11+78*(age/780%1))+'%');
+  marker.style.setProperty('--lock-alpha',direct?1:.68*clamp((focus.until-now)/180,0,1));
+  marker.classList.toggle('tracking',!direct);
+  marker.classList.toggle('boss',!!target.isBoss);
+  marker.hidden=false;
+}
+
+function projectTags() {
+  if (!battle) return;
+  const W=arena.clientWidth,H=arena.clientHeight;
+  for (const {actor,label} of tags) {
+    const cameraActor=battle.cameraActor();
+    const range=Math.hypot(actor.x-cameraActor.x,actor.z-cameraActor.z);
+    if (watchingAerial() || actor===cameraActor || actor.down>0 || actor.swimming || actor.lift || actor.ride || !sameLevel(actor.x,cameraActor.x) || range>25) {
+      label.hidden=true;
+      continue;
+    }
+    const point=[actor.x,actor.y+2.18,actor.z];
+    const projected=renderer.project(point);
+    if (!projected || projected[0]<.015 || projected[0]>.985 || projected[1]<.13 || projected[1]>.94 || battle.traceShot(camera.eye,point,true)) {
+      label.hidden=true;
+      continue;
+    }
+    label.hidden=false;
+    label.style.left=projected[0]*W+'px';
+    label.style.top=projected[1]*H+'px';
+  }
+}
+
+function frame(now) {
+  if (graphicsLost) {
+    prevTime=now;
+    requestAnimationFrame(frame);
+    return;
+  }
+  const quiet=state==='title'?84:dialogKind || rotationGate?110:0;
+  if (document.hidden || (prevTime && now-prevTime<quiet)) {
+    if (document.hidden) prevTime=now;
+    requestAnimationFrame(frame);
+    return;
+  }
+  const dt=prevTime?clamp((now-prevTime)/1000,0,.36):0;
+  prevTime=now;
+  const width=arena.clientWidth, height=arena.clientHeight;
+  if (dialogKind && width===renderedWidth && height===renderedHeight) {
+    requestAnimationFrame(frame);
+    return;
+  }
+  const running=state==='match' && !dialogKind && !rotationGate && !document.hidden;
+  if (!dialogKind && !rotationGate) activeClock+=dt;
+  camera=cameraFor(dt);
+  if (remote && !dialogKind) {
+    remote.input(running?getInput():null,!running);
+    remote.advance(now);
+    camera=cameraFor(0);
+    if (battle.finished && state==='match') finish();
+  } else if (running && dt>0) {
+    const input=getInput();
+    const steps=Math.ceil(dt/(1/58));
+    for (let i=0;i<steps;i++) {
+      const player=battle.player, before=player?.x;
+      battle.update(dt/steps,input,()=>cameraFor(0));
+      if (player && isCabin(before)!==isCabin(player.x)) {
+        syncTravel(player,before,false);
+        input.yaw=player.yaw=yaw;
+        input.pitch=player.pitch=pitch;
+      }
+      input.jump=input.press=input.super=input.drone=input.use=input.sub=false;
+    }
+    camera=cameraFor(0);
+  }
+  const tookDamage=battle?.player?.lastDamageAt;
+  const damageAge=Number.isFinite(tookDamage)?battle.clock+(battle.impactAgeOffset??0)-tookDamage:Infinity;
+  damageFlash.style.opacity=String(Math.pow(clamp(1-damageAge/.49,0,1),1.35));
+  renderer.clearDynamic();
+  if (battle) {
+    const nearCrew=camera.nearCrew?battle.cameraActor():null;
+    battle.draw(renderer,camera.eye[0],camera.eye[2],nearCrew,camera.eye[1],camera.stair);
+  }
+  else {
+    demoTrain.update(activeClock);
+    demoTrain.draw(renderer);
+    demoStage.draw(renderer,camera.eye[0],activeClock);
+    for (const actor of demoActors) drawCrew(renderer,actor,activeClock);
+  }
+  renderer.draw(camera,paint,activeClock);
+  renderedWidth=width;
+  renderedHeight=height;
+  drawFocus(now);
+  if (battle && !rotationGate) {
+    if (now-hudTime>82) {
+      hudTime=now;
+      updateHud();
+      projectTags();
+    }
+    if (now-mapTime>178) {
+      mapTime=now;
+      drawMap();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+function fault(details) {
+  console.error(details);
+  $('loading').hidden=true;
+  title.hidden=true;
+  hud.hidden=true;
+  rotate.hidden=true;
+  const p=document.createElement('p');
+  p.textContent='この環境で3D描画を開始できませんでした。WebGL 2対応のブラウザで開いてください。';
+  showDialog('error','3D描画エラー',p,[button('再読み込み','primary',()=>location.reload())]);
+}
+
+$('start').addEventListener('click',()=>start('play'));
+$('watch').addEventListener('click',()=>start('watch'));
+$('timeless').addEventListener('click',()=>start('timeless'));
+$('pause').addEventListener('click',pause);
+for (const tab of mapTabs) tab.addEventListener('click',()=>{
+  mapLevel=tab.dataset.mapLevel;
+  drawMap();
+});
+$('cycle').addEventListener('click',()=>{
+  if (battle?.mode==='watch' && !watchAerial && !dialogKind) {
+    if (remote) remote.cycle();
+    else battle.cycle();
+    watchYaw=battle.cameraActor().yaw;
+    updateHud();
+  }
+});
+$('watch-view').addEventListener('click',()=>{
+  if (battle?.mode!=='watch' || dialogKind) return;
+  watchAerial=!watchAerial;
+  viewActor=null;
+  updateWatchControls();
+  updateHud();
+  drawMap();
+});
+$('how').addEventListener('click',guide);
+$('loadout').addEventListener('click',()=>loadout());
+$('change-loadout').addEventListener('click',()=>{if (!dialogKind) loadout(true);});
+$('quality').addEventListener('click',()=>{
+  prefs.quality=lightQuality()?'high':'lite';
+  savePrefs();
+});
+for (const [id,action] of [
+  ['super-action',()=>{superQueued=true;}],
+  ['drone-action',()=>{droneQueued=true;}],
+  ['sub-action',()=>{subQueued=true;}],
+  ['transit-action',()=>{useQueued=true;}]
+]) {
+  $(id).addEventListener('click',()=>{
+    if (canControl()) action();
+  });
+}
+$('touch-center').addEventListener('click',()=>{pitch=REST_PITCH;});
+document.addEventListener('visibilitychange',()=>{
+  prevTime=0;
+  if (document.hidden) suspendInput();
+});
+document.addEventListener('pointerdown',event=>{
+  if (event.pointerType==='touch' && !usingTouch) {
+    usingTouch=true;
+    configureTouch();
+  }
+},{capture:true,passive:true});
+$('exit-rotate').addEventListener('click',showTitle);
+$('rotate-fullscreen').addEventListener('click',()=>fullScreen(false,true));
+for (const id of ['fullscreen','hud-fullscreen']) $(id).addEventListener('click',()=>fullScreen(true,true));
+$('sound').addEventListener('click',()=>{
+  mute=!mute;
+  $('sound').setAttribute('aria-pressed',String(!mute));
+  $('sound').querySelector('b').textContent=mute?'音声 OFF':'音声 ON';
+  initAudio();
+  sound('tick');
+});
+portrait.addEventListener('change',updateOrientation);
+document.addEventListener('fullscreenchange',updateOrientation);
+document.addEventListener('webkitfullscreenchange',updateOrientation);
+document.addEventListener('pointerlockchange',()=>{
+  const locked=document.pointerLockElement===arena;
+  if (hadPointerLock && !locked && state==='match' && !dialogKind && !usingTouch) pause();
+  hadPointerLock=locked;
+});
+window.addEventListener('blur',clearControls);
+const blockBrowserAction=event=>event.preventDefault();
+for (const type of ['copy','cut','gesturestart','gesturechange','gestureend']) {
+  document.addEventListener(type,blockBrowserAction,{capture:true,passive:false});
+}
+for (const type of ['selectstart','contextmenu']) {
+  game.addEventListener(type,event=>{
+    if (!event.target.closest?.('input,textarea')) event.preventDefault();
+  },true);
+}
+document.addEventListener('wheel',event=>{
+  if (event.ctrlKey || event.metaKey) event.preventDefault();
+},{capture:true,passive:false});
+document.addEventListener('keydown',event=>{
+  if ((event.ctrlKey || event.metaKey) && (['+','=','-','0'].includes(event.key) ||
+      ['NumpadAdd','NumpadSubtract','Numpad0'].includes(event.code))) {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }
+},true);
+document.addEventListener('keydown',event=>{
+  if (event.code==='Escape') {
+    if (event.repeat) return;
+    if (dialogKind==='guide') hideDialog();
+    else if (['loadout','match-loadout','pause-loadout'].includes(dialogKind)) closeLoadout();
+    else if (state==='match' && (!dialogKind || dialogKind==='pause')) pause();
+    return;
+  }
+  if (state!=='match' || dialogKind || rotationGate) return;
+  if (['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(event.code)) {
+    if (event.target?.closest?.('button,input,select,textarea,a[href],[contenteditable="true"]')) return;
+    event.preventDefault();
+  }
+  keys.add(event.code);
+  if (event.code==='Space' && !event.repeat) jumpQueued=true;
+  if (event.code==='KeyF' && !event.repeat) shotQueued=true;
+  if (event.code==='KeyC' && !event.repeat) $('cycle').click();
+  if (!event.repeat && canControl()) {
+    if (event.code==='KeyQ') superQueued=true;
+    if (event.code==='KeyE') droneQueued=true;
+    if (event.code==='KeyG') subQueued=true;
+    if (event.code==='KeyR') useQueued=true;
+    if (event.code==='KeyB') loadout(true);
+  }
+});
+document.addEventListener('keyup',event=>keys.delete(event.code));
+arena.addEventListener('contextmenu',event=>event.preventDefault());
+arena.addEventListener('pointerdown',event=>{
+  if (!canControl() || event.pointerType==='touch' || event.button!==0) return;
+  desktopFire=shotQueued=true;
+  requestPointer();
+});
+document.addEventListener('pointermove',event=>{
+  if (event.pointerType==='touch') return;
+  if (document.pointerLockElement===arena || (desktopFire && event.target===arena)) aimMove(event.movementX,event.movementY);
+});
+for (const name of ['pointerup','pointercancel','lostpointercapture']) {
+  document.addEventListener(name,event=>{
+    if (event.pointerType!=='touch') desktopFire=false;
+  });
+}
+
+arena.addEventListener('webglcontextlost',event=>{
+  event.preventDefault();
+  if (graphicsLost) return;
+  graphicsLost=true;
+  suspendInput();
+  releasePointer();
+  updateOrientation();
+  $('loading-caption').textContent='3D表示を復旧中';
+  $('loading').hidden=false;
+  graphicsTimeout=setTimeout(()=>{
+    graphicsLost=false;
+    fault(new Error('WebGL context restoration timed out'));
+  },12000);
+});
+
+arena.addEventListener('webglcontextrestored',()=>{
+  if (!graphicsLost || !world) return;
+  clearTimeout(graphicsTimeout);
+  try {
+    renderer=createRenderer();
+    applyQuality();
+    world.rebuildRenderer(renderer,sceneData);
+    renderer.configureWorld?.(world,paint);
+    graphicsLost=false;
+    prevTime=0;
+    viewActor=null;
+    renderedWidth=renderedHeight=0;
+    camera=cameraFor(0);
+    updateOrientation();
+    $('loading').hidden=true;
+    if (battle && !rotationGate && !dialogKind) arena.focus({preventScroll:true});
+  } catch (error) {
+    graphicsLost=false;
+    fault(error);
+  }
+});
+
+async function loadScene() {
+  const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),4500);
+  try {
+    const response=await fetch(`./${SCENE_FILE}`,{cache:'force-cache',signal:controller.signal});
+    if (!response.ok) return null;
+    const scene=await response.json();
+    return scene.version===SCENE_VERSION && scene.parts?.length>10000 && scene.solids?.length && scene.slabs?.length && scene.homes?.length===3 && scene.objects?.length && scene.elevated?.length?scene:null;
+  } catch { return null; }
+  finally { clearTimeout(timer); }
+}
+
+try {
+  paint=localPaint=new Paint();
+  sceneData=await loadScene();
+  renderer=createRenderer();
+  applyQuality();
+  world=new World(renderer,sceneData);
+  demoStage=new StageObjects(world);
+  demoTrain=new Transit(world);
+  paint.setWorld(world);
+  renderer.configureWorld?.(world,paint);
+  mapSetup();
+  titlePaint();
+  savePrefs();
+  configureTouch();
+  camera=cameraFor(0);
+  renderer.draw(camera,paint,0);
+  $('loading').hidden=true;
+  cloudCheck=detectCloud(cloudRequired).then(service=>{
+    setCompute(service?(service.ready?'CLOUDFLARE · サーバー演算':'CLOUDFLARE · 設定待ち'):'LOCAL · 端末内演算');
+    return service;
+  });
+  requestAnimationFrame(frame);
+} catch (error) {
+  fault(error);
+}
