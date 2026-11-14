@@ -76,7 +76,7 @@ function lightQuality() {
 function applyQuality() {
   const light=lightQuality();
   renderer?.setQuality(light);
-  $('quality').querySelector('b').textContent=light?'軽量・影なし':'高画質';
+  $('quality').querySelector('b').textContent=light?'軽量':'高画質';
   $('quality').setAttribute('aria-pressed',String(light));
 }
 
@@ -293,7 +293,7 @@ function settings() {
   const labelGraphics=document.createElement('span');
   labelGraphics.textContent='描画品質';
   const quality=document.createElement('select');
-  for (const [value,name] of [['auto','自動（スマホは軽量）'],['lite','軽量・影なし'],['high','高画質']]) {
+  for (const [value,name] of [['auto','自動（スマホは軽量）'],['lite','軽量（簡易な影・反射なし）'],['high','高画質（全エフェクト）']]) {
     const option=document.createElement('option');
     option.value=value;
     option.textContent=name;
@@ -1347,12 +1347,31 @@ arena.addEventListener('webglcontextrestored',()=>{
   }
 });
 
+async function readProgress(response) {
+  const total=Number(response.headers.get('content-length'))||0, reader=response.body?.getReader?.();
+  if (!reader) return response.json();
+  const caption=$('loading-caption'), base=caption.textContent, chunks=[];
+  let loaded=0;
+  for (;;) {
+    const {done,value}=await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded+=value.length;
+    caption.textContent=base+' '+(total?Math.min(99,Math.floor(loaded/total*100))+'%':(loaded/1048576).toFixed(1)+' MB');
+  }
+  caption.textContent=base;
+  const bytes=new Uint8Array(loaded);
+  let offset=0;
+  for (const chunk of chunks) {bytes.set(chunk,offset);offset+=chunk.length;}
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
 async function loadScene() {
   const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),4500);
   try {
     const response=await fetch(`./${SCENE_FILE}`,{cache:'force-cache',signal:controller.signal});
     if (!response.ok) return null;
-    const scene=await response.json();
+    const scene=await readProgress(response);
     return scene.version===SCENE_VERSION && scene.parts?.length>10000 && scene.solids?.length && scene.slabs?.length && scene.homes?.length===3 && scene.objects?.length && scene.elevated?.length?scene:null;
   } catch { return null; }
   finally { clearTimeout(timer); }

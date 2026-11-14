@@ -2,6 +2,9 @@ import {castShape,makeShape} from './collision.js';
 import {sameLevel,UNDER_X,UNDER_Y,zoneOf} from './layout.js';
 import {add,clamp,scale,sub,TAU} from './render.js';
 
+// Planked timber (rendered as wood grain, not masonry).
+const WOOD=29;
+
 const BLOCKS={
   wood:{hp:70,tint:0xae8158,accent:0xd2ac78},
   clay:{hp:108,tint:0xb17b5f,accent:0xd8b696},
@@ -146,12 +149,12 @@ function drawObject(r,o,state) {
     }
     return;
   }
-  r.add('box',x,y,z,w,h,d,tint,type==='wood'?13:2,options);
+  r.add('box',x,y,z,w,h,d,tint,type==='wood'?WOOD:2,options);
   if (type==='wood') {
     for (const side of [-1,1]) {
-      for (const dy of [-.40,.40]) r.add('box',x,y+h*dy,z+side*(d*.5+.013),w+.03,.13,.042,accent,13,options);
-      for (const dx of [-.40,.40]) r.add('box',x+w*dx,y,z+side*(d*.5+.014),.13,h,.043,accent,13,options);
-      r.beam([x-w*.38,y-h*.34,z+side*(d*.5+.024)],[x+w*.38,y+h*.34,z+side*(d*.5+.024)],.108,.046,accent,13,{dynamic:true});
+      for (const dy of [-.40,.40]) r.add('box',x,y+h*dy,z+side*(d*.5+.013),w+.03,.13,.042,accent,WOOD,options);
+      for (const dx of [-.40,.40]) r.add('box',x+w*dx,y,z+side*(d*.5+.014),.13,h,.043,accent,WOOD,options);
+      r.beam([x-w*.38,y-h*.34,z+side*(d*.5+.024)],[x+w*.38,y+h*.34,z+side*(d*.5+.024)],.108,.046,accent,WOOD,{dynamic:true});
     }
   } else if (type==='clay') {
     for (const side of [-1,1]) {

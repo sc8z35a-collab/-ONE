@@ -1238,10 +1238,17 @@ export class Battle {
       if (!sameLevel(shot.pos[0],viewX)) continue;
       const y=unit(shot.vel), x=unit(cross(y,[0,1,0])), z=cross(x,y);
       const position=add(shot.pos,scale(y,-.11));
-      const size=shot.weapon.size;
-      renderer.add('orb',...position,size,size*(shot.weapon.id==='lob'?1.42:2.84),size,TEAM_INK[shot.actor.team] ?? RAIDER_INK,9,{dynamic:true,basis:[x,y,z]});
-      const trail=add(position,scale(y,-.28));
-      if (!renderer.lite) renderer.add('orb',...trail,size*.48,size*1.22,size*.48,TEAM_INK[shot.actor.team] ?? RAIDER_INK,9,{dynamic:true,basis:[x,y,z]});
+      const size=shot.weapon.size, ink=TEAM_INK[shot.actor.team] ?? RAIDER_INK;
+      renderer.add('orb',...position,size,size*(shot.weapon.id==='lob'?1.42:2.84),size,ink,9,{dynamic:true,basis:[x,y,z]});
+      if (renderer.fidelity) {
+        // A liquid streak that stretches with speed behind the leading drop.
+        const speed=Math.hypot(...shot.vel), tail=clamp(speed*.022,.22,.95)*(shot.weapon.id==='lob'?.55:1);
+        renderer.add('limb',...add(position,scale(y,-tail*.5)),size*.78,tail,size*.78,ink,9,{dynamic:true,basis:[x,y,z]});
+        renderer.add('orb',...add(position,scale(y,size*.35)),size*.42,size*.9,size*.42,0xf6fffc,3,{dynamic:true,basis:[x,y,z]});
+      } else if (!renderer.lite) {
+        const trail=add(position,scale(y,-.28));
+        renderer.add('orb',...trail,size*.48,size*1.22,size*.48,ink,9,{dynamic:true,basis:[x,y,z]});
+      }
     }
     for (let i=0;i<this.drops.length;i+=renderer.lite?2:1) {
       const d=this.drops[i];

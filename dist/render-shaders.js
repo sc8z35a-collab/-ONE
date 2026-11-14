@@ -536,7 +536,7 @@ void main(){
       float fleck=smoothstep(.62,.7,d3.a)*.25-smoothstep(.3,.22,d3.a)*.12;
       m.albedo=tint*(.92+fleck+d1.r*.08);
       m.rough=.52-d2.r*.08;
-    } else if (underground>.5 && kind==1) {
+    } else if (underground>.5 && kind==1 && lum(tint)>.30) {
       vec2 tile=fract(uvW/.6);
       vec2 tid=floor(uvW/.6);
       float joint=min(min(tile.x,1.-tile.x),min(tile.y,1.-tile.y))*.6;
@@ -766,6 +766,19 @@ void main(){
     m.rough=.6; m.f0=.03;
     m.ao=mix(.34,1.,sat(1.-clumps*.95+ng.y*.22));
     m.trans=.6;
+  } else if (kind==29) {
+    vec2 g=faceUV+faceSize*.5;
+    vec2 along=faceSize.x>=faceSize.y?g:g.yx;
+    float row=floor(along.y/.115);
+    float pid=hash12(vec2(row,floor(along.x/1.3+row*.37)));
+    float fibre=det(vec2(along.x*.32,along.y*3.9+pid*3.)).r;
+    float rings=.5+.5*sin(along.y*41.+fibre*10.+pid*6.);
+    float seam=1.-smoothstep(.003,.008+px*.5,min(fract(along.y/.115),1.-fract(along.y/.115))*.115);
+    vec3 timber=tint*(.74+pid*.32)*(.84+rings*.2)*(.92+det(along*1.7).a*.16);
+    m.albedo=mix(timber,timber*.32,seam);
+    m.rough=.74+fibre*.12;
+    m.ao=1.-seam*.5;
+    if (!lite) n=normalize(n+vAxisY*(rings-.5)*.025*(1.-seam));
   } else if (kind==18) {
     vec2 w=uvW*vec2(210.,210.);
     float weave=(sin(w.x)*sin(w.y))*.5+.5;
