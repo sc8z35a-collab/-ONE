@@ -138,7 +138,7 @@ function roofDetails(part,x,y,z,w,d,roof) {
     part('box',x,y+.29,z,w*.70,.18,d*.66,0x677d58,2);
     for (const dx of [-.24,0,.24]) for (const dz of [-.22,.22]) {
       part('bevel',x+dx*w,y+.46,z+dz*d,w*.18,.30,d*.18,0x847b63);
-      part('orb',x+dx*w,y+.77,z+dz*d,w*.14,.52,d*.16,0x779758,2);
+      part('orb',x+dx*w,y+.77,z+dz*d,w*.14,.52,d*.16,0x779758,14);
     }
     return;
   }
@@ -169,9 +169,9 @@ function drawResidence(r,site,wear) {
   }
   for (const sign of [-1,1]) {
     const dx=sign*(lot.width*.5-1.07), dz=d*.18;
-    p('box',dx,.14,dz,1.31,.27,d*.68,0x779164,2);
+    p('box',dx,.14,dz,1.31,.27,d*.68,0x779164,14);
     p('cylinder',dx,.78,dz,.18,1.4,.18,0x796c54,2);
-    p('orb',dx,1.85,dz,1.52,1.65,1.48,0x72935a,2);
+    p('orb',dx,1.85,dz,1.52,1.65,1.48,0x72935a,14);
   }
   for (const [i,[dx,dz,width,depth,low,high]] of volumes[type.form].entries()) {
     const x=dx*w,z=dz*d,bw=width*w,bd=depth*d;

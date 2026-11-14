@@ -915,11 +915,17 @@ void main(){
       m.rough=.9;
     } else {
       vec2 fsz=faceSize;
-      vec2 cellSz=vec2(fsz.x/max(1.,floor(fsz.x/2.2)),3.15);
+      // Each building picks a facade type from its paint: punched windows,
+      // ribbon windows or a full glass curtain wall.
+      float facade=fract(dot(vTint.rgb,vec3(17.3,7.9,11.1)));
+      bool curtain=facade>.72 && fsz.y>9.;
+      bool ribbon=!curtain && facade>.46;
+      vec2 cellSz=vec2(fsz.x/max(1.,floor(fsz.x/(curtain?1.6:2.2))),3.15);
       vec2 g=(faceUV+fsz*.5)/cellSz;
       vec2 cell=fract(g), cid=floor(g);
       vec2 fw=fwidth(g);
-      vec2 lo=vec2(.17,.24), hiE=vec2(.83,.86);
+      vec2 lo=curtain?vec2(.035,.05):ribbon?vec2(.02,.30):vec2(.17,.24);
+      vec2 hiE=curtain?vec2(.965,.95):ribbon?vec2(.98,.82):vec2(.83,.86);
       vec2 inW=smoothstep(lo-fw,lo+fw,cell)*(1.-smoothstep(hiE-fw,hiE+fw,cell));
       float win=inW.x*inW.y;
       if (real) relief=1.-win;
@@ -943,9 +949,10 @@ void main(){
       vec3 room=detailVis>.01 && !lite?roomBehind(sat(wuv),vt,seed,on,1.4):vec3(.18,.2,.21)*(.8+seed*.4);
       float mull=1.-smoothstep(.006,.014,abs(wuv.x-.5));
       float pane=hash12(cid+.3);
-      m.albedo=mix(wall,vec3(.03),win);
-      m.rough=mix(.82,.035+pane*.04,win);
-      m.f0=mix(.04,.075,win);
+      vec3 glassTint=curtain?mix(vec3(.025,.04,.05),vec3(.04,.05,.045),pane):vec3(.03);
+      m.albedo=mix(wall,glassTint,win);
+      m.rough=mix(.82,.03+pane*.04,win);
+      m.f0=mix(.04,curtain?.11:.075,win);
       vec3 nWin=normalize(n+(tx*(pane-.5)+vAxisY*(hash12(cid+5.)-.5))*.02);
       n=normalize(mix(n,nWin,win));
       float fres=.04+.96*pow(1.-max(dot(n,V),0.),5.);
