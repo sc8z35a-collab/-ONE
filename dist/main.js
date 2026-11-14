@@ -18,6 +18,10 @@ import {BOSS_BODY_HEIGHT} from './boss-model.js';
 import {StageObjects} from './stage-objects.js';
 
 const $ = id => document.getElementById(id);
+const setText=(id,text)=>{
+  const node=typeof id==='string'?$(id):id, value=String(text);
+  if (node.textContent!==value) node.textContent=value;
+};
 const arena=$('arena'), game=$('game'), mini=$('minimap'), miniCtx=mini.getContext('2d');
 const title=$('title-screen'), hud=$('hud'), dialog=$('dialog'), rotate=$('rotate'), damageFlash=$('damage-flash');
 const embeddedApp=navigator.userAgent.includes('InkShiftAndroid/');
@@ -40,7 +44,7 @@ let remote=null, connecting=null, accessCode='', cloudCheck=null, cloud=null;
 let sceneData, graphicsLost=false, graphicsTimeout=0;
 let renderedWidth=0, renderedHeight=0;
 const prefs=readPrefs();
-let mapImage, mapLevel='auto', lastMessage='';
+let mapImage, mapLevel='auto', lastMessage='', lastFeed='';
 const mapLayers=[];
 let demoActors=[];
 const tags=[];
@@ -72,7 +76,7 @@ function lightQuality() {
 function applyQuality() {
   const light=lightQuality();
   renderer?.setQuality(light);
-  $('quality').querySelector('b').textContent=light?'軽量・影なし':'高画質';
+  $('quality').querySelector('b').textContent=light?'軽量':'高画質';
   $('quality').setAttribute('aria-pressed',String(light));
 }
 
@@ -154,6 +158,7 @@ function sound(kind) {
   oscillator.frequency.setValueAtTime(freq,now);
   oscillator.frequency.exponentialRampToValueAtTime(freq*(kind==='shot'?.44:kind==='damage'?.58:1.34),now+duration*.73);
   oscillator.connect(out);
+  oscillator.onended=()=>out.disconnect();
   oscillator.start(now);
   oscillator.stop(now+duration);
   if (hit) {
@@ -288,7 +293,7 @@ function settings() {
   const labelGraphics=document.createElement('span');
   labelGraphics.textContent='描画品質';
   const quality=document.createElement('select');
-  for (const [value,name] of [['auto','自動（スマホは軽量）'],['lite','軽量・影なし'],['high','高画質']]) {
+  for (const [value,name] of [['auto','自動（スマホは軽量）'],['lite','軽量（簡易な影・反射なし）'],['high','高画質（全エフェクト）']]) {
     const option=document.createElement('option');
     option.value=value;
     option.textContent=name;
@@ -683,20 +688,21 @@ function drawMap() {
   const view=battle.cameraActor(), level=mapLevel==='auto'?(watchingAerial()?0:zoneOf(view.x)):Number(mapLevel);
   const cabin=level>=2?battle.cabinTrain(view.x):null;
   const {indices,colors,boundX,boundZ}=mapLayers[level];
-  const {data}=mapImage;
-  for (let i=0;i<indices.length;i++) {
-    const owner=indices[i]===-1?0:paint.owner[indices[i]];
-    const c=owner===1?[40,209,190]:owner===2?[244,118,68]:null;
-    for (let j=0;j<3;j++) data[i*4+j]=c?c[j]:colors[i*3+j];
-    data[i*4+3]=255;
+  const {data}=mapImage, owners=paint.owner;
+  for (let i=0,o=0;i<indices.length;i++,o+=4) {
+    const index=indices[i], owner=index===-1?0:owners[index];
+    if (owner===1) {data[o]=40;data[o+1]=209;data[o+2]=190;}
+    else if (owner===2) {data[o]=244;data[o+1]=118;data[o+2]=68;}
+    else {data[o]=colors[i*3];data[o+1]=colors[i*3+1];data[o+2]=colors[i*3+2];}
+    data[o+3]=255;
   }
   miniCtx.putImageData(mapImage,0,0);
   const outer=level===0 && zoneOf(view.x)===0 && (Math.abs(view.x)>boundX || Math.abs(view.z)>boundZ);
   $('map-floor').textContent=cabin?(cabin.connection?'直通トンネル':cabin.metro?'地下側 車内':'高架側 車内'):
     outer?'外周 '+Math.min(CITY_RADIUS,Math.round(Math.hypot(view.x,view.z)))+' m':
     mapLevel==='auto' && view.ride && !watchingAerial()?'高架線':ZONES[level].name;
-  $('map-cyan').textContent=paint.percent(0,level).toFixed(1);
-  $('map-amber').textContent=paint.percent(1,level).toFixed(1);
+  setText('map-cyan',paint.percent(0,level).toFixed(1));
+  setText('map-amber',paint.percent(1,level).toFixed(1));
   for (const tab of mapTabs) tab.setAttribute('aria-pressed',String(tab.dataset.mapLevel===mapLevel));
   const px=x=>(x/boundX+1)*.5*mini.width;
   const pz=z=>(z/boundZ+1)*.5*mini.height;
@@ -796,20 +802,20 @@ function updateAbilities(p) {
   const superButton=$('super-action'), droneButton=$('drone-action');
   const superReady=battle.abilities.canActivate(p);
   const cramped=p.weapon.special==='giant' && p.superCharge>=100 && !p.ride && !p.lift && p.down<=0 && !superReady;
-  $('super-name').textContent=special.name;
-  $('super-state').textContent=active>0?'発動 '+active+'秒':superReady?'発動可能':cramped?'広い場所で発動':Math.floor(p.superCharge)+'%';
+  setText('super-name',special.name);
+  setText('super-state',active>0?'発動 '+active+'秒':superReady?'発動可能':cramped?'広い場所で発動':Math.floor(p.superCharge)+'%');
   $('super-bar').style.width=(active>0?Math.min(100,active/special.seconds*100):p.superCharge)+'%';
   superButton.disabled=!superReady;
   superButton.classList.toggle('ready',superReady);
   const wait=Math.max(0,Math.ceil(p.droneReady-battle.clock));
-  $('drone-state').textContent=p.drone?'飛行中':wait>0?wait+'秒':'準備OK';
+  setText('drone-state',p.drone?'飛行中':wait>0?wait+'秒':'準備OK');
   droneButton.disabled=!!p.drone || wait>0 || p.down>0 || !!p.ride || !!p.lift;
   droneButton.classList.toggle('ready',!droneButton.disabled);
   const sub=subweaponById(p.subId), subButton=$('sub-action');
   const subWait=Math.max(0,Math.ceil((p.subReady??0)-battle.clock));
-  $('sub-name').textContent=sub.name;
-  $('sub-state').textContent=subWait>0?subWait+'秒':p.tank<sub.cost?'INK不足':
-    p.swimming?'潜水解除で使用':p.airborne && sub.id!=='throw'?'着地して使う':'準備OK';
+  setText('sub-name',sub.name);
+  setText('sub-state',subWait>0?subWait+'秒':p.tank<sub.cost?'INK不足':
+    p.swimming?'潜水解除で使用':p.airborne && sub.id!=='throw'?'着地して使う':'準備OK');
   subButton.disabled=!battle.subweapons.canUse(p);
   subButton.classList.toggle('ready',!subButton.disabled);
   const cabin=isCabin(p.x);
@@ -830,7 +836,7 @@ function updateHud() {
   if (!battle) return;
   const time=Math.ceil(battle.left);
   const format=s=>Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
-  $('time').textContent=battle.timeless?'∞':format(time);
+  setText('time',battle.timeless?'∞':format(time));
   $('time').classList.toggle('urgent',time<=30);
   const boss=battle.boss, raiders=battle.raiders, view=battle.cameraActor(), level=watchingAerial()?0:zoneOf(view.x);
   $('boss-hud').hidden=!boss.active;
@@ -907,23 +913,26 @@ function updateHud() {
     $('touch-swim').classList.toggle('available',own && p.down<=0 && !p.ride && !p.lift);
     $('charge-bar').style.transform='scaleX('+p.charge+')';
     $('reticle').style.setProperty('--charge',p.charge);
-    $('meter-tip').textContent=p.climbing?'インク壁を登っています':p.swimming?(p.inkSwimming?'自インク · 高速回復':'イカ状態 · ゆっくり回復'):
+    setText('meter-tip',p.climbing?'インク壁を登っています':p.swimming?(p.inkSwimming?'自インク · 高速回復':'イカ状態 · ゆっくり回復'):
       p.inkPenalty?'敵インク · 移動と回復低下':p.charge>.03?(p.charge>=1?'最大チャージ · 離して発射':'チャージ中'):
-      readout.empty?'インク不足':p.rolling?'ローラーで塗装中':p.weapon.roller?'短押しで振る · 長押し＋前進で転がす':own?'自インクで高速回復':'未塗装の床でも潜水できます';
+      readout.empty?'インク不足':p.rolling?'ローラーで塗装中':p.weapon.roller?'短押しで振る · 長押し＋前進で転がす':own?'自インクで高速回復':'未塗装の床でも潜水できます');
   } else {
-    $('viewing').textContent=watchingAerial()?'地上の全景':view.name+' · '+(view.intent || ZONES[level].name);
+    setText('viewing',watchingAerial()?'地上の全景':view.name+' · '+(view.intent || ZONES[level].name));
   }
   if (battle.countdown>0) message(String(Math.ceil(battle.countdown)),battle.timeless?'タイムレスバトル':'ナワバリ戦');
   else if (battle.clock<3.77) message('GO!','街区を塗り広げろ');
   else if (p?.down>0) message(String(Math.ceil(p.down)),'復帰まで');
   else message('','');
-  const log=battle.events.map(event=>{
-    const entry=document.createElement('span');
-    entry.className='feed-entry'+(event.team===1?' amber':event.team===-1?' neutral':'');
-    entry.textContent=event.label;
-    return entry;
-  });
-  $('feed').replaceChildren(...log);
+  const feedKey=battle.events.map(event=>event.team+':'+event.label).join('|');
+  if (feedKey!==lastFeed) {
+    lastFeed=feedKey;
+    $('feed').replaceChildren(...battle.events.map(event=>{
+      const entry=document.createElement('span');
+      entry.className='feed-entry'+(event.team===1?' amber':event.team===-1?' neutral':'');
+      entry.textContent=event.label;
+      return entry;
+    }));
+  }
 }
 
 function cameraFor(dt) {
@@ -1058,25 +1067,28 @@ function drawFocus(now) {
   marker.hidden=false;
 }
 
+// Visibility and line of sight refresh at HUD rate; positions follow the
+// camera every frame so name tags never lag behind the crew.
 function projectTags() {
   if (!battle) return;
-  const W=arena.clientWidth,H=arena.clientHeight;
-  for (const {actor,label} of tags) {
-    const cameraActor=battle.cameraActor();
+  const cameraActor=battle.cameraActor(), aerial=watchingAerial();
+  for (const tag of tags) {
+    const {actor}=tag;
     const range=Math.hypot(actor.x-cameraActor.x,actor.z-cameraActor.z);
-    if (watchingAerial() || actor===cameraActor || actor.down>0 || actor.swimming || actor.lift || actor.ride || !sameLevel(actor.x,cameraActor.x) || range>25) {
-      label.hidden=true;
-      continue;
-    }
-    const point=[actor.x,actor.y+2.18,actor.z];
-    const projected=renderer.project(point);
-    if (!projected || projected[0]<.015 || projected[0]>.985 || projected[1]<.13 || projected[1]>.94 || battle.traceShot(camera.eye,point,true)) {
-      label.hidden=true;
-      continue;
-    }
-    label.hidden=false;
-    label.style.left=projected[0]*W+'px';
-    label.style.top=projected[1]*H+'px';
+    tag.visible=!(aerial || actor===cameraActor || actor.down>0 || actor.swimming || actor.lift || actor.ride ||
+      !sameLevel(actor.x,cameraActor.x) || range>25) && !battle.traceShot(camera.eye,[actor.x,actor.y+2.18,actor.z],true);
+  }
+  placeTags();
+}
+
+function placeTags() {
+  const W=arena.clientWidth,H=arena.clientHeight;
+  for (const tag of tags) {
+    const {actor,label}=tag;
+    const projected=tag.visible?renderer.project([actor.x,actor.y+2.18,actor.z]):null;
+    const show=!!projected && projected[0]>=.015 && projected[0]<=.985 && projected[1]>=.13 && projected[1]<=.94;
+    if (label.hidden===show) label.hidden=!show;
+    if (show) label.style.transform=`translate(${(projected[0]*W).toFixed(1)}px,${(projected[1]*H).toFixed(1)}px) translate(-50%,-50%)`;
   }
 }
 
@@ -1126,6 +1138,7 @@ function frame(now) {
   const damageAge=Number.isFinite(tookDamage)?battle.clock+(battle.impactAgeOffset??0)-tookDamage:Infinity;
   damageFlash.style.opacity=String(Math.pow(clamp(1-damageAge/.49,0,1),1.35));
   renderer.clearDynamic();
+  renderer.viewPoint=camera.eye;
   if (battle) {
     const nearCrew=camera.nearCrew?battle.cameraActor():null;
     battle.draw(renderer,camera.eye[0],camera.eye[2],nearCrew,camera.eye[1],camera.stair);
@@ -1145,7 +1158,7 @@ function frame(now) {
       hudTime=now;
       updateHud();
       projectTags();
-    }
+    } else placeTags();
     if (now-mapTime>178) {
       mapTime=now;
       drawMap();
@@ -1334,12 +1347,31 @@ arena.addEventListener('webglcontextrestored',()=>{
   }
 });
 
+async function readProgress(response) {
+  const total=Number(response.headers.get('content-length'))||0, reader=response.body?.getReader?.();
+  if (!reader) return response.json();
+  const caption=$('loading-caption'), base=caption.textContent, chunks=[];
+  let loaded=0;
+  for (;;) {
+    const {done,value}=await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded+=value.length;
+    caption.textContent=base+' '+(total?Math.min(99,Math.floor(loaded/total*100))+'%':(loaded/1048576).toFixed(1)+' MB');
+  }
+  caption.textContent=base;
+  const bytes=new Uint8Array(loaded);
+  let offset=0;
+  for (const chunk of chunks) {bytes.set(chunk,offset);offset+=chunk.length;}
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
 async function loadScene() {
   const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),4500);
   try {
     const response=await fetch(`./${SCENE_FILE}`,{cache:'force-cache',signal:controller.signal});
     if (!response.ok) return null;
-    const scene=await response.json();
+    const scene=await readProgress(response);
     return scene.version===SCENE_VERSION && scene.parts?.length>10000 && scene.solids?.length && scene.slabs?.length && scene.homes?.length===3 && scene.objects?.length && scene.elevated?.length?scene:null;
   } catch { return null; }
   finally { clearTimeout(timer); }

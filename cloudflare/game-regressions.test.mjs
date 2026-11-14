@@ -26,7 +26,7 @@ function simulateDisplay(extra={}) {
   const result={inputs:0,steps:[],draws:0};
   const page={graphicsLost:false,state:'match',dialogKind:null,rotationGate:false,document:{hidden:false},
     prevTime:0,activeClock:0,renderedWidth:900,renderedHeight:420,arena:{clientWidth:900,clientHeight:420},
-    remote:null,requestAnimationFrame(){},cameraFor:()=>camera,drawFocus(){},updateHud(){},projectTags(){},drawMap(){},
+    remote:null,requestAnimationFrame(){},cameraFor:()=>camera,drawFocus(){},updateHud(){},projectTags(){},placeTags(){},drawMap(){},
     mapTime:0,hudTime:0,clamp,isCabin,paint:{},damageFlash:{style:{}},
     getInput(){result.inputs++;return {...neutral,jump:result.inputs===1};},
     battle:{player:null,draw(){},update(dt,input){result.steps.push({dt,jump:input.jump});}},

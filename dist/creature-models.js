@@ -7,7 +7,7 @@ export function drawTentacle(r,points,width,tint,sucker) {
     const side=unit(cross(axis,ref)),face=cross(side,axis);
     const girth=width*(1-.76*i/(points.length-1));
     const middle=scale(add(from,to),.5), span=Math.hypot(...sub(to,from));
-    r.add('taper',...middle,girth,span+girth*.12,girth*.90,tint,9,
+    r.add(r.fidelity?'limb':'taper',...middle,girth,span+girth*(r.fidelity?.30:.12),girth*.90,tint,9,
       {dynamic:true,basis:[side,axis,face]});
     r.add('orb',...from,girth*1.12,girth*.98,girth*1.02,tint,9,{dynamic:true});
     if (!r.lite || i%2===0) {

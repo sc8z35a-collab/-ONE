@@ -51,10 +51,19 @@ export function trainPose(t,line=RAIL) {
 export function drawTrain(r,t,clock,line=RAIL) {
   const {rotate,at:rawAt,basis}=trainPose(t,line);
   const at=(x,y,z)=>y>.82?rawAt(x,1+(y-1)*1.44,z*1.18):rawAt(x,y,z);
-  const bodyAxes=axes=>axes.map(axis=>{
-    const local=basis.map(vector=>dot(vector,axis));
-    return rotate(local[0],local[1]*1.44,local[2]*1.18);
-  });
+  // Most pieces share a handful of axis sets, so each stretched set is built once per frame.
+  const stretched=new Map();
+  const bodyAxes=axes=>{
+    let result=stretched.get(axes);
+    if (!result) {
+      result=axes.map(axis=>{
+        const local=basis.map(vector=>dot(vector,axis));
+        return rotate(local[0],local[1]*1.44,local[2]*1.18);
+      });
+      stretched.set(axes,result);
+    }
+    return result;
+  };
   const stripe=line.cabinX===RAIL.cabinX?STRIPE:0x865768;
   const axle=[basis[0],basis[2],rotate(0,-1,0)];
   const front=[rotate(0,0,-1),basis[1],basis[0]];

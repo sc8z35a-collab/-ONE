@@ -1,5 +1,5 @@
 import {FILM_HEIGHT_TOLERANCE,decodeFilmHeight} from './ink-fluid.js';
-import {Renderer,SUN,STRIDE,clamp,cross,dot,hazardDisk,labelAtlas,mantleMesh,meshes,mix,multiply,perspective,sub,unit,view} from './render.js';
+import {Renderer,SUN,STRIDE,clamp,cross,dot,hazardDisk,labelAtlas,mantleMesh,meshes,mix,multiply,packInstance,perspective,sub,unit,view} from './render.js';
 
 import {CITY_RADIUS,ZONES,inkOrigin,inkY,interiorBlend,zoneOf} from './layout.js';
 
@@ -67,10 +67,20 @@ export class SoftwareRenderer {
     this.atlas=atlas.getContext('2d').getImageData(0,0,atlas.width,atlas.height).data;
   }
 
-  add(...args) { Renderer.prototype.add.call(this,...args); }
+  add(type,x,y,z,w,h,d,tint,kind=0,opts={}) {
+    const pair=this.batches[type];
+    if (!pair) return;
+    const list=pair[opts.dynamic?(this.drawingAdjacent?'adjacent':'dynamic'):['static','lower','cabin','railCabin'][this.zone]].list;
+    packInstance(list,list.length,x,y,z,w,h,d,tint,kind,opts);
+  }
   label(...args) { Renderer.prototype.label.call(this,...args); }
   beam(...args) { Renderer.prototype.beam.call(this,...args); }
-  clearDynamic() { Renderer.prototype.clearDynamic.call(this); }
+  clearDynamic() {
+    for (const pair of Object.values(this.batches)) {
+      pair.dynamic.list.length=0;
+      pair.adjacent.list.length=0;
+    }
+  }
   project(point) { return Renderer.prototype.project.call(this,point); }
 
   setQuality(lightweight) { this.lite=lightweight; }

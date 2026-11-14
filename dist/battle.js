@@ -29,6 +29,26 @@ function decalBasis(n,phase) {
 }
 const WHITE = 0xeae9d8, BOOT = 0x323f44, GRAPHITE = 0x425155, TRIM = 0x82908b;
 const DECAL_RIM=Array.from({length:12},(_,i)=>splatRadius(i*TAU/12));
+// Decals never move once placed, so their clipped triangle fan is built once
+// (kept outside the decal so checkpoints stay small).
+const decalShapes=new WeakMap();
+function decalShape(geometry,decal) {
+  let shape=decalShapes.get(decal);
+  if (shape) return shape;
+  const axes=decalBasis(decal.normal,decal.phase);
+  const rim=geometry.coat(decal,axes,DECAL_RIM);
+  shape={axes,origin:decal.p.slice()};
+  if (rim) {
+    shape.fan=[];
+    for (let j=0;j<rim.length;j++) {
+      const u=sub(add(rim[j],scale(decal.normal,.023)),decal.p);
+      const v=sub(add(rim[(j+1)%rim.length],scale(decal.normal,.023)),decal.p);
+      if (Math.hypot(...cross(u,v))>=.000002) shape.fan.push([u,v,decal.normal]);
+    }
+  }
+  decalShapes.set(decal,shape);
+  return shape;
+}
 export const INK_HIT_DURATION=.50;
 const distance = (a,b) => Math.hypot(a.x-b.x,a.z-b.z);
 
@@ -1218,10 +1238,17 @@ export class Battle {
       if (!sameLevel(shot.pos[0],viewX)) continue;
       const y=unit(shot.vel), x=unit(cross(y,[0,1,0])), z=cross(x,y);
       const position=add(shot.pos,scale(y,-.11));
-      const size=shot.weapon.size;
-      renderer.add('orb',...position,size,size*(shot.weapon.id==='lob'?1.42:2.84),size,TEAM_INK[shot.actor.team] ?? RAIDER_INK,9,{dynamic:true,basis:[x,y,z]});
-      const trail=add(position,scale(y,-.28));
-      if (!renderer.lite) renderer.add('orb',...trail,size*.48,size*1.22,size*.48,TEAM_INK[shot.actor.team] ?? RAIDER_INK,9,{dynamic:true,basis:[x,y,z]});
+      const size=shot.weapon.size, ink=TEAM_INK[shot.actor.team] ?? RAIDER_INK;
+      renderer.add('orb',...position,size,size*(shot.weapon.id==='lob'?1.42:2.84),size,ink,9,{dynamic:true,basis:[x,y,z]});
+      if (renderer.fidelity) {
+        // A liquid streak that stretches with speed behind the leading drop.
+        const speed=Math.hypot(...shot.vel), tail=clamp(speed*.022,.22,.95)*(shot.weapon.id==='lob'?.55:1);
+        renderer.add('limb',...add(position,scale(y,-tail*.5)),size*.78,tail,size*.78,ink,9,{dynamic:true,basis:[x,y,z]});
+        renderer.add('orb',...add(position,scale(y,size*.35)),size*.42,size*.9,size*.42,0xf6fffc,3,{dynamic:true,basis:[x,y,z]});
+      } else if (!renderer.lite) {
+        const trail=add(position,scale(y,-.28));
+        renderer.add('orb',...trail,size*.48,size*1.22,size*.48,ink,9,{dynamic:true,basis:[x,y,z]});
+      }
     }
     for (let i=0;i<this.drops.length;i+=renderer.lite?2:1) {
       const d=this.drops[i];
@@ -1234,21 +1261,11 @@ export class Battle {
     }
     for (const decal of this.decals) {
       if (!sameLevel(decal.p[0],viewX) || Math.hypot(decal.p[0]-viewX,decal.p[2]-viewZ)>140) continue;
-      const offset=.023;
-      const axes=decalBasis(decal.normal,decal.phase), tint=TEAM_INK[decal.team];
-      const rim=this.world.geometry.coat(decal,axes,DECAL_RIM);
-      if (rim) {
-        const origin=add(decal.p,scale(decal.normal,offset-.023));
-        for (let j=0;j<rim.length;j++) {
-          const u=sub(add(rim[j],scale(decal.normal,offset)),origin);
-          const v=sub(add(rim[(j+1)%rim.length],scale(decal.normal,offset)),origin);
-          if (Math.hypot(...cross(u,v))<.000002) continue;
-          renderer.add('tri',...origin,1,1,1,tint,26,{dynamic:true,basis:[u,v,decal.normal]});
-        }
-      } else {
-        const p=add(decal.p,scale(decal.normal,offset-.023));
-        renderer.add('splat',...p,decal.radius*1.66,decal.radius*1.35,1,tint,26,{dynamic:true,basis:axes});
-      }
+      const tint=TEAM_INK[decal.team];
+      const shape=decalShape(this.world.geometry,decal);
+      if (shape.fan) {
+        for (const basis of shape.fan) renderer.add('tri',...shape.origin,1,1,1,tint,26,{dynamic:true,basis});
+      } else renderer.add('splat',...shape.origin,decal.radius*1.66,decal.radius*1.35,1,tint,26,{dynamic:true,basis:shape.axes});
     }
   }
 }
@@ -1285,11 +1302,20 @@ function gunPose(a,pose,weapon=a.weapon??WEAPONS[0]) {
 
 export function drawCrew(r,a,time,showEffects=true) {
   const tint=TEAM[a.team], bright=TEAM_INK[a.team];
+  // Render-only detail: hit detection collects the plain shapes, so the
+  // silhouette and every pose stay identical to what shots are tested against.
+  const view=r.viewPoint;
+  const range=view?Math.hypot(a.x-view[0],a.y-view[1],a.z-view[2]):0;
+  const hi=!!r.fidelity && range<(r.lite?13:26);
+  const soft=hi?'soft':'bevel', limbShape=hi?'limb':'taper';
   const grip=a.climbing && a.climbNormal;
   const yaw=Math.PI-(grip?Math.atan2(-grip[0],grip[2]):a.isPlayer || a.swimming || a.weapon?.roller?a.yaw:a.bodyYaw??a.yaw);
   if (a.giant) {
     drawSquid(r,a,time,tint,0xffebbd,giantScale(a.x));
     return;
+  }
+  if (r.fidelity && showEffects && range<60 && !a.climbing && !(a.airborne ?? Math.abs(a.vy??0)>.48)) {
+    r.add('shade',a.x,a.y+.016,a.z,a.swimming?1.05:1.25,1,a.swimming?1.35:1.25,0,28,{dynamic:true,label:.62});
   }
   if (showEffects && a.guard>0) {
     const pulse=.15*Math.sin(time*8);
@@ -1314,19 +1340,21 @@ export function drawCrew(r,a,time,showEffects=true) {
       r.add(type,...p,w,h,d,color,material,{dynamic:true,yaw,pitch:pitch+tilt});
     };
     squid('orb',0,.104,-.067,.69,.178,.94*stretch,bright,9);
-    squid('bevel',0,.139,-.116,.64,.173,.68*stretch,tint,9,-.10);
+    squid(soft,0,.139,-.116,.64,.173,.68*stretch,tint,9,-.10);
     squid('orb',0,.193,.15,.43,.287,.48,tint,9,-.25);
-    squid('bevel',0,.227,.321,.317,.126,.151,0x293f49,8,-.09);
-    squid('bevel',0,.265,.165,.102,.029,.274,bright,9);
+    squid(soft,0,.227,.321,.317,.126,.151,0x293f49,8,-.09);
+    squid(soft,0,.265,.165,.102,.029,.274,bright,9);
     for (const sign of [-1,1]) {
-      squid('bevel',sign*.084,.241,.376,.078,.052,.035,0xdbf2d3,3);
+      squid(soft,sign*.084,.241,.376,.078,.052,.035,0xdbf2d3,3);
+      if (hi) squid('orb',sign*.084,.247,.392,.034,.03,.016,0x0b1214,8);
       const stroke=Math.sin(pull+sign*.92), effort=a.climbing?.11:.045+pace*.065;
       squid('orb',sign*(.19+stroke*effort),.068+stroke*.022,-.47-stroke*.06,.188,.08,.50*stretch,bright,9,stroke*.18);
     }
     for (let i=0;i<4;i++) {
       const tail=(i-1.5)*.105, stroke=Math.sin(pull+i*.76);
-      squid('taper',tail,.079,-.56-stretch*.10,.093,.32+stretch*.12,.085,tint,9,Math.PI/2+stroke*.19);
+      squid(hi?'limb':'taper',tail,.079,-.56-stretch*.10,.093,.32+stretch*.12,.085,tint,9,Math.PI/2+stroke*.19);
     }
+    if (hi) for (const sign of [-1,1]) squid('limb',sign*.21,.15,.05,.06,.34,.05,bright,9,Math.PI/2.3);
     return;
   }
   const material=(mat,c)=>mat===2?(c===BOOT || c===GRAPHITE?21:18):mat===4 && (c===tint || c===bright)?20:mat;
@@ -1346,45 +1374,65 @@ export function drawCrew(r,a,time,showEffects=true) {
   const armor=a.damageAge<.095?0xef856b:0x263943;
   const accent=[0xe0c88f,0xb5d7cb,0x9eb8d0,0xe2a47d][(a.index??0)%4];
   const visor=a.team===0?0x4c8c99:0x825650;
-  part('bevel',0,.99,-.025,.66,.62,.44,armor,2,.13);
-  part('bevel',0,1.13,.063,.61,.34,.43,tint,20);
-  part('bevel',0,1.18,.272,.36,.16,.062,hit,18);
-  part('bevel',0,.80,.186,.54,.14,.17,GRAPHITE,21);
+  part(soft,0,.99,-.025,.66,.62,.44,armor,2,.13);
+  part(soft,0,1.13,.063,.61,.34,.43,tint,20);
+  part(soft,0,1.18,.272,.36,.16,.062,hit,18);
+  part(soft,0,.80,.186,.54,.14,.17,GRAPHITE,21);
   part('bevel',0,.824,.284,.169,.080,.045,accent,4);
-  part('bevel',0,1.402,.014,.38,.19,.34,GRAPHITE,21);
+  part(soft,0,1.402,.014,.38,.19,.34,GRAPHITE,21);
   part('orb',0,1.716,-.012,.665,.565,.618,armor,20,.10);
   part('orb',0,1.891,-.025,.601,.207,.546,tint,20,.15);
-  part('bevel',0,1.814,-.162,.476,.112,.308,tint,20,.075);
+  part(soft,0,1.814,-.162,.476,.112,.308,tint,20,.075);
   part('bevel',0,1.719,.267,.609,.252,.206,0x182a34,4,.055);
   part('bevel',0,1.714,.349,.529,.179,.101,visor,8,.068);
   part('bevel',0,1.812,.310,.51,.040,.147,accent,20);
-  part('bevel',0,1.506,.267,.426,.158,.214,0x314851,21,-.07);
+  part(soft,0,1.506,.267,.426,.158,.214,0x314851,21,-.07);
   part('box',0,1.522,.372,.259,.050,.026,0x1c2931,4);
+  if (hi) {
+    part('box',0,1.664,.392,.44,.009,.012,bright,3,.068);
+    part('box',0,1.715,.395,.47,.12,.004,0x0e1a20,8,.068);
+    part('ring',0,1.80,-.02,.63,.05,.58,0x1a262c,4);
+    part('box',0,1.18,.30,.018,.15,.012,TRIM,4);
+    for (const dy of [.86,.91]) part('box',0,dy,.268,.50,.012,.02,0x1b2529,21);
+  }
   for (const sign of [-1,1]) {
-    part('bevel',sign*.256,1.647,.267,.164,.236,.206,GRAPHITE,20);
+    part(soft,sign*.256,1.647,.267,.164,.236,.206,GRAPHITE,20);
     part('cylinder',sign*.320,1.685,.009,.228,.098,.228,tint,20);
-    part('bevel',sign*.326,1.68,.039,.102,.164,.229,armor,4);
+    part(soft,sign*.326,1.68,.039,.102,.164,.229,armor,4);
     part('box',sign*.330,1.712,.157,.071,.064,.039,bright,3);
     const curl=Math.sin(time*4+a.index+sign)*.1;
-    part('taper',sign*.225,1.442,-.180,.144,.318,.143,bright,9,.24+curl);
+    part(limbShape,sign*.225,1.442,-.180,.144,.318,.143,bright,9,.24+curl);
     part('orb',sign*.218,1.301,-.218,.105,.141,.132,tint,9);
     for (const dz of [-.06,.02,.10]) part('box',sign*.161,1.546,.344+dz*.35,.044,.031,.013,TRIM,4);
-    part('bevel',sign*.225,1.074,.246,.119,.270,.085,armor,21);
+    part(soft,sign*.225,1.074,.246,.119,.270,.085,armor,21);
     part('box',sign*.23,1.154,.293,.055,.084,.019,accent,3);
+    if (hi) {
+      part('cylinder',sign*.378,1.685,.009,.11,.012,.11,0x9aa7a4,4);
+      part(soft,sign*.21,.82,.20,.13,.12,.07,GRAPHITE,21);
+      part('box',sign*.12,1.10,.285,.03,.30,.012,0x1d282c,21,.05);
+    }
   }
-  part('bevel',0,1.989,-.086,.121,.042,.323,accent,20);
+  part(soft,0,1.989,-.086,.121,.042,.323,accent,20);
   const capacity=a.tankMax ?? BASE_TANK, expanded=capacity>BASE_TANK;
   const tankHeight=expanded?1.11:.79, fill=tankHeight*.70*clamp(a.tank/capacity,0,1);
-  part('bevel',0,1.13,-.294,.53,.57,.218,armor,21);
-  part('bevel',0,1.125,-.458,.463,tankHeight,.31,0x778d90,4);
-  part('bevel',0,1.125,-.557,.362,tankHeight*.82,.176,visor,8);
+  part(soft,0,1.13,-.294,.53,.57,.218,armor,21);
+  part('bevel',0,1.125,-.458,.463,tankHeight,.31,hi?0x3a474b:0x778d90,4);
+  if (!hi) part('bevel',0,1.125,-.557,.362,tankHeight*.82,.176,visor,8);
   for (const sign of [-1,1]) {
-    part('bevel',0,1.125+sign*(tankHeight*.50-.05),-.463,.479,.12,.285,armor,20);
+    part(soft,0,1.125+sign*(tankHeight*.50-.05),-.463,.479,.12,.285,armor,20);
     part('bevel',sign*.198,1.125,-.551,.073,tankHeight*.74,.134,accent,4);
     part('box',0,1.125+sign*tankHeight*.33,-.648,.305,.034,.025,TRIM,4);
   }
   part('bevel',0,1.125,-.657,.086,tankHeight*.75,.029,GRAPHITE,4);
   if (fill>.003) part('box',0,1.125+(fill-tankHeight*.70)*.5,-.678,.045,fill,.020,bright,3);
+  if (hi) {
+    // A clear canister: dark liner, sloshing ink column, glass front.
+    const inner=tankHeight*.74, level=clamp(a.tank/capacity,0,1), slosh=Math.sin(time*5.3+a.index)*.05*(pace+.2);
+    part('box',0,1.125,-.535,.33,inner+.02,.05,0x10181b,21);
+    if (level>.01) part('box',0,1.125-inner*.5+inner*level*.5,-.585,.31,inner*level,.09,bright,9,slosh*.2);
+    part('glass',0,1.125,-.636,.35,inner+.03,1,0xd8f0ea,17);
+    part('box',0,1.125+tankHeight*.38,-.47,.08,.05,.08,0x9aa7a4,4);
+  }
   for (const sign of [-1,1]) {
     const step=swing*sign*pace;
     const forwardStep=airborne?sign*(rising?.20:.12):fore*step*.39;
@@ -1402,39 +1450,52 @@ export function drawCrew(r,a,time,showEffects=true) {
       const x=a.feet[base],y=a.feet[base+1]+.060,z=a.feet[base+2];
       const ankle=[x-fx*.064,y+.111,z-fz*.064];
       const knee=limbJoint(loc(...hip),ankle,.383,.370,[fx,.09,fz]);
-      r.beam(loc(...hip),knee,.25,.26,GRAPHITE,18,{dynamic:true,shape:'taper'});
-      r.beam(knee,ankle,.21,.23,hit,18,{dynamic:true,shape:'taper'});
+      r.beam(loc(...hip),knee,.25,.26,GRAPHITE,18,{dynamic:true,shape:limbShape});
+      r.beam(knee,ankle,.21,.23,hit,18,{dynamic:true,shape:limbShape});
       const part=(type,x,y,z,w,h,d,color,mat)=>r.add(type,x,y,z,w,h,d,color,mat,{dynamic:true,yaw:bootYaw});
-      part('bevel',...knee,.242,.236,.260,GRAPHITE,21);
-      part('bevel',knee[0]+fx*.127,knee[1],knee[2]+fz*.127,.148,.121,.047,tint,20);
-      part('bevel',x,y,z,.299,.19,.475,BOOT,21);
+      part(soft,...knee,.242,.236,.260,GRAPHITE,21);
+      part(soft,knee[0]+fx*.127,knee[1],knee[2]+fz*.127,.148,.121,.047,tint,20);
+      part(soft,x,y,z,.299,.19,.475,BOOT,21);
       part('bevel',x,y-.063,z,.304,.063,.473,0x202e37,21);
-      part('bevel',x+fx*.166,y+.007,z+fz*.166,.274,.105,.139,tint,20);
+      part(soft,x+fx*.166,y+.007,z+fz*.166,.274,.105,.139,tint,20);
       part('box',x+fx*.13,y+.075,z+fz*.13,.151,.042,.094,accent,20);
+      if (hi) {
+        part('box',x,y-.038,z,.31,.018,.478,0xb9bdb3,21);
+        part(soft,x-fx*.16,y+.05,z-fz*.16,.24,.13,.12,0x1c272b,21);
+      }
     } else {
-      r.beam(loc(...hip),loc(...knee),.25,.26,GRAPHITE,18,{dynamic:true,shape:'taper'});
-      r.beam(loc(...knee),loc(...ankle),.21,.23,hit,18,{dynamic:true,shape:'taper'});
-      part('bevel',...knee,.242,.236,.260,GRAPHITE,21);
-      part('bevel',knee[0],knee[1],knee[2]+.127,.148,.121,.047,tint,20);
+      r.beam(loc(...hip),loc(...knee),.25,.26,GRAPHITE,18,{dynamic:true,shape:limbShape});
+      r.beam(loc(...knee),loc(...ankle),.21,.23,hit,18,{dynamic:true,shape:limbShape});
+      part(soft,...knee,.242,.236,.260,GRAPHITE,21);
+      part(soft,knee[0],knee[1],knee[2]+.127,.148,.121,.047,tint,20);
       const bootPitch=airborne?(rising?-.32:.16):transfer*sign*pace*.14;
-      part('bevel',...foot,.299,.19,.475,BOOT,21,bootPitch);
+      part(soft,...foot,.299,.19,.475,BOOT,21,bootPitch);
       part('bevel',foot[0],foot[1]-.062,foot[2],.304,.063,.473,0x202e37,21,bootPitch);
-      part('bevel',foot[0],foot[1]+.005,foot[2]+.166,.274,.105,.139,tint,20,bootPitch);
+      part(soft,foot[0],foot[1]+.005,foot[2]+.166,.274,.105,.139,tint,20,bootPitch);
       part('box',foot[0],foot[1]+.075,foot[2]+.13,.151,.042,.094,accent,20,bootPitch);
+      if (hi) {
+        part('box',foot[0],foot[1]-.037,foot[2],.31,.018,.478,0xb9bdb3,21,bootPitch);
+        part(soft,foot[0],foot[1]+.05,foot[2]-.16,.24,.13,.12,0x1c272b,21,bootPitch);
+      }
     }
     const armSwing=sign>0?-step*.14:0;
     const armLift=airborne?.07:armSwing*.28-crouch*.035;
-    part('bevel',sign*.331,1.241,.023,.294,.267,.322,tint,20);
-    part('bevel',sign*.400,1.237,.032,.158,.193,.252,armor,21);
+    part(soft,sign*.331,1.241,.023,.294,.267,.322,tint,20);
+    part(soft,sign*.400,1.237,.032,.158,.193,.252,armor,21);
     part('box',sign*.385,1.263,.158,.12,.041,.025,accent,4);
     const hand=weapon.roller?loc(sign*.25,1.13,.40):gun.at(...(sign<0?[-.416,1.22,.44]:[-.285,1.18,.66]));
     const shoulder=torso(sign*.331,1.241,.023);
     const elbow=planted || a.brace>0?limbJoint(shoulder,hand,.371,.415,[sign*cy,-.58,-sign*sy]):
       loc(sign*.386,1.06+armLift,.22+armSwing);
-    r.beam(shoulder,elbow,.19,.21,tint,18,{dynamic:true,shape:'taper'});
-    r.beam(elbow,hand,.165,.18,hit,18,{dynamic:true,shape:'taper'});
+    r.beam(shoulder,elbow,.19,.21,tint,18,{dynamic:true,shape:limbShape});
+    r.beam(elbow,hand,.165,.18,hit,18,{dynamic:true,shape:limbShape});
     r.add('orb',...elbow,.192,.185,.194,tint,18,{dynamic:true,yaw});
-    r.add('orb',...hand,.20,.19,.22,BOOT,21,{dynamic:true,yaw});
+    if (hi) {
+      const wrist=add(hand,scale(unit(sub(elbow,hand)),.07));
+      r.add('cylinder',...wrist,.15,.05,.15,0x1c272b,21,{dynamic:true,basis:limbBasis(sub(hand,elbow))});
+      r.add('soft',...hand,.19,.16,.21,BOOT,21,{dynamic:true,yaw});
+      r.add('soft',...add(hand,[sign*cy*.07,.025,-sign*sy*.07]),.07,.06,.11,BOOT,21,{dynamic:true,yaw});
+    } else r.add('orb',...hand,.20,.19,.22,BOOT,21,{dynamic:true,yaw});
   }
   if (weapon.roller) {
     const {y:headY,z:headZ}=rollerPosition(a);
@@ -1477,6 +1538,11 @@ export function drawCrew(r,a,time,showEffects=true) {
     gunPart('box',-.415+sign*(edge+.011),1.345,.437,.022,.045,.237,TRIM);
     gunPart('orb',-.415+sign*(edge+.025),1.275,.48,.027,.027,.028,0xcbbf9e);
   }
+  if (hi) {
+    gunPart('box',-.415,1.418,.47,.05,.03,.30,0x1c272b,4);
+    gunPart('box',-.415,1.418,.36,.075,.06,.07,0x111a1e,8);
+    gunPart('box',-.415+(dual?.36:width)*.5+.004,1.30,.50,.004,.05,.20,bright,3);
+  }
   if (long) {
     gunPart('cylinder',-.415,1.49,.52,.109,.32,.109,GRAPHITE,4,Math.PI/2);
     gunPart('cylinder',-.415,1.49,.688,.081,.025,.081,0xacc7bd,8,Math.PI/2);
@@ -1499,4 +1565,10 @@ export function drawCrew(r,a,time,showEffects=true) {
     const flash=a.charge>.12?.071+.095*a.charge:.14;
     for (const side of dual?[-1,1]:[0]) gunPart('orb',-.415+side*.13,1.30,dual?1.063:.785+barrel*.85,flash,flash,flash*1.7,bright,3);
   }
+}
+
+function limbBasis(axis) {
+  const y=unit(axis), ref=Math.abs(y[2])>.93?[1,0,0]:[0,0,1];
+  const x=unit(cross(y,ref));
+  return [x,y,cross(x,y)];
 }
