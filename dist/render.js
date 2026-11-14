@@ -285,7 +285,7 @@ function softBox(lowDetail) {
 
 // Tapered capsule for limbs: domed ends and a slight muscle swell.
 function limbMesh(lowDetail) {
-  const mesh=makeMesh(), sides=lowDetail?8:16, rows=lowDetail?8:18, cap=.22;
+  const mesh=makeMesh(), sides=lowDetail?12:16, rows=lowDetail?11:18, cap=.22;
   const profile=t=>{
     const base=.5*mix(1,.8,t)*(1+.07*Math.sin(Math.PI*t));
     const e=t<cap?(cap-t)/cap:t>1-cap?(t-1+cap)/cap:0;
@@ -321,8 +321,18 @@ export function meshes(lowDetail = false) {
   };
 }
 
-// Distant chunks swap to these: bevels become plain boxes, curved parts
-// drop most of their segments.
+// Render-only tessellation. Collision keeps meshes() so hit tests never move.
+function renderMeshes() {
+  const high=meshes();
+  high.orb=radial(true,22,14);
+  high.cylinder=radial(false,18);
+  high.soft=softBox(true);
+  high.limb=limbMesh(true);
+  return high;
+}
+
+// Distant chunks and shadow casters swap to these: bevels become plain boxes,
+// curved parts drop most of their segments.
 function lodMeshes() {
   const low=meshes(true);
   low.bevel=block();
@@ -501,7 +511,7 @@ export class Renderer {
     this.placeholder=gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER,this.placeholder);
     gl.bufferData(gl.ARRAY_BUFFER,STRIDE*4,gl.STATIC_DRAW);
-    const high=meshes(), low=lodMeshes();
+    const high=renderMeshes(), low=lodMeshes();
     this.vaos={};
     this.batches={};
     for (const name of Object.keys(high)) {
@@ -1062,8 +1072,8 @@ export class Renderer {
     if (end>start) this.drawRange(lod?vaos.lo:vaos.hi,batch.buffer,start,end-start);
   }
 
-  drawDynamic(type,batch) {
-    if (batch.count) this.drawRange(this.vaos[type].hi,batch.buffer,0,batch.count);
+  drawDynamic(type,batch,low=false) {
+    if (batch.count) this.drawRange(low?this.vaos[type].lo:this.vaos[type].hi,batch.buffer,0,batch.count);
   }
 
   renderShadows(camera) {
@@ -1093,7 +1103,7 @@ export class Renderer {
       for (const [type,pair] of Object.entries(this.batches)) {
         if (TRANSPARENT_MESHES.has(type) || DECAL_MESHES.has(type)) continue;
         this.drawStatic(type,pair.static,planes,camera.eye,0,settings);
-        this.drawDynamic(type,pair.dynamic);
+        this.drawDynamic(type,pair.dynamic,true);
       }
     }
     gl.disable(gl.POLYGON_OFFSET_FILL);

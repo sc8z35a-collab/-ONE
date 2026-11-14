@@ -838,7 +838,8 @@ void main(){
       vec4 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
       vec4 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
       vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
-      if (!lite && a.w*b.w*c.w*d.w>.5) {
+      float corners=a.r+a.g, edgeCell=abs(corners-(b.r+b.g))+abs(corners-(c.r+c.g))+abs(corners-(d.r+d.g));
+      if (edgeCell>.01 && a.w*b.w*c.w*d.w>.5) {
         vec2 hs=.5/vec2(size);
         float lf=float(layer);
         st=(texture(uInk,vec3(inkUV+vec2(-hs.x,-hs.y),lf)).rgb+texture(uInk,vec3(inkUV+vec2(hs.x,-hs.y),lf)).rgb
@@ -851,7 +852,7 @@ void main(){
         float aa=fwidth(coverage)*.9+.015;
         float mask=smoothstep(thr-aa,thr+aa,coverage);
         if (mask>.003) {
-          vec3 cyan=vec3(.0,.40,.32), amber=vec3(.80,.12,.018);
+          vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014);
           float thick=st.b;
           vec3 ink=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
           if (!lite) {
@@ -865,9 +866,9 @@ void main(){
             liquid+=vec2(bubble*.6);
           }
           m.albedo=mix(m.albedo,ink,mask);
-          m.rough=mix(m.rough,.16+length(liquid)*.18,mask);
+          m.rough=mix(m.rough,.21+length(liquid)*.18,mask);
           m.metal=mix(m.metal,0.,mask);
-          m.clear=mix(m.clear,.42,mask);
+          m.clear=mix(m.clear,.32,mask);
           m.emit=mix(m.emit,ink*.05,mask);
           m.ao=mix(m.ao,1.,mask*.6);
           m.f0=mix(m.f0,.045,mask);

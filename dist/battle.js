@@ -29,6 +29,26 @@ function decalBasis(n,phase) {
 }
 const WHITE = 0xeae9d8, BOOT = 0x323f44, GRAPHITE = 0x425155, TRIM = 0x82908b;
 const DECAL_RIM=Array.from({length:12},(_,i)=>splatRadius(i*TAU/12));
+// Decals never move once placed, so their clipped triangle fan is built once
+// (kept outside the decal so checkpoints stay small).
+const decalShapes=new WeakMap();
+function decalShape(geometry,decal) {
+  let shape=decalShapes.get(decal);
+  if (shape) return shape;
+  const axes=decalBasis(decal.normal,decal.phase);
+  const rim=geometry.coat(decal,axes,DECAL_RIM);
+  shape={axes,origin:decal.p.slice()};
+  if (rim) {
+    shape.fan=[];
+    for (let j=0;j<rim.length;j++) {
+      const u=sub(add(rim[j],scale(decal.normal,.023)),decal.p);
+      const v=sub(add(rim[(j+1)%rim.length],scale(decal.normal,.023)),decal.p);
+      if (Math.hypot(...cross(u,v))>=.000002) shape.fan.push([u,v,decal.normal]);
+    }
+  }
+  decalShapes.set(decal,shape);
+  return shape;
+}
 export const INK_HIT_DURATION=.50;
 const distance = (a,b) => Math.hypot(a.x-b.x,a.z-b.z);
 
@@ -1234,21 +1254,11 @@ export class Battle {
     }
     for (const decal of this.decals) {
       if (!sameLevel(decal.p[0],viewX) || Math.hypot(decal.p[0]-viewX,decal.p[2]-viewZ)>140) continue;
-      const offset=.023;
-      const axes=decalBasis(decal.normal,decal.phase), tint=TEAM_INK[decal.team];
-      const rim=this.world.geometry.coat(decal,axes,DECAL_RIM);
-      if (rim) {
-        const origin=add(decal.p,scale(decal.normal,offset-.023));
-        for (let j=0;j<rim.length;j++) {
-          const u=sub(add(rim[j],scale(decal.normal,offset)),origin);
-          const v=sub(add(rim[(j+1)%rim.length],scale(decal.normal,offset)),origin);
-          if (Math.hypot(...cross(u,v))<.000002) continue;
-          renderer.add('tri',...origin,1,1,1,tint,26,{dynamic:true,basis:[u,v,decal.normal]});
-        }
-      } else {
-        const p=add(decal.p,scale(decal.normal,offset-.023));
-        renderer.add('splat',...p,decal.radius*1.66,decal.radius*1.35,1,tint,26,{dynamic:true,basis:axes});
-      }
+      const tint=TEAM_INK[decal.team];
+      const shape=decalShape(this.world.geometry,decal);
+      if (shape.fan) {
+        for (const basis of shape.fan) renderer.add('tri',...shape.origin,1,1,1,tint,26,{dynamic:true,basis});
+      } else renderer.add('splat',...shape.origin,decal.radius*1.66,decal.radius*1.35,1,tint,26,{dynamic:true,basis:shape.axes});
     }
   }
 }
@@ -1287,7 +1297,9 @@ export function drawCrew(r,a,time,showEffects=true) {
   const tint=TEAM[a.team], bright=TEAM_INK[a.team];
   // Render-only detail: hit detection collects the plain shapes, so the
   // silhouette and every pose stay identical to what shots are tested against.
-  const hi=!!r.fidelity;
+  const view=r.viewPoint;
+  const range=view?Math.hypot(a.x-view[0],a.y-view[1],a.z-view[2]):0;
+  const hi=!!r.fidelity && range<(r.lite?13:26);
   const soft=hi?'soft':'bevel', limbShape=hi?'limb':'taper';
   const grip=a.climbing && a.climbNormal;
   const yaw=Math.PI-(grip?Math.atan2(-grip[0],grip[2]):a.isPlayer || a.swimming || a.weapon?.roller?a.yaw:a.bodyYaw??a.yaw);
@@ -1295,7 +1307,7 @@ export function drawCrew(r,a,time,showEffects=true) {
     drawSquid(r,a,time,tint,0xffebbd,giantScale(a.x));
     return;
   }
-  if (hi && showEffects && !a.climbing && !(a.airborne ?? Math.abs(a.vy??0)>.48)) {
+  if (r.fidelity && showEffects && range<60 && !a.climbing && !(a.airborne ?? Math.abs(a.vy??0)>.48)) {
     r.add('shade',a.x,a.y+.016,a.z,a.swimming?1.05:1.25,1,a.swimming?1.35:1.25,0,28,{dynamic:true,label:.62});
   }
   if (showEffects && a.guard>0) {
@@ -1397,8 +1409,8 @@ export function drawCrew(r,a,time,showEffects=true) {
   const capacity=a.tankMax ?? BASE_TANK, expanded=capacity>BASE_TANK;
   const tankHeight=expanded?1.11:.79, fill=tankHeight*.70*clamp(a.tank/capacity,0,1);
   part(soft,0,1.13,-.294,.53,.57,.218,armor,21);
-  part('bevel',0,1.125,-.458,.463,tankHeight,.31,0x778d90,4);
-  part('bevel',0,1.125,-.557,.362,tankHeight*.82,.176,visor,8);
+  part('bevel',0,1.125,-.458,.463,tankHeight,.31,hi?0x3a474b:0x778d90,4);
+  if (!hi) part('bevel',0,1.125,-.557,.362,tankHeight*.82,.176,visor,8);
   for (const sign of [-1,1]) {
     part(soft,0,1.125+sign*(tankHeight*.50-.05),-.463,.479,.12,.285,armor,20);
     part('bevel',sign*.198,1.125,-.551,.073,tankHeight*.74,.134,accent,4);
@@ -1407,8 +1419,11 @@ export function drawCrew(r,a,time,showEffects=true) {
   part('bevel',0,1.125,-.657,.086,tankHeight*.75,.029,GRAPHITE,4);
   if (fill>.003) part('box',0,1.125+(fill-tankHeight*.70)*.5,-.678,.045,fill,.020,bright,3);
   if (hi) {
-    const inner=tankHeight*.70, level=fill/Math.max(.001,inner), slosh=Math.sin(time*5.3+a.index)*.012*pace;
-    if (level>.01) part('box',0,1.125-inner*.5+inner*level*.5,-.567,.30,inner*level,.12,bright,9,slosh);
+    // A clear canister: dark liner, sloshing ink column, glass front.
+    const inner=tankHeight*.74, level=clamp(a.tank/capacity,0,1), slosh=Math.sin(time*5.3+a.index)*.05*(pace+.2);
+    part('box',0,1.125,-.535,.33,inner+.02,.05,0x10181b,21);
+    if (level>.01) part('box',0,1.125-inner*.5+inner*level*.5,-.585,.31,inner*level,.09,bright,9,slosh*.2);
+    part('glass',0,1.125,-.636,.35,inner+.03,1,0xd8f0ea,17);
     part('box',0,1.125+tankHeight*.38,-.47,.08,.05,.08,0x9aa7a4,4);
   }
   for (const sign of [-1,1]) {
