@@ -1,0 +1,21 @@
+{
+  "name": "inkshift-overpass",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "node --test cloudflare/test.mjs cloudflare/*.test.mjs",
+    "dry-run": "wrangler deploy --dry-run",
+    "deploy": "wrangler deploy",
+    "access-code": "wrangler secret put GAME_ACCESS_CODE",
+    "dev:cloud": "wrangler dev --ip 127.0.0.1",
+    "build:scene": "node cloudflare/build-scene.mjs",
+    "predeploy": "npm run build:scene",
+    "predry-run": "npm run build:scene"
+  },
+  "devDependencies": {
+    "wrangler": "^4.50.0"
+  }
+}

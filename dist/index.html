@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="inkshift-compute" content="local">
+  <meta name="theme-color" content="#111c20">
+  <meta name="description" content="高架線と地下鉄を行き来する、3Dインク陣取りゲーム。7分のナワバリ戦とタイムレスバトル。">
+  <title>INK//SHIFT — 第07高架街区</title>
+  <link rel="icon" href="mark.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="mark-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <link rel="stylesheet" href="game.css?v=20">
+</head>
+<body>
+  <main id="game" aria-label="INK//SHIFT">
+    <canvas id="arena" tabindex="0" aria-label="第07高架街区の3D対戦フィールド"></canvas>
+    <div id="damage-flash" aria-hidden="true"></div>
+    <div id="floaters" aria-hidden="true"></div>
+
+    <section id="title-screen" class="overlay" aria-label="タイトル">
+      <div class="title-shade"></div>
+      <header class="site-bar">
+        <div class="brand">
+          <svg viewBox="0 0 38 38" width="38" height="38" aria-hidden="true"><path d="M2 2h34v34H2z" fill="none" stroke="currentColor" stroke-width="2"/><path d="m9 26 8-14h5l-8 14Zm9 0 8-14h5l-8 14Z" fill="currentColor"/></svg>
+          <div><b>SHIFT ARCADE</b><small>FIELD OPERATIONS</small></div>
+        </div>
+        <div class="site-actions">
+          <button id="quality" class="icon-action" type="button" title="描画品質の切替"><span aria-hidden="true">◇</span> <b>高画質</b></button>
+          <button id="sound" class="icon-action" type="button" aria-pressed="false" title="サウンド切替"><span aria-hidden="true">◉</span> <b>音声 OFF</b></button>
+          <button id="fullscreen" class="icon-action" type="button" title="全画面切替"><span aria-hidden="true">⛶</span> <b>全画面</b></button>
+        </div>
+      </header>
+
+      <div class="hero">
+        <div class="eyebrow"><span class="live-dot"></span> 3D TURF BATTLE <span class="tag" id="match-tag">8 VS 8</span></div>
+        <h1>INK<span>//</span><br>SHIFT<i>.</i></h1>
+        <p class="hero-copy">街を塗り替えろ。</p>
+        <p class="hero-detail">高架線、地下駅、走行中の車内まで。<br>7分のナワバリ戦と、時間無制限の4対4。</p>
+        <div class="start-actions">
+          <button class="primary slant" id="start" type="button"><span>バトル開始<small>PLAY AS A CREW MEMBER</small></span><span class="action-arrow" aria-hidden="true">↗</span></button>
+          <button class="secondary slant" id="watch" type="button"><span>NPC戦を観戦<small id="watch-caption">WATCH 8 VS 8</small></span><span aria-hidden="true">▷</span></button>
+          <button class="secondary slant timeless-action" id="timeless" type="button"><span>タイムレスバトル<small>時間無制限ロワイヤル · 4対4</small></span><span aria-hidden="true">∞</span></button>
+        </div>
+        <div class="hero-toolbar">
+          <button id="loadout" class="text-action" type="button"><span aria-hidden="true">◇</span> 武器を選ぶ <b id="active-weapon">シューター</b></button>
+          <button id="how" class="text-action" type="button"><span aria-hidden="true">ⓘ</span> 操作ガイド</button>
+          <a id="apk-download" class="text-action apk-download" href="./inkshift-android.apk" download="inkshift-android.apk">Android APK 1.3</a>
+          <a id="android-cloud" class="text-action" href="https://appassets.androidplatform.net/__cloud_server" hidden>Cloudflare接続先</a>
+        </div>
+      </div>
+
+      <aside class="stage-card" aria-label="ステージ情報">
+        <div class="stage-band"><span>SECTOR / 07</span><span class="stage-cross">✛</span></div>
+        <div class="stage-info">
+          <span class="map-number">07</span>
+          <div><b>OVERPASS</b><small>第07高架街区</small></div>
+        </div>
+        <div class="stage-spec"><span>地上 + B1 + 車内</span><span>07 LINE</span></div>
+      </aside>
+
+      <footer class="title-footer">
+        <span><i></i> <span id="compute-state">演算環境を確認中</span></span>
+        <span>SHOOT · SWIM · SPLAT</span>
+      </footer>
+    </section>
+
+    <section id="hud" class="overlay" aria-label="対戦情報" hidden>
+      <header class="hud-bar">
+        <div class="hud-label"><b>OVERPASS 07</b><small id="hud-mode">8 VS 8 / ナワバリ戦</small></div>
+        <div class="scoreboard">
+          <div class="score cyan"><span>CYAN</span><b id="cyan-score">0.0<small>%</small></b><div id="cyan-bar" class="team-bar"></div></div>
+          <div class="clock"><small id="clock-label">残り時間</small><b id="time">7:00</b></div>
+          <div class="score orange"><span>AMBER</span><b id="orange-score">0.0<small>%</small></b><div id="orange-bar" class="team-bar"></div></div>
+        </div>
+        <div class="hud-actions">
+          <button id="watch-view" type="button" hidden>NPCを追う</button>
+          <button id="cycle" type="button" hidden>次のNPC</button>
+          <button id="change-loadout" type="button" title="武器を変更（B）" hidden>武器変更</button>
+          <button id="hud-fullscreen" type="button" aria-label="全画面" title="全画面">⛶</button>
+          <button id="pause" type="button" aria-label="ポーズ" title="ポーズ">Ⅱ</button>
+        </div>
+      </header>
+      <div id="squads"><div id="cyan-squad"></div><div id="orange-squad"></div></div>
+
+      <div id="boss-hud" hidden aria-label="オオモノイカの体力">
+        <div><b>オオモノイカ</b><span id="boss-phase">第1段階</span><strong id="boss-pct">100%</strong></div>
+        <div class="boss-track"><i id="boss-bar"></i></div>
+      </div>
+      <div id="boss-alert" hidden role="status"></div>
+      <div class="hud-left-stack">
+        <div id="combat-tools" aria-label="サブ・スーパー・ドローン">
+          <button id="super-action" class="skill-action" type="button" aria-label="スーパーチャージを発動">
+            <span aria-hidden="true">✦</span><b id="super-name">シールド</b><small id="super-state">0%</small><kbd>Q</kbd><i id="super-bar"></i>
+          </button>
+          <button id="sub-action" class="skill-action" type="button" aria-label="選択したサブウェポンを使う">
+            <span aria-hidden="true">◈</span><b id="sub-name">投げボム</b><small id="sub-state">準備OK</small><kbd>G</kbd>
+          </button>
+          <button id="drone-action" class="skill-action" type="button" aria-label="塗りドローンを召喚">
+            <span aria-hidden="true">◇</span><b>ドローン</b><small id="drone-state">準備OK</small><kbd>E</kbd>
+          </button>
+        </div>
+        <div class="status-stack">
+          <div id="train-alert" hidden role="status"></div>
+          <div id="raid-status" hidden aria-label="襲撃状況"></div>
+          <div id="metro-status" hidden aria-label="列車の車体状態"><span id="train-line-name">高架線</span><b id="metro-hp">車体 100%</b><i id="metro-hp-bar"></i></div>
+          <div id="train-route" hidden aria-label="4駅直通路線">
+            <b id="train-next" role="status"></b>
+            <div id="train-stops"><span data-stop="G-W">①地上西</span><span data-stop="G-E">②地上東</span><span data-stop="B-E">③地下東</span><span data-stop="B-W">④地下西</span></div>
+          </div>
+        </div>
+      </div>
+      <div id="reticle" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
+      <div id="focus-lock" hidden aria-hidden="true">
+        <div class="lock-halo"></div>
+        <div class="lock-brackets">
+          <i></i><i></i><i></i><i></i>
+          <span class="lock-sweep"></span>
+          <span class="lock-ticks"></span>
+          <b><i></i>LOCK</b>
+        </div>
+      </div>
+      <div id="battle-message" aria-live="polite"></div>
+      <div id="network-note" hidden role="status"></div>
+      <div id="feed" aria-hidden="true"></div>
+
+      <div class="map-wrap">
+        <div class="map-levels" aria-label="ミニマップの階層">
+          <button type="button" data-map-level="auto" aria-pressed="true">自動</button>
+          <button type="button" data-map-level="0" aria-pressed="false">地上</button>
+          <button type="button" data-map-level="1" aria-pressed="false">地下</button>
+        </div>
+        <canvas id="minimap" width="208" height="158" aria-label="塗り状況と味方の位置"></canvas>
+        <div class="map-caption"><span id="map-floor">地上</span><span id="map-score" aria-label="この階層の塗り面積"><b id="map-cyan">0.0</b> / <b id="map-amber">0.0</b>%</span></div>
+      </div>
+      <div class="player-controls">
+        <div id="stairs-note" hidden>階段を歩いて B1 へ</div>
+        <button id="transit-action" class="transit-action" type="button" hidden><span id="transit-label">地下 B1 へ</span><kbd>R</kbd></button>
+        <div id="player-meter">
+          <div id="ink-tank" aria-hidden="true"><div id="ink-bar"></div><i id="ink-next-shot"></i></div>
+          <div class="meter-readout">
+            <div class="meter-label"><b id="hud-weapon">シューター</b></div>
+            <div class="hp-track" aria-label="体力"><div id="hp-bar"></div></div>
+            <div id="charge-track" class="meter-track" hidden><div id="charge-bar"></div></div>
+            <div id="meter-tip">自チームのインクで高速回復</div>
+          </div>
+        </div>
+      </div>
+      <div id="spectator-label" hidden><span class="live-dot"></span> 観戦中 <b id="viewing"></b></div>
+
+      <div id="touch" aria-label="タッチ操作">
+        <div id="stick" aria-label="移動スティック"><span></span></div>
+        <div class="touch-actions">
+          <button id="touch-center" class="touch-center" type="button" aria-label="照準の高さを戻す" title="照準の高さを戻す">◎</button>
+          <button id="touch-jump" type="button" aria-label="ジャンプ"><span>↑</span><small>ジャンプ</small></button>
+          <button id="touch-swim" type="button" aria-label="潜る"><span>◒</span><small>潜る</small></button>
+          <button id="touch-fire" type="button" aria-label="インクを撃つ"><span>◎</span><small id="fire-caption">撃つ</small></button>
+        </div>
+      </div>
+    </section>
+
+    <section id="dialog" class="overlay dialog-wrap" hidden aria-label="メニュー">
+      <div class="dialog-panel" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+        <div class="dialog-kicker"><span>INK//SHIFT</span><span>FIELD OPS / 07</span></div>
+        <h2 id="dialog-title"></h2>
+        <div id="dialog-content"></div>
+        <div id="dialog-actions"></div>
+      </div>
+    </section>
+    <section id="rotate" class="overlay dialog-wrap" hidden aria-label="端末を横向きに">
+      <div class="dialog-panel rotate-panel" role="dialog" aria-modal="true" aria-labelledby="rotate-title">
+        <div class="dialog-kicker"><span>INK//SHIFT</span><span>LANDSCAPE MODE</span></div>
+        <svg viewBox="0 0 72 52" width="72" height="52" aria-hidden="true"><rect x="7" y="10" width="47" height="30" rx="4" fill="none" stroke="currentColor" stroke-width="3"/><path d="M46 15v20M60 11l7 5-7 5M67 16h-8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
+        <h2 id="rotate-title">スマホを横向きに</h2>
+        <p>横画面にすると対戦を続けられます。</p>
+        <div class="rotate-actions">
+          <button class="primary" id="rotate-fullscreen" type="button">全画面にする</button>
+          <button class="secondary" id="exit-rotate" type="button">タイトルへ</button>
+        </div>
+      </div>
+    </section>
+    <div id="loading" role="status"><span class="live-dot"></span><span id="loading-caption">第07高架街区を読み込み中</span></div>
+    <noscript>プレイするにはJavaScriptを有効にしてください。</noscript>
+  </main>
+  <script type="module" src="main.js?v=25"></script>
+</body>
+</html>
