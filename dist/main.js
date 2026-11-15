@@ -658,7 +658,7 @@ function matchRecord(content) {
   const rows=matchResults(battle,paint);
   const career=battle.expBanked?loadCareer():bankResults(rows);
   battle.expBanked=true;
-  const mvp=mostActive(rows), me=rows.find(row=>row.isPlayer);
+  const best=mostActive(rows), mvp=best?.activity>0?best:null, me=rows.find(row=>row.isPlayer);
   if (me) {
     const line=document.createElement('p');
     line.className='result-note';
