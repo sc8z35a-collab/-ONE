@@ -127,8 +127,9 @@ export class SoftwareRenderer {
 
   draw(camera,paint,clock=0) {
     const canvas=this.canvas;
-    const cap=this.lite?720:1024;
-    const ratio=Math.min(1,cap/canvas.clientWidth,cap*.5625/canvas.clientHeight);
+    // Lightweight modes keep the same 400 / 300 lines as the WebGL renderer.
+    const short=Math.max(1,Math.min(canvas.clientWidth,canvas.clientHeight));
+    const ratio=this.lite?Math.min(1,(this.ultra?300:400)/short):Math.min(1,1024/canvas.clientWidth,576/canvas.clientHeight);
     this.viewZone=zoneOf(camera.eye[0]);
     this.interior=interiorBlend(camera);
     if (!this.lite && !this.shadow && this.world) this.configureWorld(this.world,paint);

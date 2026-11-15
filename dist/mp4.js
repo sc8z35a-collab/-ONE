@@ -95,15 +95,35 @@ function audioEntry(track) {
   throw new Error('Unsupported audio codec '+codec);
 }
 
+// Encoders that reorder frames (B-frames) deliver them in decode order with
+// their own presentation times. Those become composition offsets (ctts),
+// raised so none is negative, and an edit list (elst) that starts the
+// presentation at the first frame again.
+function reordering(samples) {
+  let dts=0, lowest=0, reordered=false;
+  const offsets=new Array(samples.length);
+  for (let i=0;i<samples.length;i++) {
+    const sample=samples[i], offset=sample.pts===undefined?0:sample.pts-dts;
+    offsets[i]=offset;
+    if (offset) reordered=true;
+    if (offset<lowest) lowest=offset;
+    dts+=sample.duration;
+  }
+  return reordered?{shift:-lowest,offsets:offsets.map(offset=>offset-lowest)}:null;
+}
+
 function trackBox(track,id,movieScale,base) {
   const {samples,timescale}=track, video=track.kind==='video';
   const duration=samples.reduce((sum,sample)=>sum+sample.duration,0);
   const movieDuration=Math.round(duration/timescale*movieScale);
   const stts=runs(samples.map(sample=>sample.duration));
   const keys=samples.flatMap((sample,i)=>sample.key?[i+1]:[]);
+  const order=video?reordering(samples):null;
+  const ctts=order?runs(order.offsets):null;
   const stbl=box('stbl',
     full('stsd',0,0,u32(1),video?videoEntry(track):audioEntry(track)),
     full('stts',0,0,u32(stts.length),table(stts.flat())),
+    ...(ctts?[full('ctts',0,0,u32(ctts.length),table(ctts.flat()))]:[]),
     ...(video && keys.length<samples.length?[full('stss',0,0,u32(keys.length),table(keys))]:[]),
     full('stsc',0,0,u32(1),u32(1),u32(1),u32(1)),
     full('stsz',0,0,u32(0),u32(samples.length),table(samples.map(sample=>sample.size))),
@@ -116,7 +136,8 @@ function trackBox(track,id,movieScale,base) {
     minf);
   const tkhd=full('tkhd',0,3,u32(0),u32(0),u32(id),u32(0),u32(movieDuration),zeros(8),u16(0),u16(0),u16(video?0:0x100),u16(0),
     MATRIX,u32((track.width??0)*65536),u32((track.height??0)*65536));
-  return {box:box('trak',tkhd,mdia),duration:movieDuration};
+  const edit=order?[box('edts',full('elst',0,0,u32(1),u32(movieDuration),u32(order.shift),u16(1),u16(0)))]:[];
+  return {box:box('trak',tkhd,...edit,mdia),duration:movieDuration};
 }
 
 export class Mp4Writer {
@@ -136,8 +157,10 @@ export class Mp4Writer {
     return track;
   }
 
-  addSample(track,data,duration,key=true) {
-    track.samples.push({offset:this.bytes,size:data.length,duration,key});
+  // `pts` (presentation time, in the track's timescale) is only needed when
+  // the encoder reorders frames.
+  addSample(track,data,duration,key=true,pts=undefined) {
+    track.samples.push({offset:this.bytes,size:data.length,duration,key,pts});
     this.pending.push(data);
     this.pendingBytes+=data.length;
     this.bytes+=data.length;

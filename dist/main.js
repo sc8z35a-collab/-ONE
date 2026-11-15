@@ -14,7 +14,7 @@ import {STAIRS,stairLane,stairPoint} from './stairs.js';
 import {SUBWEAPONS,subweaponById} from './subweapons.js';
 import {inkReadout,inkResult} from './ink-hud.js';
 import {bankResults,levelOf,loadCareer,matchResults,mostActive,playerExp} from './progress.js';
-import {FILM_RATES,FILM_SIZES,Film,filmSupport} from './film.js';
+import {FILM_RATES,FILM_SECONDS,FILM_SIZES,Film,filmBytes,filmSupport} from './film.js';
 import {BOSS_RESPAWN_SECONDS,EXP_PER_KILL,RESPAWN_SECONDS} from './battle.js';
 import {TRAIN_DOORS} from './train-model.js';
 import {BOSS_BODY_HEIGHT} from './boss-model.js';
@@ -477,10 +477,12 @@ function filmDialog(defaults={size:'fhd',fps:60}) {
     support=await filmSupport(renderer,size.value,Number(rate.value));
     if (ticket!==probe) return;
     begin.disabled=!!support.reason;
-    const frames=Math.round(426*Number(rate.value));
+    const frames=Math.round(FILM_SECONDS*Number(rate.value));
+    const bytes=support.reason?0:filmBytes(support);
+    const estimate=bytes>=1e9?'約'+(bytes/1e9).toFixed(1)+' GB':'約'+Math.round(bytes/1e6)+' MB';
     status.textContent=support.reason ?? '映像 '+support.video.label+' · 約'+Math.round(support.video.config.bitrate/1e6)+' Mbps\n音声 '+
       (support.audio?support.audio.label+' · '+Math.round(support.audio.config.bitrate/1000)+' kbps · 48 kHz ステレオ':'なし（この端末は音声エンコード非対応）')+
-      '\n全 '+frames.toLocaleString()+' フレーム。書き出し中はこの画面を開いたままにしてください。';
+      '\n全 '+frames.toLocaleString()+' フレーム · ファイル '+estimate+'。書き出し中はこの画面を開いたままにしてください。';
   };
   size.addEventListener('change',refresh);
   rate.addEventListener('change',refresh);
@@ -1467,11 +1469,11 @@ function frame(now) {
   }
   const running=state==='match' && !dialogKind && !rotationGate && !document.hidden;
   if (!dialogKind && !rotationGate) activeClock+=dt;
-  camera=cameraFor(dt);
+  // The world moves first and the camera follows in the same frame, so the
+  // view never trails the crew by a frame.
   if (remote && !dialogKind) {
     remote.input(running?getInput():null,!running);
     remote.advance(now);
-    camera=cameraFor(0);
     if (battle.finished && state==='match') finish();
   } else if (running && dt>0) {
     const input=getInput();
@@ -1486,8 +1488,8 @@ function frame(now) {
       }
       input.jump=input.press=input.super=input.drone=input.use=input.sub=false;
     }
-    camera=cameraFor(0);
   }
+  camera=cameraFor(dt);
   const tookDamage=battle?.player?.lastDamageAt;
   const damageAge=Number.isFinite(tookDamage)?battle.clock+(battle.impactAgeOffset??0)-tookDamage:Infinity;
   damageFlash.style.opacity=String(Math.pow(clamp(1-damageAge/.49,0,1),1.35));
@@ -1689,6 +1691,7 @@ arena.addEventListener('webglcontextrestored',()=>{
     applyQuality();
     world.rebuildRenderer(renderer,sceneData);
     renderer.configureWorld?.(world,paint);
+    loadTextures();
     graphicsLost=false;
     prevTime=0;
     viewActor=null;
@@ -1702,6 +1705,12 @@ arena.addEventListener('webglcontextrestored',()=>{
     fault(error);
   }
 });
+
+// The real surface textures load after the title is up; phones and the
+// lightweight modes keep smaller layers.
+function loadTextures() {
+  renderer.loadSurfaces?.({size:usingTouch || lightQuality()?256:512}).catch(error=>console.warn('Surface textures unavailable',error));
+}
 
 async function readProgress(response) {
   const total=Number(response.headers.get('content-length'))||0, reader=response.body?.getReader?.();
@@ -1753,6 +1762,7 @@ try {
   camera=cameraFor(0);
   renderer.draw(camera,paint,0);
   measureRefresh();
+  loadTextures();
   $('loading').hidden=true;
   cloudCheck=detectCloud(cloudRequired).then(service=>{
     setCompute(service?(service.ready?'CLOUDFLARE · サーバー演算':'CLOUDFLARE · 設定待ち'):'LOCAL · 端末内演算');

@@ -18,10 +18,14 @@ export const FILM_SIZES={
   uhd:{label:'4K 3840×2160',width:3840,height:2160}
 };
 export const FILM_RATES=[60,120];
-const VIDEO_BITRATE={fhd:{60:24e6,120:36e6},uhd:{60:68e6,120:100e6}};
+const VIDEO_BITRATE={fhd:{60:16e6,120:24e6},uhd:{60:56e6,120:80e6}};
 const AUDIO_BITRATES=[320000,256000,192000];
 const NEUTRAL={x:0,z:0,yaw:0,pitch:0};
-const OUTRO_SECONDS=3;
+const OUTRO_SECONDS=3, COUNTDOWN_SECONDS=3;
+// Length of the finished film in seconds, for estimates before it is made.
+export const FILM_SECONDS=COUNTDOWN_SECONDS+420+OUTRO_SECONDS;
+export const filmBytes=(support,seconds=FILM_SECONDS)=>
+  (support.video.config.bitrate+(support.audio?.config.bitrate??0))*seconds/8;
 const TEAM_COLOURS=['#19d9c0','#ff7a3d'];
 const idle=()=>new Promise(resolve=>{
   const channel=new MessageChannel();
@@ -77,8 +81,11 @@ export async function filmSupport(renderer,size,fps) {
 const format=seconds=>Math.floor(seconds/60)+':'+String(Math.floor(seconds%60)).padStart(2,'0');
 
 export class Film {
-  constructor({canvas,renderer,world,size='fhd',fps=60,seed=Math.floor(Math.random()*0x7fffffff),support,onProgress}) {
-    Object.assign(this,{canvas,renderer,world,size,fps,seed,support,onProgress});
+  // `duration`, `countdown` and `outro` shorten the film for a quick check;
+  // the menu always makes the full seven-minute match.
+  constructor({canvas,renderer,world,size='fhd',fps=60,seed=Math.floor(Math.random()*0x7fffffff),support,onProgress,
+    duration=null,countdown=null,outro=OUTRO_SECONDS}) {
+    Object.assign(this,{canvas,renderer,world,size,fps,seed,support,onProgress,duration,countdown,outro});
     this.canceled=false;
   }
 
@@ -93,7 +100,10 @@ export class Film {
   match(callbacks={}) {
     const paint=new Paint();
     paint.setWorld(this.world);
-    return {paint,battle:new Battle(this.world,paint,'watch',callbacks,{teamSize:8,seed:this.seed})};
+    const battle=new Battle(this.world,paint,'watch',callbacks,{teamSize:8,seed:this.seed});
+    if (this.duration) battle.duration=battle.left=this.duration;
+    if (this.countdown!==null) battle.countdown=this.countdown;
+    return {paint,battle};
   }
 
   // First run: the whole match without drawing, to learn who was most active.
@@ -246,7 +256,7 @@ export class Film {
         }
         const data=new Uint8Array(chunk.byteLength);
         chunk.copyTo(data);
-        writer.addSample(videoTrack,data,100,chunk.type==='key');
+        writer.addSample(videoTrack,data,100,chunk.type==='key',Math.round(chunk.timestamp*fps/1e4));
       }});
       videoEncoder.configure(video.config);
       let audioTrack=null, audioAt=0;
@@ -296,7 +306,8 @@ export class Film {
       const {paint}=match;
       star=battle.actors.find(actor=>actor.name===starName) ?? battle.actors[0];
       renderer.configureWorld?.(world,paint);
-      const dt=1/fps, matchFrames=Math.round((battle.duration+battle.countdown)*fps), total=matchFrames+OUTRO_SECONDS*fps;
+      const outro=Math.round(this.outro*fps);
+      const dt=1/fps, matchFrames=Math.round((battle.duration+battle.countdown)*fps), total=matchFrames+outro;
       const began=performance.now();
       let frame=0, shown=0;
       const present=async finale=>{
@@ -346,7 +357,7 @@ export class Film {
         battle.update(dt,NEUTRAL,null);
         await present(false);
       }
-      for (let i=0;i<OUTRO_SECONDS*fps;i++) await present(true);
+      for (let i=0;i<outro;i++) await present(true);
       this.onProgress?.({phase:'finish',done:frame,total:frame});
       await videoEncoder.flush();
       if (audioEncoder) await audioEncoder.flush();

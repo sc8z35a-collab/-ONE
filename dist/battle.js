@@ -289,8 +289,9 @@ export class Battle {
     this.callbacks=callbacks;
     this.timeless=mode==='timeless';
     this.teamSize=this.timeless || options.teamSize===4?4:8;
+    // A seeded match (the offline film) replays exactly from its seed.
     this.seed=Number.isInteger(options.seed)?options.seed:null;
-    this.rng=randomGenerator(mode==='watch'?77349:947213);
+    this.rng=randomGenerator(this.seed ?? (mode==='watch'?77349:947213));
     this.navs=world.navigations ??= ZONES.map(zone=>new Navigation(world,zone));
     [this.nav,this.lowerNav]=this.navs;
     this.transit=new Transit(world,paint);
@@ -1600,7 +1601,9 @@ export function drawCrew(r,a,time,showEffects=true) {
     if (hi) for (const sign of [-1,1]) squid('limb',sign*.21,.15,.05,.06,.34,.05,bright,9,Math.PI/2.3);
     return;
   }
-  const material=(mat,c)=>mat===2?(c===BOOT || c===GRAPHITE?21:18):mat===4 && (c===tint || c===bright)?20:mat;
+  // Crew materials: 30 ripstop suit, 31 canvas webbing, 21 rubber, 20 armour
+  // (kept apart from the scene's 18, train seat fabric, for the textures).
+  const material=(mat,c)=>mat===2?(c===BOOT?21:c===GRAPHITE?31:30):mat===4 && (c===tint || c===bright)?20:mat;
   const part=(type,x,y,z,w,h,d,c,mat=2,pitch=0)=>{
     const upper=clamp((y-.66)*1.06,0,1);
     r.add(type,...loc(x+sway*upper,y+rise*upper,z+lean*upper),w,h,d,c,material(mat,c),
@@ -1634,7 +1637,7 @@ export function drawCrew(r,a,time,showEffects=true) {
   const visor=a.team===0?0x4c8c99:0x825650;
   part(soft,0,.99,-.025,.66,.62,.44,armor,2,.13);
   part(soft,0,1.13,.063,.61,.34,.43,tint,20);
-  part(soft,0,1.18,.272,.36,.16,.062,hit,18);
+  part(soft,0,1.18,.272,.36,.16,.062,hit,30);
   part(soft,0,.80,.186,.54,.14,.17,GRAPHITE,21);
   part('bevel',0,.824,.284,.169,.080,.045,accent,4);
   part(soft,0,1.402,.014,.38,.19,.34,GRAPHITE,21);
@@ -1708,8 +1711,8 @@ export function drawCrew(r,a,time,showEffects=true) {
       const x=a.feet[base],y=a.feet[base+1]+.060,z=a.feet[base+2];
       const ankle=[x-fx*.064,y+.111,z-fz*.064];
       const knee=limbJoint(loc(...hip),ankle,.383,.370,[fx,.09,fz]);
-      r.beam(loc(...hip),knee,.25,.26,GRAPHITE,18,{dynamic:true,shape:limbShape});
-      r.beam(knee,ankle,.21,.23,hit,18,{dynamic:true,shape:limbShape});
+      r.beam(loc(...hip),knee,.25,.26,GRAPHITE,31,{dynamic:true,shape:limbShape});
+      r.beam(knee,ankle,.21,.23,hit,30,{dynamic:true,shape:limbShape});
       const part=(type,x,y,z,w,h,d,color,mat)=>r.add(type,x,y,z,w,h,d,color,mat,{dynamic:true,yaw:bootYaw});
       part(soft,...knee,.242,.236,.260,GRAPHITE,21);
       part(soft,knee[0]+fx*.127,knee[1],knee[2]+fz*.127,.148,.121,.047,tint,20);
@@ -1722,8 +1725,8 @@ export function drawCrew(r,a,time,showEffects=true) {
         part(soft,x-fx*.16,y+.05,z-fz*.16,.24,.13,.12,0x1c272b,21);
       }
     } else {
-      r.beam(loc(...hip),loc(...knee),.25,.26,GRAPHITE,18,{dynamic:true,shape:limbShape});
-      r.beam(loc(...knee),loc(...ankle),.21,.23,hit,18,{dynamic:true,shape:limbShape});
+      r.beam(loc(...hip),loc(...knee),.25,.26,GRAPHITE,31,{dynamic:true,shape:limbShape});
+      r.beam(loc(...knee),loc(...ankle),.21,.23,hit,30,{dynamic:true,shape:limbShape});
       part(soft,...knee,.242,.236,.260,GRAPHITE,21);
       part(soft,knee[0],knee[1],knee[2]+.127,.148,.121,.047,tint,20);
       const bootPitch=airborne?(rising?-.32:.16):transfer*sign*pace*.14;
@@ -1745,9 +1748,9 @@ export function drawCrew(r,a,time,showEffects=true) {
     const shoulder=torso(sign*.331,1.241,.023);
     const elbow=planted || a.brace>0?limbJoint(shoulder,hand,.371,.415,[sign*cy,-.58,-sign*sy]):
       loc(sign*.386,1.06+armLift,.22+armSwing);
-    r.beam(shoulder,elbow,.19,.21,tint,18,{dynamic:true,shape:limbShape});
-    r.beam(elbow,hand,.165,.18,hit,18,{dynamic:true,shape:limbShape});
-    r.add('orb',...elbow,.192,.185,.194,tint,18,{dynamic:true,yaw});
+    r.beam(shoulder,elbow,.19,.21,tint,30,{dynamic:true,shape:limbShape});
+    r.beam(elbow,hand,.165,.18,hit,30,{dynamic:true,shape:limbShape});
+    r.add('orb',...elbow,.192,.185,.194,tint,30,{dynamic:true,yaw});
     if (hi) {
       const wrist=add(hand,scale(unit(sub(elbow,hand)),.07));
       r.add('cylinder',...wrist,.15,.05,.15,0x1c272b,21,{dynamic:true,basis:limbBasis(sub(hand,elbow))});

@@ -312,7 +312,8 @@ export class Abilities {
       }
       if (Math.hypot(d.x-oldX,d.z-oldZ)<.001) d.turn=0;
       d.gun=(d.gun??DRONE_FIRE_INTERVAL)-dt;
-      if (d.gun<=0) d.gun=this.droneFire(d)?DRONE_FIRE_INTERVAL:.2;
+      // The remainder carries over, so the cadence stays at exactly one a second.
+      if (d.gun<=0) d.gun=this.droneFire(d)?Math.max(.5,d.gun+DRONE_FIRE_INTERVAL):.2;
     }
     this.rings=this.rings.filter(ring=>ring.until>b.clock);
     this.advanced.update(dt);

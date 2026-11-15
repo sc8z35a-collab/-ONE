@@ -1,6 +1,8 @@
 import {CABIN_X,CABIN_Y,RAIL_CABIN_X,UNDER_X,UNDER_Y,ZONES,interiorBlend,zoneOf} from './layout.js';
 import {BLUR_FRAGMENT,COMPOSITE_FRAGMENT,DETAIL_FRAGMENT,DOWN_FRAGMENT,ENV_FRAGMENT,FULLSCREEN_VERTEX,LITE_FRAGMENT,LITE_SKY_FRAGMENT,
   SCENE_FRAGMENT,SCENE_VERTEX,SHADOW_FRAGMENT,SHADOW_VERTEX,SKY_FRAGMENT,SSAO_FRAGMENT,UP_FRAGMENT} from './render-shaders.js';
+import {loadSurfaceSheets,surfaceArray} from './surface-textures.js';
+import {SURFACE_COUNT} from './surfaces.js';
 
 export const TAU = Math.PI * 2;
 export const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -453,9 +455,9 @@ function labelTexture(gl,anisotropy) {
 
 const SCENE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uShape','uQuality','uHDR','uMirrorPass',
   'uShadowOn','uCascades','uShadowM0','uShadowM1','uShadowTexel','uAtlasGrid','uReflectOn','uViewport','uEnvLod','uClock',
-  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure'];
+  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge','uSurfaceMean'];
 const SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uField','uClock','uInterior','uHDR','uViewport','uExposure'];
-const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9};
+const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9,surface:10,sheet:11};
 // Per pass culling: LOD switch distance, how far small props draw, hard cut.
 const HIGH_DRAW={lodDist:58,smallDist:150,cull:Infinity};
 // The lightweight modes only draw the street around the fight: far enough to
@@ -468,7 +470,7 @@ const MIRROR_DRAW={lodDist:18,smallDist:24,cull:260};
 export const LITE_LINES=400, ULTRA_LINES=300;
 const LITE_FOG=[.74,.80,.85];
 const LITE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uClock','uAtlasGrid','uUnderX','uUnderY','uCabinX',
-  'uRailCabinX','uCabinY','uInkBounds','uFog','uFogRange','uInkDetail'];
+  'uRailCabinX','uCabinY','uInkBounds','uFog','uFogRange','uShape','uSurfaceSheets','uSurfaceEdge','uSurfaceMean'];
 const LITE_SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uFog','uField','uInterior'];
 const ENV_SIZE=[512,256];
 
@@ -505,20 +507,27 @@ export class Renderer {
     this.s = uniforms(gl,this.sky,SKY_UNIFORMS);
     this.shadowUniform = gl.getUniformLocation(this.shadow,'uLight');
     samplers(gl,this.scene,{uShadow0:UNIT.shadow0,uInk:UNIT.ink,uAtlas:UNIT.atlas,uReflection:UNIT.reflection,
-      uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1});
+      uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1,uSurface:UNIT.surface});
     samplers(gl,this.sky,{uDetail:UNIT.detail});
     try {
       this.sceneLite=program(gl,SCENE_VERTEX,LITE_FRAGMENT);
       this.skyLite=program(gl,FULLSCREEN_VERTEX,LITE_SKY_FRAGMENT);
       this.ul=uniforms(gl,this.sceneLite,LITE_UNIFORMS);
       this.sl=uniforms(gl,this.skyLite,LITE_SKY_UNIFORMS);
-      samplers(gl,this.sceneLite,{uInk:UNIT.ink,uAtlas:UNIT.atlas});
+      samplers(gl,this.sceneLite,{uInk:UNIT.ink,uAtlas:UNIT.atlas,uSurface:UNIT.surface});
     } catch (error) {
       // The full shader still renders the lightweight modes, only slower.
       console.warn('Lightweight shader unavailable',error);
       this.sceneLite=this.skyLite=null;
     }
     this.empty = gl.createVertexArray();
+    // Real surface textures arrive later (loadSurfaces); until then a blank
+    // one-pixel array keeps the sampler valid and the shaders procedural.
+    this.surfacePlaceholder=surfaceArray(gl,1,UNIT.surface,null);
+    this.surfaceTexture=null;
+    this.surfaceSheets=0;
+    this.surfaceSize=0;
+    this.surfaceMeans=new Float32Array(SURFACE_COUNT*3).fill(.5);
     this.inkTexture = gl.createTexture();
     this.inkSource=paint;
     gl.activeTexture(gl.TEXTURE0+UNIT.ink);
@@ -649,6 +658,30 @@ export class Renderer {
     gl.generateMipmap(gl.TEXTURE_2D);
     this.envClock=clock;
     return this.envTexture;
+  }
+
+  // Loads the generated texture sheets in the background; surfaces switch
+  // from their procedural look as each sheet arrives.
+  loadSurfaces({size=512}={}) {
+    return loadSurfaceSheets(this,{size,units:{surface:UNIT.surface,sheet:UNIT.sheet}});
+  }
+
+  bindSurfaces(u,sheets) {
+    const gl=this.gl;
+    gl.activeTexture(gl.TEXTURE0+UNIT.surface);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.surfaceTexture ?? this.surfacePlaceholder);
+    // The lightweight modes read the textures with plain trilinear filtering.
+    if (this.lite && !this.liteSampler) {
+      this.liteSampler=gl.createSampler();
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_WRAP_S,gl.REPEAT);
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_WRAP_T,gl.REPEAT);
+    }
+    gl.bindSampler(UNIT.surface,this.lite?this.liteSampler:null);
+    gl.uniform1i(u.uSurfaceSheets,this.surfaceTexture?sheets:0);
+    gl.uniform1f(u.uSurfaceEdge,.5/Math.max(1,this.surfaceSize));
+    gl.uniform3fv(u.uSurfaceMean,this.surfaceMeans);
   }
 
   // 'high', 'lite' (400p, no shadows or reflections, short draw distance) or
@@ -1292,6 +1325,7 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D,this.envTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.detail);
     gl.bindTexture(gl.TEXTURE_2D,this.detail);
+    this.bindSurfaces(u,this.surfaceSheets);
     const planes=frustum(vp);
     this.drawScene(eye,planes,mirror,false);
     if (this.interior<.995) {
@@ -1340,11 +1374,12 @@ export class Renderer {
     gl.uniform3fv(u.uFog,LITE_FOG);
     if (Number.isFinite(reach)) gl.uniform2f(u.uFogRange,reach*.5,reach*.97);
     else gl.uniform2f(u.uFogRange,1e7,2e7);
-    gl.uniform1i(u.uInkDetail,this.ultra?0:1);
     gl.activeTexture(gl.TEXTURE0+UNIT.ink);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.inkTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.atlas);
     gl.bindTexture(gl.TEXTURE_2D,this.atlas);
+    // The ultra-light mode keeps flat colours: no texture taps at all.
+    this.bindSurfaces(u,this.ultra?0:this.surfaceSheets);
     const planes=frustum(vp);
     this.drawScene(eye,planes,false,false);
     if (this.interior<.995) {
