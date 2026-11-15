@@ -13,6 +13,9 @@ import {fullscreenElement,setFullscreen} from './fullscreen.js';
 import {STAIRS,stairLane,stairPoint} from './stairs.js';
 import {SUBWEAPONS,subweaponById} from './subweapons.js';
 import {inkReadout,inkResult} from './ink-hud.js';
+import {bankResults,levelOf,loadCareer,matchResults,mostActive,playerExp} from './progress.js';
+import {FILM_RATES,FILM_SECONDS,FILM_SIZES,Film,filmBytes,filmSupport} from './film.js';
+import {BOSS_RESPAWN_SECONDS,EXP_PER_KILL,RESPAWN_SECONDS} from './battle.js';
 import {TRAIN_DOORS} from './train-model.js';
 import {BOSS_BODY_HEIGHT} from './boss-model.js';
 import {StageObjects} from './stage-objects.js';
@@ -37,8 +40,8 @@ let renderer, world, demoStage, paint, localPaint, battle=null, camera=null, yaw
 let state='title', dialogKind=null, activeClock=0, prevTime=0, hudTime=0, mapTime=0, watchYaw=0;
 let usingTouch=matchMedia('(pointer: coarse)').matches;
 let mute=true, audio, noise, jumpQueued=false, shotQueued=false, desktopFire=false, rotationGate=false, hadPointerLock=false;
-let viewActor=null, viewZone=-1, viewHeight=0, cameraReach=1, watchAerial=true;
-let focus=null;
+let viewActor=null, viewZone=-1, viewHeight=0, viewX=0, viewZ=0, watchPitch=0, cameraReach=1, watchAerial=true;
+let focus=null, fpsTime=0, film=null;
 let superQueued=false, droneQueued=false, useQueued=false, subQueued=false, demoTrain;
 let remote=null, connecting=null, accessCode='', cloudCheck=null, cloud=null;
 let sceneData, graphicsLost=false, graphicsTimeout=0;
@@ -65,19 +68,27 @@ function readPrefs() {
     sub:subweaponById(saved.sub).id,
     teamSize:saved.teamSize===4?4:8,
     sensitivity:Number.isFinite(saved.sensitivity)?clamp(saved.sensitivity,.55,1.75):1,
-    quality:['lite','high'].includes(saved.quality)?saved.quality:'auto'
+    quality:['ultra','lite','high'].includes(saved.quality)?saved.quality:'auto'
   };
 }
 
-function lightQuality() {
-  return prefs.quality==='lite' || (prefs.quality==='auto' && (usingTouch || !!renderer?.cpuRenderer));
+const QUALITY_NAMES={high:'高画質',lite:'軽量 400p',ultra:'超軽量 300p'};
+
+// Automatic: phones and software rendering use the lightweight 400p mode,
+// and step down to the ultra-light mode while a server match is streaming.
+function qualityLevel() {
+  if (prefs.quality!=='auto') return prefs.quality;
+  if (!usingTouch && !renderer?.cpuRenderer) return 'high';
+  return remote?'ultra':'lite';
 }
 
+const lightQuality=()=>qualityLevel()!=='high';
+
 function applyQuality() {
-  const light=lightQuality();
-  renderer?.setQuality(light);
-  $('quality').querySelector('b').textContent=light?'軽量':'高画質';
-  $('quality').setAttribute('aria-pressed',String(light));
+  const level=qualityLevel();
+  renderer?.setQuality(level);
+  $('quality').querySelector('b').textContent=QUALITY_NAMES[level];
+  $('quality').setAttribute('aria-pressed',String(level!=='high'));
 }
 
 function createRenderer() {
@@ -143,18 +154,22 @@ function initAudio() {
 }
 
 function sound(kind) {
+  if (kind==='hit') showHit(false);
+  else if (kind==='down') showHit(true);
   if (!audio || mute || audio.state!=='running') return;
   const now=audio.currentTime;
   const out=audio.createGain();
   out.connect(audio.destination);
-  const hit=['shot','lob','damage','hit'].includes(kind);
-  const duration={shot:.11,lob:.19,hit:.10,damage:.19,tick:.13,go:.31,down:.29,super:.30,drone:.22,boss:.65,bossDown:.59,finish:.5}[kind] || .14;
+  const hit=['shot','lob','damage','hit','blast','bomb'].includes(kind);
+  const duration={shot:.11,lob:.19,hit:.10,damage:.19,tick:.13,go:.31,down:.29,super:.30,drone:.22,boss:.65,bossDown:.59,finish:.5,
+    blast:.34,bomb:.30,mark:.18}[kind] || .14;
   out.gain.setValueAtTime(.001,now);
   out.gain.exponentialRampToValueAtTime(kind==='shot'?.08:.12,now+.006);
   out.gain.exponentialRampToValueAtTime(.001,now+duration);
   const oscillator=audio.createOscillator();
   oscillator.type=kind==='shot'?'sine':kind==='damage'?'triangle':'sine';
-  const freq={shot:260,lob:142,hit:840,damage:127,tick:554,go:830,down:730,super:620,drone:440,boss:110,bossDown:493,finish:660}[kind] || 440;
+  const freq={shot:260,lob:142,hit:840,damage:127,tick:554,go:830,down:730,super:620,drone:440,boss:110,bossDown:493,finish:660,
+    blast:92,bomb:104,mark:988}[kind] || 440;
   oscillator.frequency.setValueAtTime(freq,now);
   oscillator.frequency.exponentialRampToValueAtTime(freq*(kind==='shot'?.44:kind==='damage'?.58:1.34),now+duration*.73);
   oscillator.connect(out);
@@ -200,6 +215,16 @@ async function fullScreen(toggle=false,help=false) {
   showDialog('fullscreen','横画面でプレイ',content,actions);
 }
 
+// A cross snaps open around the reticle when a shot connects; a splat gets a
+// larger red one.
+function showHit(kill) {
+  const node=$('hit-marker');
+  if (!node || !battle?.player) return;
+  node.classList.remove('hit','kill');
+  void node.offsetWidth;
+  node.classList.add(kill?'kill':'hit');
+}
+
 function clearControls() {
   keys.clear();
   desktopFire=false;
@@ -214,8 +239,11 @@ function suspendInput() {
   remote?.flush();
 }
 
+// While waiting to respawn the player can still look around.
+const canLook=()=>canControl() || !!battle?.player && battle.player.down>0 && state==='match' && !dialogKind && !rotationGate && !graphicsLost;
+
 function aimMove(dx,dy,isTouch=false) {
-  if (!canControl()) return;
+  if (!canLook()) return;
   const screenScale=isTouch?clamp(430/arena.clientHeight,.76,1.21):1;
   const sensitivity=prefs.sensitivity*screenScale;
   yaw=(yaw+dx*(isTouch?.0052:.0031)*sensitivity)%(Math.PI*2);
@@ -228,7 +256,7 @@ function getInput() {
   const jump=jumpQueued, press=shotQueued, superMove=superQueued, drone=droneQueued, use=useQueued, subMove=subQueued;
   jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=false;
   return {x,z,yaw,pitch,press,super:superMove,drone,use,sub:subMove,fire:touch.fire||desktopFire||keys.has('KeyF'),
-    swim:touch.swim||keys.has('ShiftLeft')||keys.has('ShiftRight'),jump,overview:watchAerial};
+    swim:touch.swim||keys.has('ShiftLeft')||keys.has('ShiftRight'),jump,overview:watchAerial,eye:battle?.player?camera?.eye:null};
 }
 
 function requestPointer() {
@@ -254,6 +282,8 @@ function showDialog(kind,heading,content,actions) {
   suspendInput();
   releasePointer();
   $('dialog-title').textContent=heading;
+  dialog.firstElementChild.classList.toggle('wide',kind==='result');
+  dialog.dataset.kind=kind;
   $('dialog-content').replaceChildren(content);
   $('dialog-actions').replaceChildren(...actions);
   dialog.hidden=false;
@@ -293,7 +323,8 @@ function settings() {
   const labelGraphics=document.createElement('span');
   labelGraphics.textContent='描画品質';
   const quality=document.createElement('select');
-  for (const [value,name] of [['auto','自動（スマホは軽量）'],['lite','軽量（簡易な影・反射なし）'],['high','高画質（全エフェクト）']]) {
+  for (const [value,name] of [['auto','自動（スマホは軽量・サーバー戦は超軽量）'],['ultra','超軽量（300p・最短の描画距離）'],
+      ['lite','軽量（400p・影と反射なし・短い描画距離）'],['high','高画質（全エフェクト）']]) {
     const option=document.createElement('option');
     option.value=value;
     option.textContent=name;
@@ -302,21 +333,29 @@ function settings() {
   quality.value=prefs.quality;
   quality.addEventListener('change',()=>{prefs.quality=quality.value;savePrefs();});
   graphics.append(labelGraphics,quality);
-  block.append(row,graphics);
+  const rate=document.createElement('p');
+  rate.className='result-note';
+  const hz=Math.round(1000/(renderer?.refreshInterval || 16.7));
+  rate.textContent='フレームレートはどの画質でも最大120fps（この画面は約'+hz+'Hz）。高画質は必要に応じて内部解像度を下げて維持します。';
+  block.append(row,graphics,rate);
   return block;
 }
 
 function guide() {
   const content=document.createElement('div');
   content.innerHTML=`<dl class="guide">
-    <dt>移動・照準</dt><dd>左のスティックで移動。右をスワイプ、または撃つボタンをドラッグして照準を動かせます。照準が敵に重なると追跡枠が出て、弾が命中すると当たった位置に輪と飛沫が広がります。弾の狙いは手動です。</dd>
+    <dt>移動・照準</dt><dd>左のスティックで移動。右をスワイプ、または撃つボタンをドラッグして照準を動かせます。照準が敵に重なるとロック枠が敵に吸い付き、動く敵を残像と進行方向の矢印つきで追い続けます。弾が命中すると大きな光の輪と十字が広がり、照準にもヒットマークが出ます。弾の狙いは手動です。</dd>
     <dt>潜水・壁登り</dt><dd>未塗装の床でもイカになれます。自チームのインクで回復が速くなり、塗った壁に向かって移動すると登れます。敵インクに立ち続けると、移動・回復・スーパーの蓄積が1秒ごとに少し落ちます。</dd>
     <dt>ジャンプ射撃・インク</dt><dd>撃つボタンを押したまま、別の指でジャンプできます。ゲージの黄色い部分が次の射撃で使うインクです。攻撃を受けると画面の縁が赤く光ります。</dd>
     <dt>武器選択</dt><dd>タイトルの「武器を選ぶ」か、対戦中の「武器変更」でメインとサブを選べます。装備を変えてもインク残量と待ち時間は引き継ぎます。</dd>
     <dt>ローラー・サブ</dt><dd>ローラーは短押しで振り、長押ししながら前進すると転がして塗れます。ジャンプ中に押すと空中でインクを振り飛ばします。メインとは別にサブを1つ選択。画面左上のサブボタンかGで使います。敵の時限ボムの輪からは離れましょう。</dd>
     <dt>外周街区・高架道路</dt><dd>街区は中心から半径500mです。中央通りから外周道路へ歩いて探索できます。高架道路の上り口は南側の ROUTE 07 標識が目印です。</dd>
     <dt>4駅直通列車</dt><dd>地上西駅→地上東駅→地下東駅→地下西駅の順に巡回します。停車中に乗車ボタンかR、または開いた扉へ歩いて乗れます。車内では移動・射撃・塗りができ、停車駅で降車ボタンか扉へ歩いて降ります。乗降しても視点の向きは維持されます。広いB1へは街の4か所の階段からも歩いて降りられます。</dd>
-    <dt>スーパー・ドローン</dt><dd>塗りと攻撃でスーパーがたまると、画面左上のボタンで発動できます。武器ごとに技が異なります。ドローンは1人1機で、塗りを広げ、召喚から60秒で再使用できます。</dd>
+    <dt>スーパー・ドローン</dt><dd>塗りと攻撃でスーパーがたまると、画面左上のボタンで発動できます。武器ごとに技が異なります。ドローンは1人1機で、塗りを広げながら、見えている敵へ1秒に1発の追従インク弾を撃ちます。召喚から60秒で再使用できます。</dd>
+    <dt>新しい武器とスーパー</dt><dd>RD II QUATRO＋は5発の重弾。威力は絶大ですが、塗りは狭く、移動が遅くなり、インク消費も激しい武器です。TDは前方の扇形を一気に塗って敵を吹き飛ばす衝撃砲。OM Bombは弾が敵を追従する強化、OM BOMB IIはその2連発版（1発の攻撃は半分、塗りは2倍）、ebotは体力60・塗りと攻撃が半分の分身を2体呼びます。</dd>
+    <dt>See Elite</dt><dd>投げた場所の半径3mに敵が入ると、その敵を20秒間マーキングします。壁越しに名前が見え、ミニマップにも表示されます。</dd>
+    <dt>復活とEXP</dt><dd>倒されると復活まで12秒、オオモノイカに倒された場合は15秒かかります。敵を1人倒すごとに30 EXP。試合終了後に全員分が集計され、リザルトで全クルーの記録とEXPを確認できます。EXPはこの端末に貯まります。</dd>
+    <dt>画質とフレームレート</dt><dd>軽量は400p・影と反射なし・短い描画距離、超軽量は300pでさらに軽い描画です。どの画質でも画面のリフレッシュレートに合わせて最大120fpsで動きます。</dd>
     <dt>スーパーギガチップ</dt><dd>ステージに落ちたチップを拾うと、その試合中は持てるインクが2倍になります。</dd>
     <dt>街の遮蔽物</dt><dd>木箱、レンガ、コンクリートブロックや、マンションと店舗のガラスはインク弾で壊せます。舗装路の先にある3棟は、1試合につき各キャラ1棟1回入れて室内を塗れます。</dd>
     <dt>タイムレスバトル</dt><dd>時間無制限の4対4。最初の襲撃は80秒後で、以降118秒ごとにオクトパスゼイアン4体が現れます。</dd>
@@ -401,6 +440,127 @@ function loadout(inMatch=false) {
   ]);
 }
 
+// Offline film: one full NPC match rendered to an MP4 on this device, from
+// the camera of the crew member who was most active.
+function filmDialog(defaults={size:'fhd',fps:60}) {
+  if (state!=='title' || film || connecting) return;
+  const content=document.createElement('div'), form=document.createElement('div');
+  form.className='film-form';
+  const intro=document.createElement('p');
+  intro.textContent='NPC同士の8対8を7分まるごと、この端末でレンダリングしてMP4に書き出します。試合全体を先に演算し、最も活躍したNPCのカメラで、高画質設定のまま1フレームずつ描画します。BGMと効果音も高ビットレートで収録します。';
+  const choice=(title,options,value)=>{
+    const row=document.createElement('label'), name=document.createElement('span'), select=document.createElement('select');
+    name.textContent=title;
+    for (const [key,text] of options) {
+      const option=document.createElement('option');
+      option.value=key;
+      option.textContent=text;
+      select.append(option);
+    }
+    select.value=String(value);
+    row.append(name,select);
+    form.append(row);
+    return select;
+  };
+  const size=choice('解像度',Object.entries(FILM_SIZES).map(([key,item])=>[key,item.label]),defaults.size);
+  const rate=choice('フレームレート',FILM_RATES.map(fps=>[String(fps),fps+' fps']),defaults.fps);
+  const status=document.createElement('p');
+  status.className='film-status';
+  let support=null, probe=0;
+  const begin=button('書き出しを開始','primary',()=>{
+    if (support && !support.reason) runFilm(size.value,Number(rate.value),support);
+  });
+  const refresh=async()=>{
+    const ticket=++probe;
+    begin.disabled=true;
+    status.textContent='この端末のエンコーダーを確認しています…';
+    support=await filmSupport(renderer,size.value,Number(rate.value));
+    if (ticket!==probe) return;
+    begin.disabled=!!support.reason;
+    const frames=Math.round(FILM_SECONDS*Number(rate.value));
+    const bytes=support.reason?0:filmBytes(support);
+    const estimate=bytes>=1e9?'約'+(bytes/1e9).toFixed(1)+' GB':'約'+Math.round(bytes/1e6)+' MB';
+    status.textContent=support.reason ?? '映像 '+support.video.label+' · 約'+Math.round(support.video.config.bitrate/1e6)+' Mbps\n音声 '+
+      (support.audio?support.audio.label+' · '+Math.round(support.audio.config.bitrate/1000)+' kbps · 48 kHz ステレオ':'なし（この端末は音声エンコード非対応）')+
+      '\n全 '+frames.toLocaleString()+' フレーム · ファイル '+estimate+'。書き出し中はこの画面を開いたままにしてください。';
+  };
+  size.addEventListener('change',refresh);
+  rate.addEventListener('change',refresh);
+  content.append(intro,form,status);
+  showDialog('film','NPC戦を動画に書き出す',content,[begin,button('閉じる','secondary',()=>{
+    probe++;
+    hideDialog();
+    $('film').focus({preventScroll:true});
+  })]);
+  refresh();
+}
+
+async function runFilm(size,fps,support) {
+  const content=document.createElement('div'), status=document.createElement('p'), bar=document.createElement('div'), fill=document.createElement('i');
+  status.className='film-status';
+  bar.className='film-bar';
+  bar.append(fill);
+  content.append(status,bar);
+  const clock=seconds=>Math.floor(seconds/60)+'分'+String(Math.floor(seconds%60)).padStart(2,'0')+'秒';
+  const job=film=new Film({canvas:arena,renderer,world,size,fps,support,onProgress(update) {
+    const part=update.total?update.done/update.total:0;
+    if (update.phase==='analyze') {
+      fill.style.width=(part*100).toFixed(1)+'%';
+      status.textContent='1/2　試合を演算して、最も活躍したNPCを調べています\n'+Math.round(part*100)+'%';
+    } else if (update.phase==='render') {
+      fill.style.width=(part*100).toFixed(1)+'%';
+      status.textContent='2/2　'+update.star+'（'+update.weapon+'）のカメラで描画中\n'+update.done.toLocaleString()+' / '+
+        update.total.toLocaleString()+' フレーム · 試合 '+clock(update.clock)+'\n毎秒 '+update.rate.toFixed(1)+' フレーム · 残り約 '+clock(update.remaining)+
+        ' · '+(update.bytes/1048576).toFixed(0)+' MB';
+    } else status.textContent='ファイルをまとめています…';
+  }});
+  const previous=state;
+  state='film';
+  game.classList.add('filming');
+  showDialog('film',FILM_SIZES[size].label+' · '+fps+' fps',content,[button('中止','secondary',()=>job.cancel())]);
+  let result=null, problem=null;
+  try {
+    result=await job.run();
+  } catch (error) {
+    problem=error;
+  }
+  film=null;
+  state=previous;
+  game.classList.remove('filming');
+  setPaint(localPaint);
+  renderer.configureWorld?.(world,paint);
+  applyQuality();
+  prevTime=0;
+  renderedWidth=renderedHeight=0;
+  if (problem?.canceled) {
+    hideDialog();
+    $('film').focus({preventScroll:true});
+    return;
+  }
+  const done=document.createElement('div'), note=document.createElement('p');
+  note.className='film-status';
+  const actions=[];
+  if (result) {
+    const url=URL.createObjectURL(result.blob), link=document.createElement('a');
+    link.className='primary fullscreen-link';
+    link.href=url;
+    link.download=result.name;
+    link.textContent='MP4を保存（'+(result.blob.size/1048576).toFixed(0)+' MB）';
+    note.textContent='書き出しが完了しました。\n'+FILM_SIZES[size].label+' · '+fps+' fps · '+clock(result.seconds)+'\n映像 '+result.video+
+      ' · 音声 '+(result.audio ?? 'なし')+'\nカメラ：'+result.star+'（'+result.weapon+' · 撃破 '+result.kills+'）\n所要時間 '+clock(result.elapsed);
+    actions.push(link,button('閉じる','secondary',()=>{
+      URL.revokeObjectURL(url);
+      hideDialog();
+      $('film').focus({preventScroll:true});
+    }));
+  } else {
+    note.textContent='書き出せませんでした。\n'+(problem?.message ?? '原因不明のエラーです。')+'\n解像度かフレームレートを下げると成功する場合があります。';
+    actions.push(button('設定に戻る','primary',()=>{hideDialog();filmDialog({size,fps});}),button('閉じる','secondary',hideDialog));
+  }
+  done.append(note);
+  showDialog('film',result?'動画ができました':'書き出しエラー',done,actions);
+}
+
 function resumeBattle() {
   hideDialog();
   arena.focus({preventScroll:true});
@@ -426,6 +586,7 @@ function pause() {
   const actions=[button('対戦に戻る','primary',pause)];
   if (battle.player) actions.push(button('武器を変更','secondary',()=>loadout(true)));
   if (!embeddedApp && !fullscreenElement()) actions.push(button('全画面','secondary',()=>fullScreen(false,true)));
+  if (battle.timeless) actions.push(button('試合を終えてリザルトへ','secondary',finish));
   actions.push(button('タイトルへ','secondary',showTitle));
   showDialog('pause','一時停止',info,actions);
 }
@@ -437,12 +598,7 @@ function finish() {
   drawMap();
   const content=document.createElement('div');
   content.innerHTML='<div class="result-scores"><div>CYAN<b>'+scores[0]+'</b></div><div>AMBER<b>'+scores[1]+'</b></div></div>';
-  if (battle.player) {
-    const p=battle.player, pText=document.createElement('p');
-    const area=p.painted*paint.boundX*2/paint.w*paint.boundZ*2/paint.h;
-    pText.textContent='あなたの記録　塗り '+Math.round(area)+' m²　撃破 '+p.kills+'　ダウン '+p.downs;
-    content.append(pText);
-  }
+  matchRecord(content);
   showDialog('result',title,content,[
     button('もう一戦','primary',()=>start(battle.mode,'new')),
     button('タイトルへ','secondary',showTitle)
@@ -453,18 +609,91 @@ function resetSquads() {
   for (const id of ['cyan-squad','orange-squad']) $(id).replaceChildren();
   $('floaters').replaceChildren();
   tags.length=0;
-  for (const actor of battle.actors) {
-    const dot=document.createElement('span');
-    dot.className='squad-dot'+(actor.isPlayer?' you':'');
-    dot.title=actor.name;
-    (actor.team===0?$('cyan-squad'):$('orange-squad')).append(dot);
+  syncTags();
+}
+
+// Name tags follow the crew list, which grows and shrinks with ebot copies.
+function syncTags() {
+  const actors=battle.actors;
+  if (tags.length===actors.length && tags.every((tag,i)=>tag.actor===actors[i] && tag.name===actors[i].name)) return;
+  const old=new Map(tags.map(tag=>[tag.actor,tag]));
+  const next=actors.map(actor=>{
+    const prior=old.get(actor);
+    if (prior && prior.name===actor.name) {
+      old.delete(actor);
+      return prior;
+    }
+    const copy=!!(actor.clone || actor.cloneOf);
+    let dot=null;
+    if (!copy) {
+      dot=document.createElement('span');
+      dot.className='squad-dot'+(actor.isPlayer?' you':'');
+      dot.title=actor.name;
+      (actor.team===0?$('cyan-squad'):$('orange-squad')).append(dot);
+    }
     const label=document.createElement('span');
-    label.className=actor.team===1?'enemy':'';
+    label.className=(actor.team===1?'enemy':'')+(copy?' copy':'');
     label.textContent=actor.name;
     label.hidden=true;
     $('floaters').append(label);
-    tags.push({actor,dot,label});
+    return {actor,name:actor.name,dot,label,visible:false};
+  });
+  for (const tag of old.values()) {
+    tag.label.remove();
+    tag.dot?.remove();
   }
+  tags.length=0;
+  tags.push(...next);
+}
+
+function showCareer() {
+  const total=playerExp();
+  setText('career-exp',total);
+  setText('career-level',levelOf(total));
+}
+
+// Every crew member's record for the match. EXP is added up here, once the
+// match is over, and banked to the totals kept on this device.
+function matchRecord(content) {
+  const rows=matchResults(battle,paint);
+  const career=battle.expBanked?loadCareer():bankResults(rows);
+  battle.expBanked=true;
+  const best=mostActive(rows), mvp=best?.activity>0?best:null, me=rows.find(row=>row.isPlayer);
+  if (me) {
+    const line=document.createElement('p');
+    line.className='result-note';
+    const total=career.exp[me.name]??0;
+    line.textContent='あなたの記録　撃破 '+me.kills+' × '+EXP_PER_KILL+' = +'+me.exp+' EXP　塗り '+me.area+' m²　ダウン '+me.downs+
+      '　累計 '+total+' EXP（Lv.'+levelOf(total)+'）';
+    content.append(line);
+  }
+  const scroll=document.createElement('div'), table=document.createElement('table');
+  scroll.className='result-scroll';
+  table.className='result-table';
+  const cells=(row,values,tag='td')=>values.map((value,i)=>{
+    const cell=document.createElement(tag);
+    cell.textContent=String(value);
+    if (tag==='td' && i===8) cell.className='exp';
+    if (tag==='td' && i===9) cell.className='total';
+    row.append(cell);
+    return cell;
+  });
+  const head=table.createTHead().insertRow();
+  cells(head,['クルー','武器','撃破','ダウン','塗り m²','与ダメ','スーパー','サブ','EXP','累計 EXP'],'th');
+  const body=table.createTBody();
+  for (const team of [0,1]) {
+    for (const row of rows.filter(entry=>entry.team===team).sort((a,b)=>b.activity-a.activity)) {
+      const line=body.insertRow(), total=career.exp[row.name]??0;
+      line.className=(team===0?'cyan':'amber')+(row.isPlayer?' you':'')+(row===mvp?' mvp':'');
+      cells(line,[row.name,row.weapon,row.kills,row.downs,row.area,row.dealt,row.supers,row.subs,'+'+row.exp,total+' · Lv.'+levelOf(total)]);
+    }
+  }
+  scroll.append(table);
+  const note=document.createElement('p');
+  note.className='result-note';
+  note.textContent='EXP は撃破1回につき '+EXP_PER_KILL+'。試合終了後にまとめて加算され、この端末に貯まります。MVP は撃破・塗り・与ダメージの合計が最も高いクルーです。';
+  content.append(scroll,note);
+  showCareer();
 }
 
 function setCompute(text) {
@@ -522,6 +751,7 @@ async function start(mode,request='choose') {
     if (!cloud) {
       remote?.close();
       remote=null;
+      applyQuality();
       setPaint(localPaint);
       mount(mode,new Battle(world,paint,mode,{sound,finish,spawn:actor=>{
         yaw=actor.yaw;
@@ -573,6 +803,7 @@ async function start(mode,request='choose') {
     if (token.canceled) {client.close();return;}
     remote?.close();
     remote=client;
+    applyQuality();
     if (!scene.finished) rememberRoom(ticket,mode);
     else forgetRoom(ticket,mode);
     setPaint(client.paint);
@@ -644,6 +875,8 @@ function titlePaint() {
 function showTitle() {
   remote?.close();
   remote=null;
+  applyQuality();
+  showCareer();
   $('network-note').hidden=true;
   setPaint(localPaint);
   hideDialog();
@@ -657,7 +890,7 @@ function showTitle() {
   $('floaters').replaceChildren();
   tags.length=0;
   focus=null;
-  $('focus-lock').hidden=true;
+  hideLock($('focus-lock'));
   titlePaint();
   updateOrientation();
   $('start').focus({preventScroll:true});
@@ -751,8 +984,22 @@ function drawMap() {
     }
   }
   for (const a of battle.actors) {
-    if (a.down>0 || zoneOf(a.x)!==level || (battle.player && a.team!==0)) continue;
+    const marked=!!battle.player && a.team!==battle.player.team && a.revealUntil>battle.clock && a.revealTeam===battle.player.team;
+    if (a.down>0 || zoneOf(a.x)!==level || (battle.player && a.team!==0 && !marked)) continue;
     const x=clamp(px(localX(a.x)),6,mini.width-6),z=clamp(pz(a.z),6,mini.height-6);
+    if (marked) {
+      // See Elite: a tagged opponent shows as a pulsing diamond.
+      const size=4+Math.sin(battle.clock*9)*1.2;
+      miniCtx.fillStyle='#ffb24d';
+      miniCtx.strokeStyle='#3a1d0a';
+      miniCtx.lineWidth=1.2;
+      miniCtx.beginPath();
+      miniCtx.moveTo(x,z-size);miniCtx.lineTo(x+size,z);miniCtx.lineTo(x,z+size);miniCtx.lineTo(x-size,z);
+      miniCtx.closePath();
+      miniCtx.fill();
+      miniCtx.stroke();
+      continue;
+    }
     miniCtx.fillStyle=a.isPlayer?'#ffffff':a.team===0?'#8ffff0':'#ffe4c7';
     miniCtx.strokeStyle='#17323a';
     miniCtx.lineWidth=1.5;
@@ -815,7 +1062,7 @@ function updateAbilities(p) {
   const subWait=Math.max(0,Math.ceil((p.subReady??0)-battle.clock));
   setText('sub-name',sub.name);
   setText('sub-state',subWait>0?subWait+'秒':p.tank<sub.cost?'INK不足':
-    p.swimming?'潜水解除で使用':p.airborne && sub.id!=='throw'?'着地して使う':'準備OK');
+    p.swimming?'潜水解除で使用':p.airborne && !['throw','see'].includes(sub.id)?'着地して使う':'準備OK');
   subButton.disabled=!battle.subweapons.canUse(p);
   subButton.classList.toggle('ready',!subButton.disabled);
   const cabin=isCabin(p.x);
@@ -894,7 +1141,8 @@ function updateHud() {
     scoreNodes[i].firstChild.nodeValue=value.toFixed(1);
     teamBars[i].style.width=value+'%';
   }
-  for (const {actor,dot} of tags) dot.classList.toggle('down',actor.down>0);
+  syncTags();
+  for (const {actor,dot} of tags) dot?.classList.toggle('down',actor.down>0);
   const p=battle.player;
   if (p) {
     const readout=inkReadout(p),ratio=readout.ratio,giga=p.tankMax>BASE_TANK;
@@ -921,7 +1169,7 @@ function updateHud() {
   }
   if (battle.countdown>0) message(String(Math.ceil(battle.countdown)),battle.timeless?'タイムレスバトル':'ナワバリ戦');
   else if (battle.clock<3.77) message('GO!','街区を塗り広げろ');
-  else if (p?.down>0) message(String(Math.ceil(p.down)),'復帰まで');
+  else if (p?.down>0) message(String(Math.ceil(p.down)),p.downBy==='boss'?'オオモノイカに倒された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':'復帰まで '+RESPAWN_SECONDS+'秒');
   else message('','');
   const feedKey=battle.events.map(event=>event.team+':'+event.label).join('|');
   if (feedKey!==lastFeed) {
@@ -933,6 +1181,30 @@ function updateHud() {
       return entry;
     }));
   }
+}
+
+// A small readout of the achieved frame rate and internal resolution.
+function showRate(now) {
+  if (now-fpsTime<500) return;
+  fpsTime=now;
+  const rate=Math.round(renderer.fps||0);
+  setText('fps',rate?rate+' FPS · '+Math.min(arena.width,arena.height)+'p':'');
+}
+
+// Measures the display's refresh interval with a few idle animation frames,
+// so the renderer knows whether to hold 60, 90 or 120 fps.
+function measureRefresh() {
+  const samples=[];
+  let last=0;
+  const tick=now=>{
+    if (last) samples.push(now-last);
+    last=now;
+    if (samples.length<40) {requestAnimationFrame(tick);return;}
+    samples.sort((a,b)=>a-b);
+    const typical=samples[Math.floor(samples.length*.35)];
+    if (typical>3 && typical<40) renderer.refreshInterval=typical;
+  };
+  requestAnimationFrame(tick);
 }
 
 function cameraFor(dt) {
@@ -948,21 +1220,34 @@ function cameraFor(dt) {
     viewActor=actor;
     viewZone=zone;
     viewHeight=actor.y;
+    viewX=actor.x;
+    viewZ=actor.z;
     cameraReach=1;
+    watchPitch=clamp(actor.pitch-.075,-.49,.24);
     if (!battle.player) watchYaw=actor.yaw;
+  }
+  // The camera rides a smoothed anchor instead of the body itself, so a
+  // sidestep, a server correction or an NPC's sudden turn never shakes the view.
+  const follow=1-Math.exp(-dt*(battle.player?30:11));
+  viewX+=(actor.x-viewX)*follow;
+  viewZ+=(actor.z-viewZ)*follow;
+  if (Math.hypot(actor.x-viewX,actor.z-viewZ)>2.6) {
+    viewX=actor.x;
+    viewZ=actor.z;
   }
   if (!battle.player) {
     const change=Math.atan2(Math.sin(actor.yaw-watchYaw),Math.cos(actor.yaw-watchYaw));
     watchYaw+=change*(1-Math.exp(-dt*4.1));
+    watchPitch+=(clamp(actor.pitch-.075,-.49,.24)-watchPitch)*(1-Math.exp(-dt*5));
   }
-  viewHeight=mix(viewHeight,actor.y,1-Math.exp(-dt*16));
-  const authoritative=!!(battle.player && remote);
+  viewHeight=mix(viewHeight,actor.y,1-Math.exp(-dt*14));
   const pose=crewView(battle,actor,{
     yaw:battle.player?yaw:watchYaw,
-    pitch:battle.player?pitch:clamp(actor.pitch-.075,-.49,.24),
-    height:authoritative?actor.y:clamp(viewHeight,actor.y-.24,actor.y+.24),
-    reach:authoritative?1:mix(cameraReach,1,1-Math.exp(-dt*9.4)),
-    watch:!battle.player
+    pitch:battle.player?pitch:watchPitch,
+    height:clamp(viewHeight,actor.y-.42,actor.y+.42),
+    reach:mix(cameraReach,1,1-Math.exp(-dt*5.5)),
+    watch:!battle.player,
+    x:viewX,z:viewZ
   });
   cameraReach=pose.reach ?? 1;
   return pose;
@@ -983,7 +1268,7 @@ function drawFocus(now) {
   const marker=$('focus-lock'), reticle=$('reticle'), p=battle?.player;
   if (!canControl() || p.swimming || p.ride || p.lift || battle.countdown>0) {
     focus=null;
-    marker.hidden=true;
+    hideLock(marker);
     reticle.classList.remove('enemy');
     return;
   }
@@ -1007,7 +1292,7 @@ function drawFocus(now) {
   if (hit) {
     const shift=hit.shift??0;
     if (focus?.actor!==hit.actor || focus.shift!==shift || now>focus.until) {
-      focus={actor:hit.actor,shift,born:now,lastFrame:now,box:null};
+      focus={actor:hit.actor,shift,born:now,lastFrame:now,box:null,speed:[0,0,0,0],trail:[]};
     }
     focus.until=now+285;
     focus.contact=contact??[hit.point[0]+shift-hit.actor.x,hit.point[1]-hit.actor.y,hit.point[2]-hit.actor.z];
@@ -1018,7 +1303,7 @@ function drawFocus(now) {
       (target.isBoss || target.isRaider) && !target.active ||
       target.isRaider && !battle.raiders.members.includes(target) ||
       !sameLevel(target.x-focus.shift,camera.eye[0])) {
-    marker.hidden=true;
+    hideLock(marker);
     return;
   }
   const x=target.x-focus.shift, y=target.y, z=target.z;
@@ -1027,44 +1312,108 @@ function drawFocus(now) {
     const contact=[x+dx,y+dy,z+dz];
     if (battle.traceShot(camera.eye,contact,true)?.t<.986 || battle.subweapons.block(camera.eye,contact,p.team)?.t<.986) {
       focus=null;
-      marker.hidden=true;
+      hideLock(marker);
       return;
     }
   }
   const height=target.isBoss?BOSS_BODY_HEIGHT:target.giant?2.76:target.climbing?1.04:target.swimming?.47:1.97-(target.brace??0)*.36;
   const top=renderer.project([x,y+height,z]), bottom=renderer.project([x,y+.06,z]);
   if (!top || !bottom) {
-    marker.hidden=true;
+    hideLock(marker);
     return;
   }
   const u=(top[0]+bottom[0])*.5, v=(top[1]+bottom[1])*.5;
   if (u<.03 || u>.97 || v<.06 || v>.94) {
-    marker.hidden=true;
+    hideLock(marker);
     return;
   }
   const h=clamp(Math.abs(bottom[1]-top[1])*arena.clientHeight+17,33,arena.clientHeight*.70);
   const w=h*(target.climbing?.72:target.swimming?1.46:target.giant || target.isBoss?.93:.75);
-  const frame=clamp(now-focus.lastFrame,0,72), box=[u,v,w,h];
-  const blend=1-Math.exp(-frame*.071);
-  focus.box=focus.box && Math.hypot(u-focus.box[0],v-focus.box[1])<.14?
-    focus.box.map((value,i)=>value+(box[i]-value)*blend):box;
+  // The frame is carried by a critically damped spring at the display's own
+  // rate: it glides onto the target and then keeps pace with it.
+  const step=clamp(now-focus.lastFrame,0,72)/1000, box=[u,v,w,h];
+  if (!focus.box || Math.hypot(u-focus.box[0],v-focus.box[1])>=.14) {
+    focus.box=box;
+    focus.speed=[0,0,0,0];
+    focus.trail=[];
+  } else for (let i=0;i<4;i++) {
+    [focus.box[i],focus.speed[i]]=springStep(focus.box[i],focus.speed[i],box[i],step,i<2?26:18);
+  }
   focus.lastFrame=now;
-  const [bx,by,bw,bh]=focus.box;
   const age=Math.max(0,now-focus.born);
-  const arrival=clamp(age/210,0,1), after=clamp((age-52)/360,0,1);
-  marker.style.left=bx*100+'%';
-  marker.style.top=by*100+'%';
-  marker.style.width=bw+'px';
-  marker.style.height=bh+'px';
+  const arrival=clamp(age/210,0,1), after=clamp((age-52)/360,0,1), settle=(1-arrival)**2;
   marker.style.setProperty('--lock-zoom',1+.51*(1-arrival)**3);
+  marker.style.setProperty('--lock-twist',(-18*settle).toFixed(2)+'deg');
+  marker.style.setProperty('--lock-spread',(14*settle+(direct?0:4)).toFixed(1)+'px');
   marker.style.setProperty('--lock-halo',.78+after*.64);
   marker.style.setProperty('--lock-wave',.73*Math.sin(Math.PI*after));
   marker.style.setProperty('--lock-glint',arrival<1?.78:.26);
   marker.style.setProperty('--lock-scan',(11+78*(age/780%1))+'%');
+  marker.style.setProperty('--lock-ring',(arrival*(direct?.9:.6)).toFixed(3));
+  marker.style.setProperty('--lock-ring-size',(1+.55*settle).toFixed(3));
+  marker.style.setProperty('--lock-pip',(1+.3*Math.sin(now*.013)).toFixed(3));
   marker.style.setProperty('--lock-alpha',direct?1:.68*clamp((focus.until-now)/180,0,1));
   marker.classList.toggle('tracking',!direct);
   marker.classList.toggle('boss',!!target.isBoss);
+  marker.classList.toggle('homing',(p.activeSpecial==='om' || p.activeSpecial==='om2') && p.superUntil>battle.clock);
+  lockMotion(marker,now,direct,[x,y,z]);
   marker.hidden=false;
+}
+
+function hideLock(marker) {
+  marker.hidden=true;
+  const tether=$('lock-tether');
+  if (tether) tether.hidden=true;
+}
+
+function springStep(value,speed,target,dt,omega) {
+  const f=1+2*dt*omega, hoo=dt*omega*omega, hhoo=dt*hoo, inverse=1/(f+hhoo);
+  return [(f*value+dt*speed+hhoo*target)*inverse,(speed+hoo*(target-value))*inverse];
+}
+
+// Everything that moves with the lock: its place on screen, the afterimages
+// trailing behind it, the chevrons pointing where the target is heading, the
+// contact pip and the tether back to the reticle.
+function lockMotion(marker,now,direct,origin) {
+  const [u,v,w,h]=focus.box, W=arena.clientWidth||1, H=arena.clientHeight||1;
+  const x=u*W, y=v*H, style=marker.style;
+  style.transform='translate3d('+(x-w/2).toFixed(2)+'px,'+(y-h/2).toFixed(2)+'px,0)';
+  style.width=w.toFixed(1)+'px';
+  style.height=h.toFixed(1)+'px';
+  const vx=focus.speed[0]*W, vy=focus.speed[1]*H, pace=Math.hypot(vx,vy);
+  const trail=focus.trail;
+  trail.push([now,x,y]);
+  while (trail.length>2 && now-trail[0][0]>190) trail.shift();
+  const motion=clamp((pace-45)/240,0,1);
+  for (const [i,id] of ['lock-ghost-a','lock-ghost-b'].entries()) {
+    const ghost=$(id);
+    if (!ghost?.style) continue;
+    const time=now-(i+1)*64;
+    let past=trail[0];
+    for (const entry of trail) if (entry[0]<=time) past=entry;
+    ghost.style.transform='translate3d('+(past[1]-x).toFixed(1)+'px,'+(past[2]-y).toFixed(1)+'px,0)';
+    ghost.style.opacity=(motion*(i?.22:.42)).toFixed(3);
+  }
+  style.setProperty('--lock-motion',motion.toFixed(3));
+  style.setProperty('--lock-heading',(Math.atan2(vy,vx)*180/Math.PI).toFixed(1)+'deg');
+  style.setProperty('--lock-lead',(Math.max(w,h)*.5+7).toFixed(1)+'px');
+  const [dx,dy,dz]=focus.contact, touch=renderer.project([origin[0]+dx,origin[1]+dy,origin[2]+dz]);
+  style.setProperty('--lock-pip-x',(touch?clamp((touch[0]-u)*W,-w*.45,w*.45):0).toFixed(1)+'px');
+  style.setProperty('--lock-pip-y',(touch?clamp((touch[1]-v)*H,-h*.45,h*.45):0).toFixed(1)+'px');
+  const label=$('lock-label'), range=$('lock-range');
+  const text=marker.classList.contains?.('homing')?'HOMING':direct?'LOCK':'TRACK';
+  if (label && label.textContent!==text) label.textContent=text;
+  const metres=Math.hypot(origin[0]-camera.eye[0],origin[1]-camera.eye[1],origin[2]-camera.eye[2]).toFixed(0)+'m';
+  if (range && range.textContent!==metres) range.textContent=metres;
+  const tether=$('lock-tether'), line=tether?.firstElementChild;
+  if (!line) return;
+  const gap=Math.hypot(x-W/2,y-H/2), rim=Math.max(w,h)*.5+5;
+  tether.hidden=gap<rim+24;
+  if (tether.hidden) return;
+  line.setAttribute('x1',(W/2+(x-W/2)/gap*20).toFixed(1));
+  line.setAttribute('y1',(H/2+(y-H/2)/gap*20).toFixed(1));
+  line.setAttribute('x2',(x-(x-W/2)/gap*rim).toFixed(1));
+  line.setAttribute('y2',(y-(y-H/2)/gap*rim).toFixed(1));
 }
 
 // Visibility and line of sight refresh at HUD rate; positions follow the
@@ -1075,7 +1424,12 @@ function projectTags() {
   for (const tag of tags) {
     const {actor}=tag;
     const range=Math.hypot(actor.x-cameraActor.x,actor.z-cameraActor.z);
-    tag.visible=!(aerial || actor===cameraActor || actor.down>0 || actor.swimming || actor.lift || actor.ride ||
+    // See Elite: a tagged opponent keeps its name tag through walls.
+    const marked=!!battle.player && actor.team!==battle.player.team && actor.revealUntil>battle.clock &&
+      actor.revealTeam===battle.player.team;
+    tag.marked=marked;
+    tag.visible=marked?!(aerial || actor.down>0 || actor.lift || actor.ride || !sameLevel(actor.x,cameraActor.x) || range>90):
+      !(aerial || actor===cameraActor || actor.down>0 || actor.swimming || actor.lift || actor.ride ||
       !sameLevel(actor.x,cameraActor.x) || range>25) && !battle.traceShot(camera.eye,[actor.x,actor.y+2.18,actor.z],true);
   }
   placeTags();
@@ -1088,12 +1442,14 @@ function placeTags() {
     const projected=tag.visible?renderer.project([actor.x,actor.y+2.18,actor.z]):null;
     const show=!!projected && projected[0]>=.015 && projected[0]<=.985 && projected[1]>=.13 && projected[1]<=.94;
     if (label.hidden===show) label.hidden=!show;
+    if (label.classList && !!tag.marked!==label.classList.contains('marked')) label.classList.toggle('marked',!!tag.marked);
     if (show) label.style.transform=`translate(${(projected[0]*W).toFixed(1)}px,${(projected[1]*H).toFixed(1)}px) translate(-50%,-50%)`;
   }
 }
 
 function frame(now) {
-  if (graphicsLost) {
+  // The offline film renderer owns the canvas while it runs.
+  if (graphicsLost || state==='film') {
     prevTime=now;
     requestAnimationFrame(frame);
     return;
@@ -1113,11 +1469,11 @@ function frame(now) {
   }
   const running=state==='match' && !dialogKind && !rotationGate && !document.hidden;
   if (!dialogKind && !rotationGate) activeClock+=dt;
-  camera=cameraFor(dt);
+  // The world moves first and the camera follows in the same frame, so the
+  // view never trails the crew by a frame.
   if (remote && !dialogKind) {
     remote.input(running?getInput():null,!running);
     remote.advance(now);
-    camera=cameraFor(0);
     if (battle.finished && state==='match') finish();
   } else if (running && dt>0) {
     const input=getInput();
@@ -1132,8 +1488,8 @@ function frame(now) {
       }
       input.jump=input.press=input.super=input.drone=input.use=input.sub=false;
     }
-    camera=cameraFor(0);
   }
+  camera=cameraFor(dt);
   const tookDamage=battle?.player?.lastDamageAt;
   const damageAge=Number.isFinite(tookDamage)?battle.clock+(battle.impactAgeOffset??0)-tookDamage:Infinity;
   damageFlash.style.opacity=String(Math.pow(clamp(1-damageAge/.49,0,1),1.35));
@@ -1152,6 +1508,7 @@ function frame(now) {
   renderer.draw(camera,paint,activeClock);
   renderedWidth=width;
   renderedHeight=height;
+  showRate(now);
   drawFocus(now);
   if (battle && !rotationGate) {
     if (now-hudTime>82) {
@@ -1206,9 +1563,10 @@ $('how').addEventListener('click',guide);
 $('loadout').addEventListener('click',()=>loadout());
 $('change-loadout').addEventListener('click',()=>{if (!dialogKind) loadout(true);});
 $('quality').addEventListener('click',()=>{
-  prefs.quality=lightQuality()?'high':'lite';
+  prefs.quality={high:'lite',lite:'ultra',ultra:'high'}[qualityLevel()];
   savePrefs();
 });
+$('film').addEventListener('click',()=>filmDialog());
 for (const [id,action] of [
   ['super-action',()=>{superQueued=true;}],
   ['drone-action',()=>{droneQueued=true;}],
@@ -1333,6 +1691,7 @@ arena.addEventListener('webglcontextrestored',()=>{
     applyQuality();
     world.rebuildRenderer(renderer,sceneData);
     renderer.configureWorld?.(world,paint);
+    loadTextures();
     graphicsLost=false;
     prevTime=0;
     viewActor=null;
@@ -1346,6 +1705,12 @@ arena.addEventListener('webglcontextrestored',()=>{
     fault(error);
   }
 });
+
+// The real surface textures load after the title is up; phones and the
+// lightweight modes keep smaller layers.
+function loadTextures() {
+  renderer.loadSurfaces?.({size:usingTouch || lightQuality()?256:512}).catch(error=>console.warn('Surface textures unavailable',error));
+}
 
 async function readProgress(response) {
   const total=Number(response.headers.get('content-length'))||0, reader=response.body?.getReader?.();
@@ -1379,6 +1744,8 @@ async function loadScene() {
 
 try {
   paint=localPaint=new Paint();
+  // Spread each ink film step over up to this many frames (see Paint.advance).
+  localPaint.slices=8;
   sceneData=await loadScene();
   renderer=createRenderer();
   applyQuality();
@@ -1390,9 +1757,12 @@ try {
   mapSetup();
   titlePaint();
   savePrefs();
+  showCareer();
   configureTouch();
   camera=cameraFor(0);
   renderer.draw(camera,paint,0);
+  measureRefresh();
+  loadTextures();
   $('loading').hidden=true;
   cloudCheck=detectCloud(cloudRequired).then(service=>{
     setCompute(service?(service.ready?'CLOUDFLARE · サーバー演算':'CLOUDFLARE · 設定待ち'):'LOCAL · 端末内演算');

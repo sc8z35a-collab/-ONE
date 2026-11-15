@@ -20,7 +20,7 @@ export class NpcPerception {
   sight(a,b) {
     if (!this.live(a,b) || zoneOf(a.x)!==zoneOf(b.x)) return null;
     const dx=b.x-a.x,dy=b.y-a.y,dz=b.z-a.z,d=Math.hypot(dx,dz);
-    const reach=a.isBoss?39:a.isRaider?28:Math.min(33,a.weapon.range*.93);
+    const reach=a.isBoss?39:a.isRaider?28:a.weapon.blast?18:Math.min(33,a.weapon.range*.93);
     if (Math.hypot(d,dy*.85)>reach || b.inkSwimming && d>8.8) return null;
     const [fx,,fz]=forward(a.yaw), bearing=(dx*fx+dz*fz)/Math.max(.01,d);
     if (d>(a.isRaider?2.65:5.2) && bearing<(a.isBoss?-.69:a.isRaider?.36:-.13)) return null;

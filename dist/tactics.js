@@ -34,7 +34,7 @@ function segmentDistance(point,a,b) {
 }
 
 function role(actor) {
-  if (actor.index%4===2 || actor.weapon.id==='fan' || actor.weapon.id==='dual') return 'flank';
+  if (actor.index%4===2 || actor.weapon.id==='fan' || actor.weapon.id==='dual' || actor.weapon.blast) return 'flank';
   if (actor.weapon.charge || actor.weapon.id==='prism') return 'anchor';
   if (['lob','blast','coil'].includes(actor.weapon.id)) return 'support';
   return 'lead';

@@ -7,11 +7,13 @@ import {TAU,clamp,forward} from '../dist/render.js';
 import {STAIR_VIEW_MARGIN,stairLane} from '../dist/stairs.js';
 import {World} from '../dist/world.js';
 import {checkpointOf,restoreCheckpoint} from './checkpoint.js';
-import {frameOf} from './frame.js';
+import {frameOf,packFrame} from './frame.js';
 
 export {STORAGE_KEYS} from './checkpoint.js';
 export const HZ=24;
-const STEP=1/HZ, FRAME_MS=95, CHECKPOINT_PERIOD=18;
+// One state frame per simulation step. A frame is small (only what changed),
+// so the link carries 24 of them a second; ink tiles keep their own slower pace.
+const STEP=1/HZ, FRAME_MS=1000/HZ-6, INK_MS=80, CHECKPOINT_PERIOD=18;
 const INPUT_LEASE_MS=450, IDLE_ROOM_MS=8000;
 const LIVE_WORLD_INK=ZONES[0].inkMask | ZONES[1].inkMask;
 const taps=['jump','press','super','drone','use','cycle','sub'];
@@ -41,6 +43,7 @@ function decode(text) {
       seq:a.seq,x:clamp(a.x,-1,1),z:clamp(a.z,-1,1),yaw:a.yaw%TAU,pitch:clamp(a.pitch,-.86,.70),
       paused:a.paused===true,fire:a.fire===true,swim:a.swim===true,overview:a.overview!==false,
       loadout:typeof a.loadout?.weapon==='string' && typeof a.loadout?.sub==='string'?a.loadout:null,
+      eye:Array.isArray(a.eye) && a.eye.length===3 && a.eye.every(Number.isFinite)?a.eye:null,
       ...Object.fromEntries(taps.map(key=>[key,a[key]===true]))
     };
   } catch { return null; }
@@ -67,6 +70,8 @@ export class RoomEngine {
     this.intent=null;
     this.lock=null;
     this.lastFrame=-Infinity;
+    this.lastInk=-Infinity;
+    this.link={};
     this.remainder=0;
     this.lastSeq=0;
     this.appliedSeq=0;
@@ -88,16 +93,20 @@ export class RoomEngine {
     const localMask=ZONES[zone].inkMask | (mergeStairs?ZONES[1-zone].inkMask:0);
     const mask=localMask | LIVE_WORLD_INK;
     const fullMask=force?mask:mask & ~this.inkMask;
-    if (!fullMask && this.zone===zone && !urgent && now-this.lastFrame<FRAME_MS) return [];
+    const moved=this.zone!==zone;
+    if (!fullMask && !moved && !urgent && now-this.lastFrame<FRAME_MS) return [];
     this.lastFrame=now;
     this.zone=zone;
     this.inkMask=mask;
     const ink=[];
     if (fullMask) ink.push(...paintPackets(b.paint,fullMask,true,focus));
-    const changes=mask & ~fullMask, nearby=changes & localMask, remote=changes & ~localMask;
-    if (nearby) ink.push(...paintPackets(b.paint,nearby,false,focus));
-    if (remote) ink.push(...paintPackets(b.paint,remote));
-    const frame=frameOf(b,zone,fullMask,this.sounds.splice(0),mergeStairs);
+    if (force || urgent || moved || b.finished || now-this.lastInk>=INK_MS) {
+      this.lastInk=now;
+      const changes=mask & ~fullMask, nearby=changes & localMask, remote=changes & ~localMask;
+      if (nearby) ink.push(...paintPackets(b.paint,nearby,false,focus));
+      if (remote) ink.push(...paintPackets(b.paint,remote));
+    }
+    const frame=packFrame(b,frameOf(b,zone,fullMask,this.sounds.splice(0),mergeStairs),this.link,force);
     return [JSON.stringify({...frame,tick:this.tick,inputAck:this.appliedSeq,lock:this.lockView(),inkPackets:ink.length}),...ink];
   }
 
@@ -216,8 +225,8 @@ export class RoomEngine {
     this.inputAt=now;
     this.paused=false;
     this.overview=b.mode==='watch' && command.overview;
-    const {seq,x,z,yaw,pitch,fire,swim,overview}=command;
-    this.intent={seq,x,z,yaw,pitch,fire,swim,overview};
+    const {seq,x,z,yaw,pitch,fire,swim,overview,eye}=command;
+    this.intent={seq,x,z,yaw,pitch,fire,swim,overview,eye};
     for (const key of taps) this.pending[key]=this.pending[key] || command[key];
     this.advance(now);
     return this.emit(now,equipped);

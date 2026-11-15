@@ -165,7 +165,7 @@ export class Boss {
         const destination=[actor.x,actor.y+(actor.swimming?.36:.84),actor.z];
         const barrier=b.traceShot(origin,destination,true,false);
         if (barrier?.t<.95 || b.subweapons.block(origin,destination,this.team)?.t<.95) continue;
-        if (b.damage(actor,a.damage,null,destination)) a.hit.push(key);
+        if (b.damage(actor,a.damage,null,destination,'boss')) a.hit.push(key);
       }
       if (a.done && a.kind!=='sweep') b.stage.damageArea(b,this,a.x,a.y,a.z,a.radius,a.damage*.68);
     }

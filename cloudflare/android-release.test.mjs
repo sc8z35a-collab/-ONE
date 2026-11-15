@@ -31,9 +31,9 @@ test('a legal 80-unit shot continues past three seconds, paints at its destinati
 });
 
 test('the new weapon costs and splatter radius are applied without multiplying damage',()=>{
-  const originalCosts=[2.45,4.5,7,9,6,3.15,4.35,3.75,4.5,2.695];
+  const originalCosts=[2.45,4.5,7,9,6,3.15,4.35,3.75,4.5,2.695,24,15];
   assert.deepEqual(WEAPONS.map(w=>w.cost),originalCosts.map(cost=>cost/2));
-  assert.deepEqual(SUBWEAPONS.map(w=>w.cost),[14.5,20.5,13,16.5,18]);
+  assert.deepEqual(SUBWEAPONS.map(w=>w.cost),[14.5,20.5,13,16.5,18,12]);
   const {battle:b}=new RoomEngine(options), p=b.player, w=weaponById('jet');
   assert.equal(w.damage,29);
   assert.equal(w.radius,1.22*1.5);
@@ -68,7 +68,9 @@ test('surface and underground ink, scores and action continue to update on one l
   assert.equal(replica.get(below,z,2),2);
   assert.equal(replica.get(10,-16,0),1);
   assert(whileAbove.zoneCount[0][0]>0 && whileAbove.zoneCount[1][1]>0);
-  assert(whileAbove.zoneTotal.every(n=>n>0));
+  // Totals never change, so only the first full frame carries them.
+  assert(start.full && start.zoneTotal.every(n=>n>0));
+  assert(!whileAbove.full && whileAbove.zoneTotal===undefined && whileAbove.actorDiffs.length===b.actors.length);
   Object.assign(p,{x:below,y:-8,z});
   b.paint.stamp(13,-16,2,0,0,.4,.063);
   const whileBelow=receive(engine.frames(1140));

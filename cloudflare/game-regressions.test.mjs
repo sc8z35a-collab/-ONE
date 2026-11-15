@@ -27,6 +27,7 @@ function simulateDisplay(extra={}) {
   const page={graphicsLost:false,state:'match',dialogKind:null,rotationGate:false,document:{hidden:false},
     prevTime:0,activeClock:0,renderedWidth:900,renderedHeight:420,arena:{clientWidth:900,clientHeight:420},
     remote:null,requestAnimationFrame(){},cameraFor:()=>camera,drawFocus(){},updateHud(){},projectTags(){},placeTags(){},drawMap(){},
+    showRate(){},
     mapTime:0,hudTime:0,clamp,isCabin,paint:{},damageFlash:{style:{}},
     getInput(){result.inputs++;return {...neutral,jump:result.inputs===1};},
     battle:{player:null,draw(){},update(dt,input){result.steps.push({dt,jump:input.jump});}},
@@ -90,7 +91,7 @@ test('a failed health probe is retried on the next match start',async()=>{
   const page={renderer:{},connecting:null,AbortController,usingTouch:false,initAudio(){},setCompute(){},
     document:{createElement:()=>({})},cloudRequired:false,savedRoom:()=>null,cloud:null,cloudCheck:Promise.resolve(null),detectCloud:async()=>({ready:true}),
     remote:null,localPaint:{},paint:{},world:{},Battle:class {},sound(){},finish(){},
-    prefs:{},mount:mode=>modes.push(mode),setPaint(){},accessCode:'',enterAccess:mode=>prompts.push(mode)};
+    prefs:{},mount:mode=>modes.push(mode),setPaint(){},applyQuality(){},accessCode:'',enterAccess:mode=>prompts.push(mode)};
   const start=runInNewContext(fragment('async function start(mode,', 'function mount(')+'\nstart',page);
   await start('play');
   await start('timeless');

@@ -32,6 +32,10 @@ export class Paint {
     this.zoneCount=ZONES.map(()=>[0,0]);
     this.zoneTotal=ZONES.map(()=>0);
     this.dirtyMask=(1<<this.layers)-1;
+    // First and last changed row of each layer, so the renderer uploads only
+    // the band of the ink texture that moved.
+    this.dirtyRows=new Int32Array(PAINT_LAYERS*2);
+    this.touchLayers((1<<this.layers)-1);
     this.visualOnly=visualOnly;
     this.tilesWide=Math.ceil(this.w/TILE);
     this.tilesHigh=Math.ceil(this.h/TILE);
@@ -127,16 +131,42 @@ export class Paint {
     }
   }
 
+  clearRows(mask=-1) {
+    for (let layer=0;layer<this.layers;layer++) {
+      if (!(mask & (1<<layer))) continue;
+      this.dirtyRows[layer*2]=this.h;
+      this.dirtyRows[layer*2+1]=-1;
+    }
+  }
+
+  // Marks a whole layer for upload (a reset, a new texture, a restored room).
+  touchLayers(mask) {
+    this.dirtyMask|=mask;
+    for (let layer=0;layer<this.layers;layer++) {
+      if (!(mask & (1<<layer))) continue;
+      this.dirtyRows[layer*2]=0;
+      this.dirtyRows[layer*2+1]=this.h-1;
+    }
+  }
+
+  touchRow(layer,row) {
+    const at=layer*2;
+    if (row<this.dirtyRows[at]) this.dirtyRows[at]=row;
+    if (row>this.dirtyRows[at+1]) this.dirtyRows[at+1]=row;
+    this.dirtyMask|=1<<layer;
+  }
+
   reset() {
     for (const buffer of [this.owner,this.pixels,this.cyan,this.amber,this.deltaC,this.deltaA,this.flowX,this.flowZ,this.touched]) buffer.fill(0);
     this.awake.clear();
+    this.queue=null;
     this.netDirty?.clear();
     this.netTiles?.clear();
     this.changed.length=0;
     this.count=[0,0];
     this.zoneCount=ZONES.map(()=>[0,0]);
     this.time=0;
-    this.dirtyMask=(1<<this.layers)-1;
+    this.touchLayers((1<<this.layers)-1);
   }
 
   index(x,z,layer) {
@@ -184,7 +214,7 @@ export class Paint {
       this.pixels[i+1]=amber;
       this.pixels[i+2]=thickness;
       this.pixels[i+3]=depth>0?this.floorByte[index]:0;
-      this.dirtyMask|=1<<layer;
+      this.touchRow(layer,Math.floor((index-layer*this.layerSize)/this.w));
       if (this.netDirty) {
         const base=index%this.layerSize;
         const tile=Math.floor(base/this.w/TILE)*this.tilesWide+Math.floor((base%this.w)/TILE);
@@ -315,36 +345,43 @@ export class Paint {
     return true;
   }
 
-  tick() {
+  // The tiles a film step works on: every awake tile and its stair partners.
+  wakeSet() {
     const tiles=this.awake;
     this.awake=new Set();
-    const {w,h,surface}=this;
     for (const tile of tiles) {
       const neighbors=this.stairTiles.get(tile);
       if (neighbors) for (const next of neighbors) tiles.add(next);
     }
-    for (const tile of tiles) {
-      const region=Math.floor(tile/this.regionTiles), local=tile%this.regionTiles;
-      const sx=(local%this.tilesWide)*TILE, sz=Math.floor(local/this.tilesWide)*TILE;
-      const ex=Math.min(w,sx+TILE), ez=Math.min(h,sz+TILE);
-      const joined=this.stairTiles.has(tile);
-      let active=false;
-      for (let z=sz;z<ez;z++) for (let x=sx;x<ex;x++) {
-        const base=region*this.layerSize+z*w+x, a=surface[base];
-        if (a<0) continue;
-        const bridge=joined?this.stairEdges.get(base):undefined;
-        const across=x+1<w && this.edge(a,surface[bridge??base+1],this.flowX,base,this.barrierX);
-        const down=z+1<h && this.edge(a,surface[base+w],this.flowZ,base,this.barrierZ);
-        if (!across && !down) continue;
-        active=true;
-        if (x===sx && sx>0) this.awake.add(tile-1);
-        if (z===sz && sz>0) this.awake.add(tile-this.tilesWide);
-        if (across && bridge!==undefined) this.awake.add(this.tileAt(bridge));
-        else if (across && x+1===ex) this.awake.add(tile+1);
-        if (down && z+1===ez) this.awake.add(tile+this.tilesWide);
-      }
-      if (active) this.awake.add(tile);
+    return tiles;
+  }
+
+  // Moves pigment across every edge that starts in one tile.
+  flowTile(tile) {
+    const {w,h,surface}=this;
+    const region=Math.floor(tile/this.regionTiles), local=tile%this.regionTiles;
+    const sx=(local%this.tilesWide)*TILE, sz=Math.floor(local/this.tilesWide)*TILE;
+    const ex=Math.min(w,sx+TILE), ez=Math.min(h,sz+TILE);
+    const joined=this.stairTiles.has(tile);
+    let active=false;
+    for (let z=sz;z<ez;z++) for (let x=sx;x<ex;x++) {
+      const base=region*this.layerSize+z*w+x, a=surface[base];
+      if (a<0) continue;
+      const bridge=joined?this.stairEdges.get(base):undefined;
+      const across=x+1<w && this.edge(a,surface[bridge??base+1],this.flowX,base,this.barrierX);
+      const down=z+1<h && this.edge(a,surface[base+w],this.flowZ,base,this.barrierZ);
+      if (!across && !down) continue;
+      active=true;
+      if (x===sx && sx>0) this.awake.add(tile-1);
+      if (z===sz && sz>0) this.awake.add(tile-this.tilesWide);
+      if (across && bridge!==undefined) this.awake.add(this.tileAt(bridge));
+      else if (across && x+1===ex) this.awake.add(tile+1);
+      if (down && z+1===ez) this.awake.add(tile+this.tilesWide);
     }
+    if (active) this.awake.add(tile);
+  }
+
+  settle() {
     for (const index of this.changed) {
       this.cyan[index]+=this.deltaC[index];
       this.amber[index]+=this.deltaA[index];
@@ -355,12 +392,37 @@ export class Paint {
     this.changed.length=0;
   }
 
+  tick() {
+    for (const tile of this.wakeSet()) this.flowTile(tile);
+    this.settle();
+  }
+
   advance(dt) {
     this.time+=dt;
+    if (!(this.slices>1)) {
+      while (this.time>=FILM_STEP) {
+        this.time-=FILM_STEP;
+        if (this.awake.size) this.tick();
+      }
+      return;
+    }
+    // On a display the work of one film step is spread over the frames up to
+    // the next step, so no single frame carries the whole solver.
     while (this.time>=FILM_STEP) {
       this.time-=FILM_STEP;
-      if (this.awake.size) this.tick();
+      if (this.queue?.length) this.runQueue(this.queue.length);
+      if (this.awake.size) this.queue=[...this.wakeSet()];
     }
+    if (this.queue?.length) {
+      const frames=Math.max(1,Math.min(this.slices,Math.ceil((FILM_STEP-this.time)/Math.max(dt,.002))));
+      this.runQueue(Math.ceil(this.queue.length/frames));
+    }
+  }
+
+  runQueue(count) {
+    const queue=this.queue;
+    for (let i=0;i<count && queue.length;i++) this.flowTile(queue.pop());
+    this.settle();
   }
 
   percent(team,zone=null) {

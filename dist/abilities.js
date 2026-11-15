@@ -1,13 +1,15 @@
-import {TAU,clamp,forward} from './render.js';
+import {TAU,clamp,forward,scale,sub,unit} from './render.js';
 import {giantHeight,isCabin,sameLevel,zoneOf} from './layout.js';
 import {TEAM,TEAM_INK} from './world.js';
-import {SUPERS} from './weapons.js';
+import {DRONE_HOMING,DRONE_WEAPON,SUPERS} from './weapons.js';
 import {AdvancedSupers} from './advanced-super.js';
 import {drawTentacle} from './creature-models.js';
 import {stairNeighborShift,stairRay} from './stairs.js';
 
 export const DRONE_COOLDOWN=60;
 const DRONE_LIFETIME=23;
+// The drone fires one tracking round a second at the nearest opponent it can see.
+export const DRONE_FIRE_INTERVAL=1;
 
 export function drawSquid(r,a,time,tint,eyeTint,scale) {
   const yaw=Math.PI-a.yaw, sy=Math.sin(yaw), cy=Math.cos(yaw);
@@ -81,7 +83,7 @@ export class Abilities {
   }
 
   canActivate(actor) {
-    return actor.down<=0 && !actor.lift && !actor.ride && actor.superCharge>=100 && (actor.superUntil??0)<=this.battle.clock &&
+    return actor.down<=0 && !actor.lift && !actor.ride && !actor.cloneOf && actor.superCharge>=100 && (actor.superUntil??0)<=this.battle.clock &&
       (actor.weapon.special!=='giant' || !this.battle.bodyBlocked(actor,.64,giantHeight(actor.x)));
   }
 
@@ -111,8 +113,11 @@ export class Abilities {
       actor.vx=actor.vy=actor.vz=0;
       actor.driveX=actor.driveZ=actor.charge=0;
     }
+    if (id==='ebot') b.summonClones(actor);
     this.advanced.launch(actor,id);
+    actor.supers=(actor.supers??0)+1;
     if (actor.isPlayer) b.callbacks.sound?.('super');
+    b.callbacks.cue?.('super',actor);
     return true;
   }
 
@@ -173,13 +178,42 @@ export class Abilities {
 
   summon(actor) {
     const b=this.battle;
-    if (actor.down>0 || actor.ride || actor.lift || actor.drone || actor.droneReady>b.clock) return false;
-    const drone={owner:actor,x:actor.x,z:actor.z,y:actor.y+1.55,yaw:actor.yaw,turn:0,spray:0,
+    if (actor.down>0 || actor.ride || actor.lift || actor.drone || actor.cloneOf || actor.droneReady>b.clock) return false;
+    const drone={owner:actor,x:actor.x,z:actor.z,y:actor.y+1.55,yaw:actor.yaw,turn:0,spray:0,gun:.55,flash:-9,
       until:b.clock+DRONE_LIFETIME};
     actor.drone=drone;
     actor.droneReady=b.clock+DRONE_COOLDOWN;
     this.drones.push(drone);
     if (actor.isPlayer) b.callbacks.sound?.('drone');
+    b.callbacks.cue?.('drone',actor);
+    return true;
+  }
+
+  // Nearest opponent the drone has a clear line to.
+  droneTarget(d) {
+    const b=this.battle, from=[d.x,d.y-.2,d.z];
+    let best=null, nearest=DRONE_WEAPON.range;
+    for (const enemy of this.enemies(d.owner,d.x)) {
+      if (enemy.shield>0) continue;
+      const point=[enemy.x,enemy.y+(enemy.isBoss?2.2:enemy.swimming?.36:.9),enemy.z];
+      const range=Math.hypot(point[0]-from[0],point[1]-from[1],point[2]-from[2]);
+      if (range>=nearest || range<.8 || b.traceShot(from,point,true) || b.subweapons.block(from,point,d.owner.team)) continue;
+      nearest=range;
+      best=point;
+    }
+    return best && {from,point:best};
+  }
+
+  droneFire(d) {
+    const b=this.battle, aim=this.droneTarget(d);
+    if (!aim) return false;
+    const direction=unit(sub(aim.point,aim.from));
+    b.shots.push({pos:aim.from.slice(),vel:scale(direction,DRONE_WEAPON.speed),actor:d.owner,weapon:DRONE_WEAPON,power:1,age:0,
+      bend:null,homing:{...DRONE_HOMING},life:1.2,id:++b.shotSequence});
+    d.flash=b.clock;
+    d.aim=Math.atan2(direction[0],-direction[2]);
+    b.perception?.fire({x:d.x,y:d.y-.9,z:d.z,team:d.owner.team,heardAt:-Infinity});
+    b.callbacks.cue?.('drone-shot',{x:d.x,y:d.y,z:d.z,team:d.owner.team});
     return true;
   }
 
@@ -277,6 +311,9 @@ export class Abilities {
         }
       }
       if (Math.hypot(d.x-oldX,d.z-oldZ)<.001) d.turn=0;
+      d.gun=(d.gun??DRONE_FIRE_INTERVAL)-dt;
+      // The remainder carries over, so the cadence stays at exactly one a second.
+      if (d.gun<=0) d.gun=this.droneFire(d)?Math.max(.5,d.gun+DRONE_FIRE_INTERVAL):.2;
     }
     this.rings=this.rings.filter(ring=>ring.until>b.clock);
     this.advanced.update(dt);
@@ -291,6 +328,11 @@ export class Abilities {
       const y=d.y+bob;
       r.add('bevel',d.x,y,d.z,.67,.29,.52,0x535f5e,4,{dynamic:true,yaw:d.yaw});
       r.add('orb',d.x,y-.16,d.z,.29,.26,.27,team,9,{dynamic:true});
+      const fired=now-(d.flash??-9);
+      if (fired>=0 && fired<.16 && Number.isFinite(d.aim)) {
+        const [ax,,az]=forward(d.aim), glow=.34*(1-fired/.16);
+        r.add('orb',d.x+ax*.3,y-.2,d.z+az*.3,glow,glow,glow,0xfff4ce,3,{dynamic:true});
+      }
       for (const side of [-1,1]) {
         const x=d.x+Math.cos(d.yaw)*side*.48, z=d.z+Math.sin(d.yaw)*side*.48;
         r.beam([d.x,y,d.z],[x,y,z],.075,.09,0x677779,4,{dynamic:true});
@@ -299,7 +341,17 @@ export class Abilities {
     }
     for (const ring of this.rings) {
       if (!sameLevel(ring.x,viewX)) continue;
-      const t=clamp(1-(ring.until-now)/.55,0,1), radius=ring.r*(.42+t*.70);
+      const t=clamp(1-(ring.until-now)/(ring.span??.55),0,1), radius=ring.r*(.42+t*.70);
+      if (ring.half) {
+        // A shock-cannon blast: an expanding sector in front of the muzzle.
+        const tint=TEAM_INK[ring.team], reach=ring.r*(.25+.75*Math.min(1,t*1.6));
+        r.add('hazard',ring.x,ring.y,ring.z,reach*2,1,reach*2,tint,24,{dynamic:true,yaw:-ring.yaw,label:Math.min(1,t*1.5),layer:ring.half/Math.PI,effect:1+t});
+        for (let i=0;i<5;i++) {
+          const [dx,,dz]=forward(ring.yaw+(i/4-.5)*2*ring.half), near=reach*.25, far=reach*(.72+.26*t);
+          r.beam([ring.x+dx*near,ring.y+.05,ring.z+dz*near],[ring.x+dx*far,ring.y+.05,ring.z+dz*far],.13*(1-t),.04,i%2?tint:0xfff4ce,3,{dynamic:true});
+        }
+        continue;
+      }
       r.add('ripple',ring.x,ring.y,ring.z,radius*2,.031,radius*2,TEAM_INK[ring.team],12,{dynamic:true,label:t});
     }
   }

@@ -10,18 +10,18 @@ function ease(value) {
   return t*t*(3-2*t);
 }
 
-export function crewView(battle,actor,{yaw=actor.yaw,pitch=actor.pitch,height=actor.y,reach=1,watch=false}={}) {
-  const stair=stairLane(actor.x,actor.z,STAIR_VIEW_MARGIN);
-  const cabin=isCabin(actor.x);
+export function crewView(battle,actor,{yaw=actor.yaw,pitch=actor.pitch,height=actor.y,reach=1,watch=false,x=actor.x,z=actor.z}={}) {
+  const stair=stairLane(x,z,STAIR_VIEW_MARGIN);
+  const cabin=isCabin(x);
   let enclosed=0;
   if (stair) {
     const progress=stair.level===0?stair.t:STAIR_RUN-stair.t;
-    const across=Math.abs(actor.z-stair.stair.z);
+    const across=Math.abs(z-stair.stair.z);
     enclosed=ease((progress+1.30)/1.62)*(1-ease((across-1.24)/1.51));
   }
   const direction=forward(yaw), side=[-direction[2],0,direction[0]];
-  const pivot=[actor.x,height+1.27,actor.z];
-  const low=[actor.x,height+.39,actor.z];
+  const pivot=[x,height+1.27,z];
+  const low=[x,height+.39,z];
   const ceiling=battle.traceShot(low,pivot,true,false);
   if (ceiling?.normal[1]<-.35) pivot[1]=Math.max(low[1],ceiling.position[1]-CAMERA_CLEARANCE-.04);
   const back=mix(watch?4.49:3.74,2.18,enclosed);
@@ -34,8 +34,8 @@ export function crewView(battle,actor,{yaw=actor.yaw,pitch=actor.pitch,height=ac
   let amount=Math.min(allowed,reach);
   if (cabin) {
     const [halfX,halfZ]=CABIN_BOUNDS;
-    if (Math.abs(boom[0])>1e-6) amount=Math.min(amount,(halfX-.13-Math.sign(boom[0])*localX(actor.x))/Math.abs(boom[0]));
-    if (Math.abs(boom[2])>1e-6) amount=Math.min(amount,(halfZ-.13-Math.sign(boom[2])*actor.z)/Math.abs(boom[2]));
+    if (Math.abs(boom[0])>1e-6) amount=Math.min(amount,(halfX-.13-Math.sign(boom[0])*localX(x))/Math.abs(boom[0]));
+    if (Math.abs(boom[2])>1e-6) amount=Math.min(amount,(halfZ-.13-Math.sign(boom[2])*z)/Math.abs(boom[2]));
     amount=Math.max(0,amount);
   }
   const eye=add(pivot,scale(boom,amount));
@@ -44,14 +44,25 @@ export function crewView(battle,actor,{yaw=actor.yaw,pitch=actor.pitch,height=ac
 
 export function aerialView(aspect) {
   const distance=Math.min(245,Math.max(94,116/aspect+10));
-  return {eye:[0,distance*.9682,distance*.25],target:[0,1,0]};
+  return {eye:[0,distance*.9682,distance*.25],target:[0,1,0],overview:true};
 }
 
+// How far the player's own camera may sit from the server's and still be used
+// for aiming. The device shows the player a step ahead of the server; taking
+// its eye keeps a shot on the spot the reticle covered.
+const EYE_TRUST=1.9;
+
 export function serverCamera(battle,actor,input) {
-  return crewView(battle,actor,{yaw:input?.yaw,pitch:input?.pitch});
+  const pose=crewView(battle,actor,{yaw:input?.yaw,pitch:input?.pitch});
+  const eye=input?.eye;
+  if (!eye || zoneOf(eye[0])!==zoneOf(pose.eye[0]) ||
+      Math.hypot(eye[0]-pose.eye[0],eye[1]-pose.eye[1],eye[2]-pose.eye[2])>EYE_TRUST ||
+      battle.traceShot(pose.eye,eye,true)) return pose;
+  return {...pose,eye,target:add(eye,scale(forward(input.yaw,input.pitch),17))};
 }
 
 export const AVATAR_FIELDS=['team','index','name','isPlayer','weapon','drone','ride','lift','x','y','z','yaw','pitch','vx','vy','vz',
   'steps','tank','tankMax','hp','maxHp','down','shield','recoil','damageAge','guard','giant','swimming','charge','superCharge',
   'superUntil','droneReady','rangeFactor','kills','downs','painted','cabinVisits','active','attack','inkSwimming','climbing','inkPenalty','intent','climbNormal','airborne','landing','rolling','subId','subReady','doorReady','muzzleBlocked',
-  'slam','beaming','lastDamageAt','activeSpecial','bodyYaw','poseBank','feet','brace','peek','readyPose','flare'];
+  'slam','beaming','lastDamageAt','activeSpecial','bodyYaw','poseBank','feet','brace','peek','readyPose','flare',
+  'dealt','supers','subs','revealUntil','revealTeam','downBy','clone','apartmentVisits'];

@@ -9,8 +9,11 @@ export const SUBWEAPONS=[
   {id:'timed',name:'時限ボム',role:'広域',detail:'足元の少し先に設置。3秒後に広い範囲を塗り、敵にダメージを与える。',cost:41,cooldown:7.2,life:3,radius:4.4,damage:147},
   {id:'slider',name:'スライドボム',role:'通路制圧',detail:'地面を滑り、敵や壁に触れるか時間切れで爆発する。',cost:26,cooldown:4.3,life:1.18,radius:2.55,damage:97},
   {id:'trap',name:'トラップ',role:'待ち伏せ',detail:'設置から0.8秒で作動し、近づいた敵を感知して爆発。1人1個。',cost:33,cooldown:7,life:22,radius:2.85,damage:105},
-  {id:'curtain',name:'インクカーテン',role:'防御',detail:'最大5秒、敵のインク弾を受け止める。味方の弾は通り、被弾で壊れる。',cost:36,cooldown:8.2,life:5,hp:108}
+  {id:'curtain',name:'インクカーテン',role:'防御',detail:'最大5秒、敵のインク弾を受け止める。味方の弾は通り、被弾で壊れる。',cost:36,cooldown:8.2,life:5,hp:108},
+  {id:'see',name:'See Elite',role:'索敵',detail:'投げた場所の半径3m以内に入った敵を20秒間マーキング。壁越しでも位置がわかる。',cost:24,cooldown:9,life:14,radius:3,damage:0,mark:20}
 ].map(weapon=>({...weapon,cost:weapon.cost*INK_COST_FACTOR}));
+// A lobbed sub flies in an arc and bounces; the sensor stays where it comes to rest.
+const lobbed=id=>id==='throw' || id==='see';
 export const subweaponById=id=>SUBWEAPONS.find(sub=>sub.id===id) ?? SUBWEAPONS[0];
 
 const rangeTo=(p,a)=>Math.hypot(a.x-p[0],a.z-p[2]);
@@ -26,20 +29,20 @@ export class Subweapons {
 
   canUse(a) {
     const spec=subweaponById(a.subId);
-    return a.down<=0 && !a.swimming && !a.ride && !a.lift && !a.giant && !a.beaming && !a.slam &&
-      (!a.airborne || spec.id==='throw') && (a.subReady??0)<=this.battle.clock && a.tank>=spec.cost;
+    return a.down<=0 && !a.swimming && !a.ride && !a.lift && !a.giant && !a.beaming && !a.slam && !a.cloneOf &&
+      (!a.airborne || lobbed(spec.id)) && (a.subReady??0)<=this.battle.clock && a.tank>=spec.cost;
   }
 
   use(a,yaw=a.yaw,pitch=a.pitch) {
     if (!this.canUse(a)) return false;
     const b=this.battle, spec=subweaponById(a.subId), direction=forward(yaw);
     const {id,life,cost,cooldown}=spec;
-    const from=[a.x,a.y+(id==='throw'?1.22:.44),a.z];
+    const from=[a.x,a.y+(lobbed(id)?1.22:.44),a.z];
     const ahead=add(from,scale(direction,id==='curtain'?2.15:id==='timed'?1.25:.73));
     const wall=b.traceShot(from,ahead,true);
     const p=wall?add(wall.position,scale(wall.normal,.19)):stairEnd(from,ahead);
     const item={id,p,yaw,owner:a,until:b.clock+life};
-    if (id==='throw') {
+    if (lobbed(id)) {
       item.v=[direction[0]*13.2,clamp(5.15+pitch*8.5,1.6,10.5),direction[2]*13.2];
     } else {
       const floor=b.world.support(p[0],a.y+.30,p[2]);
@@ -66,7 +69,9 @@ export class Subweapons {
     a.tank-=cost;
     a.subReady=b.clock+cooldown;
     a.heat=Math.max(a.heat,.60);
+    a.subs=(a.subs??0)+1;
     if (a.isPlayer) b.callbacks.sound?.('lob');
+    b.callbacks.cue?.('sub',a);
     return true;
   }
 
@@ -75,7 +80,8 @@ export class Subweapons {
     const distance=rangeTo([a.x,a.y,a.z],enemy);
     const yaw=Math.atan2(enemy.x-a.x,a.z-enemy.z);
     const id=a.subId;
-    const usable=id==='throw'?distance>=6 && distance<=14:id==='slider'?distance>=3.2 && distance<=11:
+    const usable=id==='throw'?distance>=6 && distance<=14:id==='see'?distance>=5 && distance<=15 && !(enemy.revealUntil>this.battle.clock):
+      id==='slider'?distance>=3.2 && distance<=11:
       id==='timed'?distance>=2.1 && distance<=5.2:id==='trap'?distance>=2 && distance<=4:
       distance>=4.5 && distance<=13 && a.hp<=76;
     if (usable && Math.cos(a.yaw-yaw)>.78) this.use(a,yaw,-.12);
@@ -84,7 +90,7 @@ export class Subweapons {
   danger(a) {
     const b=this.battle, from=centerOf(a);
     for (const item of this.items) {
-      if (item.owner.team===a.team || item.id==='curtain' || item.id==='trap' && !item.triggered ||
+      if (item.owner.team===a.team || item.id==='curtain' || item.id==='see' || item.id==='trap' && !item.triggered ||
           item.until-b.clock>=.94 || Math.abs(item.p[1]-a.y)>=2.5) continue;
       const radius=subweaponById(item.id).radius+.40, joined=!sameLevel(item.p[0],a.x);
       const shift=joined?stairNeighborShift(a.x,a.z,radius):0;
@@ -116,6 +122,10 @@ export class Subweapons {
         if (b.clock>=item.until || item.hp<=0) this.items.splice(i,1);
         continue;
       }
+      if (id==='see' && b.clock>=(item.scanAt??0)) {
+        item.scanAt=b.clock+.12;
+        this.mark(item);
+      }
       if (id==='trap' && b.clock>=item.armAt && b.clock<item.until && !item.triggered && this.enemyNear(item,1.35)) {
         item.triggered=true;
         item.until=b.clock+.23;
@@ -123,7 +133,7 @@ export class Subweapons {
       const travel=Math.min(dt,Math.max(0,item.until-(b.clock-dt)));
       if (travel>0 && item.v) {
         const next=add(item.p,scale(item.v,travel));
-        if (id==='throw') {
+        if (lobbed(id)) {
           next[1]-=7.5*travel*travel;
           item.v[1]-=15*travel;
           const hit=b.traceShot(item.p,next,true);
@@ -153,6 +163,10 @@ export class Subweapons {
       }
       if (b.clock<item.until) continue;
       this.items.splice(i,1);
+      if (id==='see') {
+        b.burst(item.p,owner.team,5,1.4);
+        continue;
+      }
       if (id==='trap' && !item.triggered) continue;
       const [x,y,z]=item.p, spec=subweaponById(id);
       const floor=b.traceShot([x,y+.025,z],[x,y-3.6,z],true,false);
@@ -161,6 +175,28 @@ export class Subweapons {
       b.abilities.rings.push({x,y:(floor?.position[1]??y)+.035,z,r:spec.radius,team:owner.team,until:b.clock+.53});
       b.burst(item.p,owner.team,13,3.35);
       if (owner.isPlayer) b.callbacks.sound?.('bomb');
+      b.callbacks.cue?.('bomb',{x,y,z,team:owner.team});
+    }
+  }
+
+  // See Elite: every opponent inside the sensor radius is marked for the owner's team.
+  mark(item) {
+    const b=this.battle, {owner,p}=item, spec=subweaponById('see');
+    const shift=stairNeighborShift(p[0],p[2],spec.radius), enemies=b.abilities.enemies(owner,p[0]);
+    if (shift) enemies.push(...b.abilities.enemies(owner,p[0]+shift));
+    for (const a of enemies) {
+      if (a.isBoss) continue;
+      const x=a.x-(sameLevel(a.x,p[0])?0:shift);
+      if (Math.hypot(x-p[0],a.z-p[2])>spec.radius || Math.abs(a.y-p[1])>2.6) continue;
+      const fresh=!(a.revealUntil>b.clock);
+      a.revealUntil=b.clock+spec.mark;
+      a.revealTeam=owner.team;
+      if (fresh) {
+        item.pinged=b.clock;
+        b.abilities.rings.push({x:a.x,y:a.y+.05,z:a.z,r:1.5,team:owner.team,until:b.clock+.55});
+        if (owner.isPlayer) b.callbacks.sound?.('mark');
+        b.callbacks.cue?.('mark',a);
+      }
     }
   }
 
@@ -204,6 +240,18 @@ export class Subweapons {
           const post=add([x,base+height*.5,z],scale(right,side*i.halfWidth));
           r.add('cylinder',...post,.09,height,.09,0x283d43,4,opts);
           r.add('orb',post[0],base+height,post[2],.18,.16,.18,tint,3,opts);
+        }
+        continue;
+      }
+      if (i.id==='see') {
+        const pulse=(clock*1.15)%1, hot=clock-(i.pinged??-9)<.5;
+        r.add('cylinder',x,y,z,.30,.10,.30,0x283d43,4,opts);
+        r.add('cylinder',x,y+.07,z,.20,.06,.20,tint,3,opts);
+        r.add('cylinder',x,y+.24,z,.035,.30,.035,0x9fb0a0,4,opts);
+        r.add('orb',x,y+.42,z,hot?.19:.12,hot?.19:.12,hot?.19:.12,hot?0xfff2c2:tint,3,opts);
+        if (!i.v) {
+          r.add('ripple',x,y-.05,z,spec.radius*2,.03,spec.radius*2,tint,12,{dynamic:true,label:.52});
+          r.add('ripple',x,y-.04,z,spec.radius*2*pulse,.03,spec.radius*2*pulse,0xfff2c2,12,{dynamic:true,label:.25+pulse*.7});
         }
         continue;
       }

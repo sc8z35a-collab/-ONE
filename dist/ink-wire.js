@@ -1,7 +1,7 @@
 import {localX} from './layout.js';
 
-export const CLOUD_PROTOCOL=5;
-export const SOCKET_PROTOCOL='inkshift.v5';
+export const CLOUD_PROTOCOL=6;
+export const SOCKET_PROTOCOL='inkshift.v6';
 export const INK_SIZE={width:384,height:272};
 const TILE=16, CELLS=TILE*TILE, HEADER=4, RECORD=6, MAGIC=73;
 const MASK=32, RAW=CELLS*2, BUDGET=7200;
@@ -133,7 +133,7 @@ export function resetVisualInk(paint,mask) {
     paint.owner.fill(0,from,to);
     paint.pixels.fill(0,from*4,to*4);
   }
-  paint.dirtyMask|=mask;
+  paint.touchLayers(mask);
 }
 
 function writeCell(paint,layer,px,pz,cell,value) {
@@ -147,6 +147,7 @@ function writeCell(paint,layer,px,pz,cell,value) {
   paint.pixels[p+1]=sum-cyan;
   paint.pixels[p+2]=Math.round((value&31)*255/31);
   paint.pixels[p+3]=value?paint.floorByte[index]:0;
+  paint.touchRow(layer,z);
 }
 
 export function applyInkPacket(paint,buffer) {
@@ -182,7 +183,6 @@ export function applyInkPacket(paint,buffer) {
       if (cell!==CELLS) throw new Error('Short ink tile');
     }
     if (offset!==end) throw new Error('Unexpected ink tile data');
-    paint.dirtyMask|=1<<layer;
   }
   if (offset!==bytes.length) throw new Error('Unexpected ink data');
 }

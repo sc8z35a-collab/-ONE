@@ -1,6 +1,8 @@
 import {CABIN_X,CABIN_Y,RAIL_CABIN_X,UNDER_X,UNDER_Y,ZONES,interiorBlend,zoneOf} from './layout.js';
-import {BLUR_FRAGMENT,COMPOSITE_FRAGMENT,DETAIL_FRAGMENT,DOWN_FRAGMENT,ENV_FRAGMENT,FULLSCREEN_VERTEX,SCENE_FRAGMENT,
-  SCENE_VERTEX,SHADOW_FRAGMENT,SHADOW_VERTEX,SKY_FRAGMENT,SSAO_FRAGMENT,UP_FRAGMENT} from './render-shaders.js';
+import {BLUR_FRAGMENT,COMPOSITE_FRAGMENT,DETAIL_FRAGMENT,DOWN_FRAGMENT,ENV_FRAGMENT,FULLSCREEN_VERTEX,LITE_FRAGMENT,LITE_SKY_FRAGMENT,
+  SCENE_FRAGMENT,SCENE_VERTEX,SHADOW_FRAGMENT,SHADOW_VERTEX,SKY_FRAGMENT,SSAO_FRAGMENT,UP_FRAGMENT} from './render-shaders.js';
+import {loadSurfaceSheets,surfaceArray} from './surface-textures.js';
+import {SURFACE_COUNT} from './surfaces.js';
 
 export const TAU = Math.PI * 2;
 export const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
@@ -453,23 +455,38 @@ function labelTexture(gl,anisotropy) {
 
 const SCENE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uShape','uQuality','uHDR','uMirrorPass',
   'uShadowOn','uCascades','uShadowM0','uShadowM1','uShadowTexel','uAtlasGrid','uReflectOn','uViewport','uEnvLod','uClock',
-  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure'];
+  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge','uSurfaceMean'];
 const SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uField','uClock','uInterior','uHDR','uViewport','uExposure'];
-const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9};
+const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9,surface:10,sheet:11};
 // Per pass culling: LOD switch distance, how far small props draw, hard cut.
 const HIGH_DRAW={lodDist:58,smallDist:150,cull:Infinity};
-const LITE_DRAW={lodDist:34,smallDist:95,cull:Infinity};
+// The lightweight modes only draw the street around the fight: far enough to
+// see every opponent a weapon can reach, with fog covering the cut.
+const LITE_DRAW={lodDist:15,smallDist:34,cull:92};
+const ULTRA_DRAW={lodDist:0,smallDist:22,cull:64};
+const OVERVIEW_DRAW={lodDist:0,smallDist:0,noSmall:true,cull:Infinity};
 const MIRROR_DRAW={lodDist:18,smallDist:24,cull:260};
+// Internal resolution of the lightweight modes, in lines on the short side.
+export const LITE_LINES=400, ULTRA_LINES=300;
+const LITE_FOG=[.74,.80,.85];
+const LITE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uClock','uAtlasGrid','uUnderX','uUnderY','uCabinX',
+  'uRailCabinX','uCabinY','uInkBounds','uFog','uFogRange','uShape','uSurfaceSheets','uSurfaceEdge','uSurfaceMean'];
+const LITE_SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uFog','uField','uInterior'];
 const ENV_SIZE=[512,256];
 
 export class Renderer {
   constructor(canvas, paint) {
     this.canvas = canvas;
     this.zone=0;
+    this.quality='high';
     this.lite=false;
+    this.ultra=false;
     this.fidelity=true;
     this.scale=1;
     this.adaptive=true;
+    // Display refresh interval in ms; the frame budget follows it up to 120 fps.
+    this.refreshInterval=1000/60;
+    this.fixedSize=null;
     const gl = canvas.getContext('webgl2', {alpha:false,antialias:true,stencil:false,powerPreference:'high-performance'});
     if (!gl) {
       const error = new Error('WebGL 2 が利用できません。');
@@ -490,9 +507,27 @@ export class Renderer {
     this.s = uniforms(gl,this.sky,SKY_UNIFORMS);
     this.shadowUniform = gl.getUniformLocation(this.shadow,'uLight');
     samplers(gl,this.scene,{uShadow0:UNIT.shadow0,uInk:UNIT.ink,uAtlas:UNIT.atlas,uReflection:UNIT.reflection,
-      uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1});
+      uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1,uSurface:UNIT.surface});
     samplers(gl,this.sky,{uDetail:UNIT.detail});
+    try {
+      this.sceneLite=program(gl,SCENE_VERTEX,LITE_FRAGMENT);
+      this.skyLite=program(gl,FULLSCREEN_VERTEX,LITE_SKY_FRAGMENT);
+      this.ul=uniforms(gl,this.sceneLite,LITE_UNIFORMS);
+      this.sl=uniforms(gl,this.skyLite,LITE_SKY_UNIFORMS);
+      samplers(gl,this.sceneLite,{uInk:UNIT.ink,uAtlas:UNIT.atlas,uSurface:UNIT.surface});
+    } catch (error) {
+      // The full shader still renders the lightweight modes, only slower.
+      console.warn('Lightweight shader unavailable',error);
+      this.sceneLite=this.skyLite=null;
+    }
     this.empty = gl.createVertexArray();
+    // Real surface textures arrive later (loadSurfaces); until then a blank
+    // one-pixel array keeps the sampler valid and the shaders procedural.
+    this.surfacePlaceholder=surfaceArray(gl,1,UNIT.surface,null);
+    this.surfaceTexture=null;
+    this.surfaceSheets=0;
+    this.surfaceSize=0;
+    this.surfaceMeans=new Float32Array(SURFACE_COUNT*3).fill(.5);
     this.inkTexture = gl.createTexture();
     this.inkSource=paint;
     gl.activeTexture(gl.TEXTURE0+UNIT.ink);
@@ -625,13 +660,44 @@ export class Renderer {
     return this.envTexture;
   }
 
-  setQuality(lightweight) {
-    if (this.lite!==lightweight) {
+  // Loads the generated texture sheets in the background; surfaces switch
+  // from their procedural look as each sheet arrives.
+  loadSurfaces({size=512}={}) {
+    return loadSurfaceSheets(this,{size,units:{surface:UNIT.surface,sheet:UNIT.sheet}});
+  }
+
+  bindSurfaces(u,sheets) {
+    const gl=this.gl;
+    gl.activeTexture(gl.TEXTURE0+UNIT.surface);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.surfaceTexture ?? this.surfacePlaceholder);
+    // The lightweight modes read the textures with plain trilinear filtering.
+    if (this.lite && !this.liteSampler) {
+      this.liteSampler=gl.createSampler();
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_WRAP_S,gl.REPEAT);
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_WRAP_T,gl.REPEAT);
+    }
+    gl.bindSampler(UNIT.surface,this.lite?this.liteSampler:null);
+    gl.uniform1i(u.uSurfaceSheets,this.surfaceTexture?sheets:0);
+    gl.uniform1f(u.uSurfaceEdge,.5/Math.max(1,this.surfaceSize));
+    gl.uniform3fv(u.uSurfaceMean,this.surfaceMeans);
+  }
+
+  // 'high', 'lite' (400p, no shadows or reflections, short draw distance) or
+  // 'ultra' (300p, nearest-cell ink, the shortest draw distance).
+  setQuality(level) {
+    const quality=level===true?'lite':level===false?'high':['lite','ultra'].includes(level)?level:'high';
+    if (this.quality!==quality) {
       this.frame=0;
       this.scale=1;
+      this.frameAverage=0;
       this.releaseShadows();
     }
-    this.lite=lightweight;
+    this.quality=quality;
+    this.lite=quality!=='high';
+    this.ultra=quality==='ultra';
+    this.fidelity=!this.lite;
   }
 
   releaseShadows() {
@@ -646,7 +712,7 @@ export class Renderer {
 
   prepareEffects() {
     if (this.effectsUnavailable) return false;
-    const plan=this.lite?[{size:1024,radius:34,every:2}]:[{size:2048,radius:21,every:1},{size:2048,radius:105,every:4}];
+    const plan=[{size:2048,radius:21,every:1},{size:2048,radius:105,every:4}];
     if (this.shadowBuffer && this.cascades?.length===plan.length) return true;
     this.releaseShadows();
     const gl=this.gl;
@@ -733,7 +799,8 @@ export class Renderer {
         ['uInvSize','uProj','uRadius','uIntensity','uStep','uTexel','uFirst','uThreshold','uWeight','uExposure',
           'uBloomStrength','uAOStrength','uTime','uInterior','uAOOn','uBloomOn','uFXAA']);
       const counts=gl.getInternalformatParameter(gl.RENDERBUFFER,gl.RGBA16F,gl.SAMPLES);
-      post.samples=counts && counts.length?Math.min(4,Math.max(...counts)):0;
+      post.deviceSamples=counts && counts.length?Math.max(...counts):0;
+      post.samples=Math.min(this.maxSamples??4,post.deviceSamples);
       return post;
     } catch (error) {
       console.warn('HDR post-processing disabled',error);
@@ -930,17 +997,34 @@ export class Renderer {
     return mix(1,1.32,this.interior??0);
   }
 
-  // Keeps the frame rate steady by trading internal resolution.
+  // Multisample count of the HDR target (the film renderer lowers it for 4K).
+  setSamples(count) {
+    this.maxSamples=count;
+    const post=this.post;
+    if (!post) return;
+    const samples=Math.min(count,post.deviceSamples??0);
+    if (samples===post.samples) return;
+    post.samples=samples;
+    post.w=post.h=0;
+  }
+
+  // Holds the display's refresh rate, up to 120 fps, by trading internal
+  // resolution. The lightweight modes run at a fixed resolution instead.
   adapt() {
     const now=globalThis.performance?.now?.()??0;
     const dt=this.lastDraw?now-this.lastDraw:0;
     this.lastDraw=now;
-    if (!this.adaptive || !(dt>0) || dt>75) return;
+    if (!(dt>0) || dt>75) return;
     this.frameAverage=this.frameAverage?this.frameAverage*.94+dt*.06:dt;
-    if (now-(this.adaptedAt??0)<1500) return;
+    if (!this.adaptive || this.lite || this.fixedSize || now-(this.adaptedAt??0)<1200) return;
     this.adaptedAt=now;
-    if (this.frameAverage>23.5 && this.scale>.6) this.scale=Math.max(.6,this.scale-.1);
-    else if (this.frameAverage<17.6 && this.scale<1) this.scale=Math.min(1,this.scale+.05);
+    const budget=Math.max(1000/120,this.refreshInterval||1000/60);
+    if (this.frameAverage>budget*1.3 && this.scale>.5) this.scale=Math.max(.5,this.scale-.1);
+    else if (this.frameAverage<budget*1.07 && this.scale<1) this.scale=Math.min(1,this.scale+.05);
+  }
+
+  get fps() {
+    return this.frameAverage?1000/this.frameAverage:0;
   }
 
   add(type,x,y,z,w,h,d,tint,kind = 0,opts = EMPTY) {
@@ -1116,19 +1200,23 @@ export class Renderer {
     const dpr=globalThis.devicePixelRatio || 1;
     const cw=Math.max(1,canvas.clientWidth||1), ch=Math.max(1,canvas.clientHeight||1);
     const limit=this.renderLimit || 4096;
-    const pixels=this.lite?1.05e6:2.9e6;
-    const ratio=Math.min(dpr,this.lite?1.25:2,Math.sqrt(pixels/(cw*ch)),limit/cw,limit/ch)*(this.scale||1);
+    // Offline video uses its exact frame size; the lightweight modes a fixed
+    // 400p / 300p; high quality the display's own pixels within a budget.
+    const ratio=this.fixedSize?1:this.lite?Math.min(dpr,(this.ultra?ULTRA_LINES:LITE_LINES)/Math.min(cw,ch),limit/cw,limit/ch):
+      Math.min(dpr,2,Math.sqrt(2.9e6/(cw*ch)),limit/cw,limit/ch)*(this.scale||1);
     this.viewZone=zoneOf(camera.eye[0]);
     this.mergeStairs=!!camera.stair && this.viewZone<2;
     this.interior=interiorBlend(camera);
-    const w=Math.max(1,Math.round(cw*ratio));
-    const h=Math.max(1,Math.round(ch*ratio));
+    this.overview=!!camera.overview;
+    const w=this.fixedSize?this.fixedSize[0]:Math.max(1,Math.round(cw*ratio));
+    const h=this.fixedSize?this.fixedSize[1]:Math.max(1,Math.round(ch*ratio));
     if (canvas.width!==w || canvas.height!==h) {
       canvas.width=w;
       canvas.height=h;
     }
     const outdoor=this.viewZone===0 && this.interior<.995;
-    this.effects=outdoor && this.prepareEffects();
+    // No shadow maps and no mirror pass at all in the lightweight modes.
+    this.effects=outdoor && !this.lite && this.prepareEffects();
     const mirrorW=Math.max(1,Math.round(w*.5)), mirrorH=Math.max(1,Math.round(h*.5));
     this.reflections=this.effects && !this.lite && this.prepareMirror(mirrorW,mirrorH);
     this.hdr=!this.lite && this.preparePost(w,h);
@@ -1149,19 +1237,25 @@ export class Renderer {
       }
       this.inkSource=paint;
       this.lastInkMask=0;
-      paint.dirtyMask=(1<<paint.layers)-1;
+      if (paint.touchLayers) paint.touchLayers((1<<paint.layers)-1);
+      else paint.dirtyMask=(1<<paint.layers)-1;
     }
     const visibleMask=ZONES[this.viewZone].inkMask | (this.mergeStairs?ZONES[1-this.viewZone].inkMask:0);
     const changed=paint.dirtyMask & visibleMask;
     const visibilityChanged=this.lastInkMask!==visibleMask;
-    if (changed && (visibilityChanged || clock-this.inkTime>(this.lite?.055:.033) || clock<this.inkTime)) {
-      const length=paint.layerSize*4;
+    if (changed && (visibilityChanged || clock-this.inkTime>(this.ultra?.085:this.lite?.055:.033) || clock<this.inkTime)) {
+      const length=paint.layerSize*4, stride=paint.w*4;
       for (let layer=0;layer<paint.layers;layer++) {
         if (!(changed & (1<<layer))) continue;
-        const data=paint.pixels.subarray(layer*length,(layer+1)*length);
-        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,0,layer,paint.w,paint.h,1,gl.RGBA,gl.UNSIGNED_BYTE,data);
+        // Only the rows that changed since the last upload are sent.
+        const first=paint.dirtyRows?paint.dirtyRows[layer*2]:0, last=paint.dirtyRows?paint.dirtyRows[layer*2+1]:paint.h-1;
+        if (last<first) continue;
+        const start=layer*length+first*stride, rows=last-first+1;
+        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,first,layer,paint.w,rows,1,gl.RGBA,gl.UNSIGNED_BYTE,
+          paint.pixels.subarray(start,start+rows*stride));
       }
       paint.dirtyMask&=~changed;
+      paint.clearRows?.(changed);
       this.inkTime=clock;
     }
     this.lastInkMask=visibleMask;
@@ -1183,6 +1277,7 @@ export class Renderer {
 
   pass(w,h,direction,right,up,eye,vp,paint,clock,mirror) {
     const gl=this.gl;
+    if (this.lite && !mirror && this.sceneLite) return this.litePass(w,h,direction,right,up,eye,vp,paint,clock);
     const hdr=mirror || this.hdr;
     gl.viewport(0,0,w,h);
     gl.depthMask(true);
@@ -1192,7 +1287,7 @@ export class Renderer {
     gl.clear(gl.DEPTH_BUFFER_BIT|gl.COLOR_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
     gl.useProgram(this.scene);
-    const u=this.u;
+    const u=this.active=this.u;
     gl.uniformMatrix4fv(u.uVP,false,vp);
     gl.uniform3fv(u.uSun,SUN);
     gl.uniform3fv(u.uSunColor,SUN_RADIANCE);
@@ -1230,6 +1325,7 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D,this.envTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.detail);
     gl.bindTexture(gl.TEXTURE_2D,this.detail);
+    this.bindSurfaces(u,this.surfaceSheets);
     const planes=frustum(vp);
     this.drawScene(eye,planes,mirror,false);
     if (this.interior<.995) {
@@ -1254,8 +1350,68 @@ export class Renderer {
     this.drawScene(eye,planes,mirror,true);
   }
 
+  // The lightweight frame: one unshadowed pass straight to the screen.
+  litePass(w,h,direction,right,up,eye,vp,paint,clock) {
+    const gl=this.gl, u=this.active=this.ul;
+    const reach=this.drawSettings(false).cull;
+    gl.viewport(0,0,w,h);
+    gl.depthMask(true);
+    gl.disable(gl.BLEND);
+    gl.clearColor(...(this.interior>.5?[.055,.062,.058]:LITE_FOG),1);
+    gl.clear(gl.DEPTH_BUFFER_BIT|gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.useProgram(this.sceneLite);
+    gl.uniformMatrix4fv(u.uVP,false,vp);
+    gl.uniform3fv(u.uSun,SUN);
+    gl.uniform1f(u.uClock,clock);
+    gl.uniform2f(u.uInkBounds,paint.boundX,paint.boundZ);
+    gl.uniform2f(u.uAtlasGrid,ATLAS_COLUMNS,ATLAS_ROWS);
+    gl.uniform1f(u.uUnderX,UNDER_X);
+    gl.uniform1f(u.uUnderY,UNDER_Y);
+    gl.uniform1f(u.uCabinX,CABIN_X);
+    gl.uniform1f(u.uRailCabinX,RAIL_CABIN_X);
+    gl.uniform1f(u.uCabinY,CABIN_Y);
+    gl.uniform3fv(u.uFog,LITE_FOG);
+    if (Number.isFinite(reach)) gl.uniform2f(u.uFogRange,reach*.5,reach*.97);
+    else gl.uniform2f(u.uFogRange,1e7,2e7);
+    gl.activeTexture(gl.TEXTURE0+UNIT.ink);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.inkTexture);
+    gl.activeTexture(gl.TEXTURE0+UNIT.atlas);
+    gl.bindTexture(gl.TEXTURE_2D,this.atlas);
+    // The ultra-light mode keeps flat colours: no texture taps at all.
+    this.bindSurfaces(u,this.ultra?0:this.surfaceSheets);
+    const planes=frustum(vp);
+    this.drawScene(eye,planes,false,false);
+    if (this.interior<.995) {
+      gl.useProgram(this.skyLite);
+      const f=Math.tan(FOV/2), s=this.sl;
+      gl.uniform3fv(s.uRight,right);
+      gl.uniform3fv(s.uUp,up);
+      gl.uniform3fv(s.uForward,direction);
+      gl.uniform3fv(s.uSun,SUN);
+      gl.uniform3fv(s.uFog,LITE_FOG);
+      gl.uniform2f(s.uField,f*w/h,f);
+      gl.uniform1f(s.uInterior,this.interior);
+      gl.depthMask(false);
+      gl.bindVertexArray(this.empty);
+      gl.drawArrays(gl.TRIANGLES,0,3);
+      gl.depthMask(true);
+      gl.useProgram(this.sceneLite);
+    }
+    this.drawScene(eye,planes,false,true);
+  }
+
+  drawSettings(mirror) {
+    return mirror?MIRROR_DRAW:!this.lite?HIGH_DRAW:this.overview?OVERVIEW_DRAW:this.ultra?ULTRA_DRAW:LITE_DRAW;
+  }
+
+  // How far the current mode draws moving things, for callers that cull them.
+  get reach() {
+    return this.lite && !this.overview?this.drawSettings(false).cull:Infinity;
+  }
+
   drawScene(eye,planes,mirror,alpha) {
-    const gl=this.gl, zone=this.viewZone, u=this.u;
+    const gl=this.gl, zone=this.viewZone, u=this.active ?? this.u;
     const merged=!mirror && this.mergeStairs;
     const views=merged?[[zone,'dynamic'],[1-zone,'adjacent']]:[[zone,'dynamic']];
     gl.uniform1i(u.uMergeStairs,merged?1:0);
@@ -1264,7 +1420,7 @@ export class Renderer {
       gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ZERO,gl.ONE);
       gl.depthMask(false);
     }
-    const settings=mirror?MIRROR_DRAW:this.lite?LITE_DRAW:HIGH_DRAW;
+    const settings=this.drawSettings(mirror);
     for (const [level,dynamicKey] of views) {
       const offset=ZONES[zone].x-ZONES[level].x;
       gl.uniform1f(u.uDrawOffset,offset);
@@ -1276,7 +1432,7 @@ export class Renderer {
         if (TRANSPARENT_MESHES.has(type)!==alpha) continue;
         gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
         this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings);
-        this.drawDynamic(type,pair[dynamicKey]);
+        this.drawDynamic(type,pair[dynamicKey],this.ultra);
       }
     }
     if (alpha) {

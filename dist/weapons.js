@@ -6,8 +6,15 @@ export const SUPERS = {
   health:{name:'タイリョクバイ',seconds:20,detail:'20秒間、最大体力が100から200に増える。'},
   wave:{name:'インクウェーブ',seconds:2.25,detail:'扇形の波が進み、地面を塗りながら敵を押し返す。'},
   vortex:{name:'ボルテックス',seconds:2.62,detail:'渦が周囲の敵とインクを引き寄せ、最後に弾けて広く塗る。'},
-  beam:{name:'プリズムビーム',seconds:3.5,detail:'溜めたあと、照準に追従する光線を照射。遮蔽物で止まる。'}
+  beam:{name:'プリズムビーム',seconds:3.5,detail:'溜めたあと、照準に追従する光線を照射。遮蔽物で止まる。'},
+  om:{name:'OM Bomb',seconds:14,detail:'14秒間、身体能力を強化。敵の動きを捉え、撃った弾が敵をわずかに追従する。'},
+  ebot:{name:'ebot',seconds:20,detail:'自分の分身を2体召喚。分身は体力60、塗りと攻撃は半分で、20秒間いっしょに戦う。'},
+  om2:{name:'OM BOMB II',seconds:14,detail:'OM Bombの2連発版。14秒間、1回の射撃で追従弾を2発ずつ撃つ。1発の攻撃力は半分、塗りは合計2倍。'}
 };
+
+// Shots steer toward the nearest opponent inside this cone while a tracking super is active.
+export const OM_HOMING={turn:1.55,cone:.50,reach:17};
+export const EBOT={count:2,hp:60,damage:.5,paint:Math.SQRT1_2};
 
 export const INK_COST_FACTOR=.5;
 export const PAINT_RADIUS_FACTOR=1.5;
@@ -28,15 +35,25 @@ export const WEAPONS = [
     speed:60.2,gravity:8,range:30,damage:20,cost:3.15,delay:.159,radius:1.03,depth:.041,pellets:2,spread:.053,arc:0,size:.184},
   {id:'surge',name:'ウェーブポンプ',role:'3連流・広がり',detail:'低い弾道の3連流で、横に広く塗れる。',special:'wave',
     speed:47.8,gravity:10.4,range:24,damage:17,cost:4.35,delay:.27,radius:1.07,depth:.048,pellets:3,spread:.127,arc:0,size:.197},
-  {id:'coil',name:'スパイラルガン',role:'旋回弾・塗り',detail:'左右に振れる弾で曲がり角付近を塗り広げる。',special:'vortex',
+  {id:'coil',name:'スパイラルガン',role:'旋回弾・塗り',detail:'左右に振れる弾で曲がり角付近を塗り広げる。',special:'om',
     speed:46.3,gravity:8.7,range:28,damage:34,cost:3.75,delay:.234,radius:1.54,depth:.053,pellets:1,spread:.056,arc:.062,size:.263,swirl:2.1},
   {id:'prism',name:'プリズムランス',role:'高速弾・精密',detail:'集弾性の高い高速弾で、中距離から正確に狙う。',special:'beam',
     speed:80.3,gravity:5.5,range:39,damage:43,cost:4.5,delay:.316,radius:1.01,depth:.051,pellets:1,spread:.004,arc:0,size:.16},
   {id:'roller',name:'ストリートローラー',role:'帯状の塗り・近距離',detail:'短押しで扇状に振る。長押ししながら前進すると床を転がして塗る。消費はシューターの1.1倍。',special:'slam',
-    speed:28,gravity:12,range:11,damage:33,cost:2.695,delay:.43,radius:1.04,depth:.052,pellets:5,spread:.48,arc:.06,size:.24,roller:true}
+    speed:28,gravity:12,range:11,damage:33,cost:2.695,delay:.43,radius:1.04,depth:.052,pellets:5,spread:.48,arc:.06,size:.24,roller:true},
+  {id:'rd2',name:'RD II QUATRO＋',role:'5連重弾・高火力',detail:'5発の重弾を束ねて撃つ。威力は絶大だが塗りは狭く、重さで移動が遅くなり、インク消費も激しい。',special:'om2',
+    speed:72,gravity:6.6,range:30,damage:44,cost:24,delay:.66,radius:.42,depth:.030,pellets:5,spread:.034,arc:0,size:.19,weight:.76},
+  {id:'td',name:'TD',role:'衝撃砲・広範囲',detail:'前方へインクを爆発させる衝撃砲。1発ずつだが扇形を一気に塗り、範囲内の敵を吹き飛ばす。',special:'ebot',
+    speed:40,gravity:9,range:10.5,damage:132,cost:15,delay:1.05,radius:1.25,depth:.050,pellets:1,spread:0,arc:0,size:.40,blast:{reach:10.5,half:.56}}
 ].map(weapon=>({...weapon,cost:weapon.cost*INK_COST_FACTOR,radius:weapon.radius*PAINT_RADIUS_FACTOR}));
 
 export const weaponById=id=>WEAPONS.find(weapon=>weapon.id===id) ?? WEAPONS[0];
+
+// The drone's own tracking round: one a second, never selectable as a main weapon.
+export const DRONE_WEAPON={id:'drone',name:'ドローン',speed:27,gravity:0,range:17,damage:27,cost:0,delay:1,radius:.62,depth:.030,
+  pellets:1,spread:0,arc:0,size:.17};
+export const DRONE_HOMING={turn:5.6,cone:1.35,reach:21};
+export const shotWeaponById=id=>id===DRONE_WEAPON.id?DRONE_WEAPON:weaponById(id);
 
 export function shotTravel(weapon,horizontal,rangeFactor=1,power=1) {
   const range=weapon.range*rangeFactor*(weapon.charge?.38+.62*power:1);

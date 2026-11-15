@@ -4,8 +4,129 @@
 // surface texture stays filtered at every distance.
 import {FILM_HEIGHT_ORIGIN,FILM_HEIGHT_STEP,FILM_HEIGHT_TOLERANCE} from './ink-fluid.js';
 import {CABIN_Y,CITY_RADIUS,UNDER_X,UNDER_Y} from './layout.js';
+import {SURFACES} from './surfaces.js';
 
 const f=n=>Number(n).toFixed(4);
+const floats=(name,values)=>`const float ${name}[${values.length}]=float[${values.length}](${values.map(f).join(',')});`;
+
+// Real surface textures (see surfaces.js). Shared by the full and the
+// lightweight scene shaders: slot names, repeat sizes, and the rules that
+// pick a texture for a surface from its material, colour, shape and place.
+const SURFACE_CORE=`
+${SURFACES.map((surface,i)=>`const int S_${surface.id.toUpperCase()}=${i};`).join('\n')}
+${floats('S_METERS',SURFACES.map(surface=>surface.meters))}
+${floats('S_MIRROR',SURFACES.map(surface=>surface.pattern?1:0))}
+${floats('S_TAKE',SURFACES.map(surface=>surface.take))}
+uniform highp sampler2DArray uSurface;
+uniform int uSurfaceSheets;
+uniform float uSurfaceEdge;
+uniform vec3 uSurfaceMean[${SURFACES.length}];
+bool surfaceReady(int slot){return slot>=0 && ((uSurfaceSheets>>(slot/9))&1)==1;}
+// p: world-plane position in metres; dx, dy: its screen derivatives, taken
+// outside any branch so a texture can be chosen per pixel.
+vec4 surfaceTap(int slot,vec2 p,vec2 dx,vec2 dy){
+  float s=1./S_METERS[slot];
+  vec2 uv=p*s;
+  if (S_MIRROR[slot]>.5) uv=clamp(1.-abs(1.-mod(uv,2.)),uSurfaceEdge,1.-uSurfaceEdge);
+  return textureGrad(uSurface,vec3(uv,float(slot)),dx*s,dy*s);
+}
+vec3 surfaceMean(int slot){return uSurfaceMean[slot];}
+float sfLum(vec3 c){return dot(c,vec3(.2126,.7152,.0722));}
+float sfChroma(vec3 c){return max(max(c.r,c.g),c.b)-min(min(c.r,c.g),c.b);}
+float sfHash(vec2 p){vec3 q=fract(vec3(p.xyx)*.1031);q+=dot(q,q.yzx+33.33);return fract((q.x+q.y)*q.z);}
+float sfNoise(vec2 p){
+  vec2 i=floor(p), u=fract(p);
+  u=u*u*(3.-2.*u);
+  return mix(mix(sfHash(i),sfHash(i+vec2(1,0)),u.x),mix(sfHash(i+vec2(0,1)),sfHash(i+vec2(1,1)),u.x),u.y);
+}
+// tint: the instance colour as stored (sRGB). Returns -1 for surfaces that
+// keep their procedural look (lights, glass panes with rooms, ink, labels).
+int surfaceFor(int kind,vec3 tint,vec3 ng,float seed,vec3 size,int shape,bool under,bool cabin,float layer,float above){
+  float l=sfLum(tint), chroma=sfChroma(tint);
+  bool warm=tint.r>tint.b+.06, red=tint.r>tint.g+.15, green=tint.g>tint.r+.015 && tint.g>=tint.b-.02;
+  bool level=ng.y>.6, ceiling=ng.y<-.6;
+  float longest=max(max(size.x,size.y),size.z), thinnest=min(min(size.x,size.y),size.z);
+  // The sides of slabs, kerbs, risers and poles made of a floor material.
+  if ((kind==1 || kind==5 || kind==15 || kind==27) && !level) return cabin?S_HARD_PLASTIC:under?S_CONCRETE_FORMWORK:S_CONCRETE_WEATHERED;
+  if (kind==5) return S_ASPHALT;
+  if (kind==1) {
+    if (cabin) return S_VINYL_FLOOR;
+    if (layer>3.5 && layer<4.5) return S_BALLAST;
+    if (under) return l>.55?(seed<.5?S_PORCELAIN_TILES:S_TERRAZZO):S_EPOXY_FLOOR;
+    if (warm && chroma>.07) return S_BRICK_PAVERS;
+    return tint.g>tint.r+.008?S_SIDEWALK_PAVERS:S_CONCRETE_SLAB;
+  }
+  if (kind==27) return S_CONCRETE_SLAB;
+  if (kind==15) return under?S_EPOXY_FLOOR:S_CONCRETE_WEATHERED;
+  if (kind==2 || kind==19) {
+    if (ceiling && (under || cabin)) return S_CEILING_PANEL;
+    if (cabin) return S_HARD_PLASTIC;
+    if (kind==19) return S_PLASTER;
+    if (under) return level?S_CONCRETE_WEATHERED:l>.6?S_SUBWAY_TILES:S_CONCRETE_FORMWORK;
+    if (level) return S_CONCRETE_WEATHERED;
+    if (red && chroma>.12) return S_TERRACOTTA;
+    if (chroma>.12 && longest>2.) return S_CORRUGATED_METAL;
+    if (size.y<2.4) return seed<.5?S_CONCRETE_BLOCK:S_CONCRETE_WEATHERED;
+    return seed<.25?S_CONCRETE_FORMWORK:seed<.5?S_CONCRETE_WEATHERED:seed<.75?S_PLASTER:S_ALC_PANEL;
+  }
+  if (kind==11) return warm?(seed<.5?S_BRICK_TAN:S_TILE_CLADDING):
+    seed<.3?S_TILE_CLADDING:seed<.55?S_PLASTER:seed<.8?S_ALC_PANEL:S_CONCRETE_WEATHERED;
+  if (kind==13) {
+    if (shape==0) return S_BARK;
+    if (level && size.y<.1 && l<.5) return seed<.5?S_SOIL:S_MULCH;
+    return red?S_BRICK_RED:S_BRICK_TAN;
+  }
+  if (kind==29) return seed<.34?S_WOOD_PLANKS:seed<.67?S_PLYWOOD:S_WOOD_WEATHERED;
+  if (kind==14) return shape==0?S_LEAVES:S_HEDGE;
+  if (kind==4) {
+    if (cabin || under) return chroma<.05?S_STAINLESS:S_STEEL_PAINTED_GREY;
+    if (level) return above<.35?S_DRAIN_GRATE:S_DIAMOND_PLATE;
+    if (longest>4.5) return S_STEEL_GIRDER;
+    if (thinnest<.05 && longest>.5) return S_PERFORATED_METAL;
+    if (chroma<.035 && l>.12) return seed<.5?S_GALVANIZED:S_BRUSHED_ALUMINUM;
+    return green?S_STEEL_PAINTED_GREEN:S_STEEL_PAINTED_GREY;
+  }
+  if (kind==22) return tint.r>.8 && tint.b<.7?S_TACTILE_PAVING:S_ROAD_PAINT;
+  if (kind==0) return S_PAINTED_METAL;
+  if (kind==8) return S_GLASS_GRIME;
+  if (kind==23) return S_CEPHALOPOD_SKIN;
+  if (kind==18) return S_SEAT_FABRIC;
+  if (kind==30) return S_RIPSTOP;
+  if (kind==31) return S_CANVAS;
+  if (kind==21) return S_RUBBER_SOLE;
+  if (kind==20) return S_HARD_PLASTIC;
+  return -1;
+}
+// Lawns, flower beds and sand lots scattered over the outer district.
+int outerPatch(vec2 p,out float weight){
+  float n=sfNoise(p*.031+vec2(3.1,7.7));
+  weight=0.;
+  if (n<.30) {weight=1.;return S_GRASS;}
+  if (n<.38) {weight=smoothstep(.38,.34,n);return S_SOIL;}
+  if (n>.80) {weight=1.;return S_SAND;}
+  if (n>.72) {weight=smoothstep(.72,.76,n);return S_MULCH;}
+  return -1;
+}
+`;
+
+// Full shader helpers: texture colour against the object's own colour, and
+// the relief the texture's shading implies (in metres, for bump mapping).
+const SURFACE_HIGH=`
+${SURFACE_CORE}
+vec3 realSurface(vec4 t,int slot,vec3 tint,float strength,float depth,inout float h){
+  vec3 mean=max(toLinear(surfaceMean(slot)),vec3(.012)), c=toLinear(t.rgb);
+  float shade=lum(c)/max(lum(mean),.012);
+  h=(shade-1.)*S_METERS[slot]*depth;
+  vec3 tinted=tint*c/mean, natural=c*(lum(tint)/max(lum(mean),.012));
+  return mix(tint,mix(tinted,natural,S_TAKE[slot]),strength);
+}
+// Three planar taps for rounded shapes (trunks, foliage, the boss).
+vec4 surfaceTri(int slot,vec3 p,vec3 n,vec3 dx,vec3 dy){
+  vec3 w=pow(abs(n),vec3(4.));
+  w/=w.x+w.y+w.z;
+  return surfaceTap(slot,p.zy,dx.zy,dy.zy)*w.x+surfaceTap(slot,p.xz,dx.xz,dy.xz)*w.y+surfaceTap(slot,p.xy,dx.xy,dy.xy)*w.z;
+}
+`;
 
 export const COMMON=`
 const float PI=3.14159265;
@@ -230,8 +351,13 @@ flat out vec4 vExtra;
 flat out vec3 vSize;
 flat out vec3 vAxisX;
 flat out vec3 vAxisY;
+flat out float vSeed;
 void main(){
   mat3 m=mat3(a0.xyz,a1.xyz,a2.xyz);
+  // A stable per-object number, so neighbouring buildings pick different textures.
+  vec3 q=fract(a3.xyz*vec3(.1031,.1030,.0973));
+  q+=dot(q,q.yzx+33.33);
+  vSeed=fract((q.x+q.y)*q.z);
   vec4 p=vec4(m*aPos+a3.xyz,1.);
   vPos=p.xyz;
   vNormal=normalize(transpose(inverse(m))*aNormal);
@@ -277,6 +403,7 @@ flat in vec4 vExtra;
 flat in vec3 vSize;
 flat in vec3 vAxisX;
 flat in vec3 vAxisY;
+flat in float vSeed;
 uniform vec3 uEye;
 uniform vec3 uSunColor;
 uniform int uShape;
@@ -310,6 +437,7 @@ uniform float uExposure;
 uniform float uTrainShift;
 out vec4 frag;
 
+${SURFACE_HIGH}
 const float LAMP_ROWS[${LAMP_ROWS.length}]=float[${LAMP_ROWS.length}](${LAMP_ROWS.map(f).join(',')});
 const float CABIN_LAMPS[${CABIN_LAMPS.length}]=float[${CABIN_LAMPS.length}](${CABIN_LAMPS.map(f).join(',')});
 
@@ -521,6 +649,18 @@ void main(){
   float wallBase=1.-smoothstep(0.,.95+grime*.6,above);
   bool vertical=an.y<.45;
 
+  // ---------- real surface textures ----------
+  // The texture picked for this surface (surfaces.js). The procedural look
+  // below stays as the fallback until its sheet has loaded.
+  vec3 sdpx=dFdx(vPos), sdpy=dFdy(vPos);
+  vec2 sdx=an.y>.6?sdpx.xz:(an.x>an.z?sdpx.zy:sdpx.xy), sdy=an.y>.6?sdpy.xz:(an.x>an.z?sdpy.zy:sdpy.xy);
+  bool belowGround=vPos.x>uUnderX*.5 && !cabin;
+  int slot=uSurfaceSheets>0 && !uMirrorPass?surfaceFor(kind,vTint.rgb,ng,vSeed,vSize,uShape,belowGround,cabin,vExtra.y,above):-1;
+  bool real=surfaceReady(slot);
+  bool rounded=kind==14 || kind==23 || kind==13 && uShape==0;
+  vec4 stex=!real?vec4(0.):rounded?surfaceTri(slot,vPos,ng,sdpx,sdpy):surfaceTap(slot,uvW,sdx,sdy);
+  float surfH=0., relief=0.;
+
   if (kind==3) {
     float along=sat(1.-abs(vLocal.x)*2.);
     float core=.82+.18*smoothstep(0.,.6,along);
@@ -569,6 +709,31 @@ void main(){
       }
       if (kind==27) m.albedo*=mix(vec3(1.),vec3(.86,.95,.78),smoothstep(.55,.75,stain)*.6);
     }
+    if (real) {
+      // The texture replaces the procedural slabs and tiles; oil stains, stair
+      // nosings and the outer district's lawns and moss go on top.
+      float oil=kind==1 && underground<.5 && !cabin?smoothstep(.62,.8,det(uvW*.09+.7).r)*.18:0.;
+      vec3 ground=realSurface(stex,slot,tint,1.,.010,surfH);
+      if (kind==27) {
+        float h2=0., h3=0., h4=0., cover=0.;
+        if (surfaceReady(S_ASPHALT_WORN)) ground=mix(ground,realSurface(surfaceTap(S_ASPHALT_WORN,uvW+vec2(31.,17.),sdx,sdy),
+          S_ASPHALT_WORN,tint*.82,1.,.010,h2),smoothstep(.42,.58,sfNoise(xz*.019+5.3)));
+        int patchSlot=outerPatch(xz,cover);
+        if (cover>0. && surfaceReady(patchSlot)) {
+          ground=mix(ground,realSurface(surfaceTap(patchSlot,uvW,sdx,sdy),patchSlot,tint,1.,.014,h3),cover);
+          surfH=mix(surfH,h3,cover);
+        }
+        if (surfaceReady(S_MOSS)) ground=mix(ground,realSurface(surfaceTap(S_MOSS,uvW*1.3,sdx*1.3,sdy*1.3),S_MOSS,tint,1.,.01,h4),
+          smoothstep(.6,.8,stain)*.55);
+      }
+      if (kind==15 && surfaceReady(S_RUBBER_STAIR)) {
+        float h5=0., nose=smoothstep(.06,.02,min(faceSize.x*.5-abs(faceUV.x),faceSize.y*.5-abs(faceUV.y)))*step(.6,an.y);
+        ground=mix(ground,realSurface(surfaceTap(S_RUBBER_STAIR,uvW,sdx,sdy),S_RUBBER_STAIR,vec3(.05),1.,.006,h5),nose);
+      }
+      m.albedo=ground*(1.-oil);
+      m.ao=1.;
+      relief=1.;
+    }
   } else if (kind==5) {
     vec4 d1=det(uvW*.23);
     vec4 d2=det(uvW*1.9);
@@ -578,10 +743,20 @@ void main(){
     float tar=smoothstep(.84,.97,det(uvW*.083+.2).b)*crackZone*.85;
     float patchy=smoothstep(.45,.62,d1.r);
     vec3 asphalt=tint*.70*(.86+(d2.r-.5)*.24+stones*.32+(d3.a-.5)*.18)*mix(1.,.86,patchy);
+    if (real) {
+      // Fresh and worn asphalt alternate in broad stretches along the road.
+      float h1=0., h2=0., aged=smoothstep(.38,.62,sfNoise(xz*.026+1.7));
+      vec3 fresh=realSurface(stex,S_ASPHALT,tint*.70,1.,.008,h1), old=fresh;
+      if (surfaceReady(S_ASPHALT_WORN)) old=realSurface(surfaceTap(S_ASPHALT_WORN,uvW+vec2(9.,23.),sdx,sdy),S_ASPHALT_WORN,tint*.70,1.,.008,h2);
+      else h2=h1;
+      asphalt=mix(fresh,old,aged);
+      surfH=mix(h1,h2,aged);
+    }
     asphalt=mix(asphalt,vec3(.018,.019,.02),tar);
     float puddle=smoothstep(.56,.70,det(xz*.045+.11).r*.75+d1.r*.35);
     if (uMirrorPass) puddle=0.;
     float wet=sat(puddle*1.6);
+    if (real) relief=1.-wet;
     m.albedo=asphalt*mix(1.,.45,wet);
     m.rough=mix(.86-stones*.12,.06,puddle);
     m.ao=1.-tar*.3;
@@ -615,6 +790,18 @@ void main(){
     m.albedo=kind==19?tint*(.97+d2.r*.05):c;
     m.rough=.84+d2.r*.1-streak*.1;
     m.ao=1.-pores*.25;
+    if (real) {
+      vec3 wall=realSurface(stex,slot,tint,1.,.010,surfH);
+      wall=mix(wall,wall*vec3(.72,.70,.64),streak*.35);
+      wall=mix(wall,wall*vec3(.62,.60,.52),wallBase*.55*float(vertical));
+      if (vertical && !cabin && !belowGround && surfaceReady(S_MOSS)) {
+        float h2=0.;
+        wall=mix(wall,realSurface(surfaceTap(S_MOSS,uvW,sdx,sdy),S_MOSS,tint,1.,.01,h2),wallBase*smoothstep(.62,.82,stain)*.6);
+      }
+      m.albedo=wall;
+      m.ao=1.;
+      relief=1.;
+    }
     if (!lite) {
       float h0=d3.r, hx=det(uvW*6.2+vec2(.004,0.)).r, hy=det(uvW*6.2+vec2(0.,.004)).r;
       vec3 t1=an.y>.6?vec3(1,0,0):(an.x>an.z?vec3(0,0,1):vec3(1,0,0));
@@ -636,7 +823,16 @@ void main(){
     m.albedo=c;
     m.rough=mix(.74+d2.r*.12,.92,mortar);
     m.ao=1.-mortar*.45;
-    if (!lite && vertical) {
+    if (real) {
+      bool natural=slot==S_BARK || slot==S_SOIL || slot==S_MULCH;
+      vec3 b=realSurface(stex,slot,tint,1.,natural?.02:.012,surfH);
+      if (!natural) b=mix(b,b*.66,wallBase*.6*float(vertical));
+      m.albedo=b;
+      m.ao=1.;
+      if (natural) m.rough=.9;
+      relief=1.;
+    }
+    if (!lite && vertical && !real) {
       vec3 t1=an.x>an.z?vec3(0,0,1):vec3(1,0,0);
       float ex=smoothstep(.04,.0,jd.x)*sign(b.x-.5);
       float ey=smoothstep(.03,.0,jd.y)*sign(b.y-.5);
@@ -650,10 +846,19 @@ void main(){
     float wear=smoothstep(.62,.9,edge+d2.r*.45);
     float rust=smoothstep(.80,.93,det(vec2(uvW.x*.9,uvW.y*.22)+.4).r)*(1.-galvanized)*smoothstep(.55,.85,1.-lum(tint))*.65;
     vec3 paint=tint*(.94+(d1.r-.5)*.12);
-    vec3 steel=vec3(.56,.57,.58);
+    vec3 steel=vec3(.56,.57,.58), corrosion=vec3(.22,.10,.05);
+    if (real) {
+      paint=realSurface(stex,slot,tint,1.,.004,surfH);
+      steel=realSurface(stex,slot,steel,1.,.004,surfH);
+      relief=1.;
+      if (surfaceReady(S_RUST)) {
+        float hr=0.;
+        corrosion=realSurface(surfaceTap(S_RUST,uvW,sdx,sdy),S_RUST,corrosion,1.,.006,hr);
+      }
+    }
     m.metal=mix(mix(.0,1.,galvanized),1.,wear*(1.-galvanized)*.8);
     m.albedo=mix(paint,steel*(.85+d2.g*.3),max(galvanized*.8,wear*.8));
-    m.albedo=mix(m.albedo,vec3(.22,.10,.05),rust);
+    m.albedo=mix(m.albedo,corrosion,rust);
     m.rough=mix(mix(.38+d2.r*.14,.34+d2.g*.2,galvanized),.85,rust);
     if (!lite) {
       float brush=sin(dot(uvW,vec2(0.,1.))*420.+d2.r*7.)*.5+.5;
@@ -671,6 +876,11 @@ void main(){
     } else {
       float dirt=det(uvW*.8).r;
       m.albedo=tint*.05; m.rough=.02+dirt*.05; m.f0=.045;
+      if (real) {
+        float smear=sfLum(stex.rgb);
+        m.rough=mix(m.rough,.38,smear*.55);
+        m.albedo=mix(m.albedo,toLinear(stex.rgb)*.3,smear*.22);
+      }
       vec3 tx=normalize(faceMask.x>.5?axZ*(-sign(nObj.x)):faceMask.z>.5?vAxisX*sign(nObj.z):vAxisX);
       vec3 ty=vAxisY;
       if (uShape==1 && vertical && max(faceSize.x,faceSize.y)>2.6) {
@@ -712,10 +922,12 @@ void main(){
       vec2 lo=vec2(.17,.24), hiE=vec2(.83,.86);
       vec2 inW=smoothstep(lo-fw,lo+fw,cell)*(1.-smoothstep(hiE-fw,hiE+fw,cell));
       float win=inW.x*inW.y;
+      if (real) relief=1.-win;
       float detailVis=1.-smoothstep(.08,.35,max(fw.x,fw.y));
       vec4 d2=det(uvW*1.2);
       float under=smoothstep(lo.y,lo.y-.25,cell.y)*step(lo.x,cell.x)*step(cell.x,hiE.x);
       vec3 wall=tint*(.9+(d2.r-.5)*.14);
+      if (real) wall=realSurface(stex,slot,tint,1.,.008,surfH);
       wall*=1.-under*smoothstep(.4,.8,det(vec2(g.x*3.,g.y*.25)).r)*.32;
       wall=mix(wall,wall*.8,smoothstep(.55,.8,stain)*.5);
       float sill=smoothstep(.035,.0,abs(cell.y-lo.y+.03))*step(lo.x-.03,cell.x)*step(cell.x,hiE.x+.03);
@@ -763,6 +975,10 @@ void main(){
     float tone=det(vPos.xz*.05+vPos.y*.03).r;
     vec3 hue=tint*mix(vec3(.70,.84,.52),vec3(1.10,1.08,.68),tone)*(.78+leaves*.44);
     m.albedo=hue*mix(1.,.5,smoothstep(.35,.85,clumps));
+    if (real) {
+      m.albedo=realSurface(stex,slot,m.albedo,1.,.02,surfH);
+      relief=.6;
+    }
     m.rough=.6; m.f0=.03;
     m.ao=mix(.34,1.,sat(1.-clumps*.95+ng.y*.22));
     m.trans=.6;
@@ -778,22 +994,39 @@ void main(){
     m.albedo=mix(timber,timber*.32,seam);
     m.rough=.74+fibre*.12;
     m.ao=1.-seam*.5;
-    if (!lite) n=normalize(n+vAxisY*(rings-.5)*.025*(1.-seam));
-  } else if (kind==18) {
+    if (real) {
+      m.albedo=realSurface(stex,slot,tint,1.,.012,surfH);
+      m.ao=1.;
+      relief=1.;
+    }
+    if (!lite && !real) n=normalize(n+vAxisY*(rings-.5)*.025*(1.-seam));
+  } else if (kind==18 || kind==30 || kind==31) {
     vec2 w=uvW*vec2(210.,210.);
     float weave=(sin(w.x)*sin(w.y))*.5+.5;
     float fade=1.-smoothstep(.0015,.006,px);
     m.albedo=tint*(.9+det(uvW*2.).r*.12+(weave-.5)*.08*fade);
     m.rough=.88; m.sheen=.55; m.f0=.03;
+    if (real) {
+      m.albedo=realSurface(stex,slot,tint,1.,.003,surfH);
+      relief=.5;
+    }
   } else if (kind==20) {
     float peel=det(uvW*9.).r;
     m.albedo=tint*(.97+peel*.04);
     m.rough=.30+peel*.06; m.clear=.75; m.f0=.04;
+    if (real) {
+      m.albedo=realSurface(stex,slot,tint,.6,.002,surfH);
+      relief=.4;
+    }
     if (!lite) n=normalize(n+(vec3(det(uvW*9.+.01).r,0.,det(uvW*9.-.01).r)-peel)*.04);
   } else if (kind==21) {
     vec4 d2=det(uvW*4.);
     m.albedo=tint*(.9+d2.r*.14)+vec3(.012)*sat(n.y);
     m.rough=.68+d2.a*.1; m.sheen=.18; m.f0=.035;
+    if (real) {
+      m.albedo=realSurface(stex,slot,tint,1.,.003,surfH);
+      relief=.5;
+    }
   } else if (kind==9) {
     m.albedo=tint*.92; m.rough=.07; m.clear=1.; m.f0=.04;
     m.trans=.35;
@@ -805,6 +1038,10 @@ void main(){
     vec3 interference=mix(vec3(.10,.22,.40),vec3(.53,.24,.38),.5+.5*sin(vUV.x*18.85+vUV.y*8.));
     m.albedo=mix(tint*(.85+pores*.22+rib*.07),toLinear(interference),.32*nacre);
     m.rough=.26+.08*pores; m.clear=.8; m.metal=.1;
+    if (real) {
+      m.albedo=realSurface(stex,slot,m.albedo,.8,.006,surfH);
+      relief=.6;
+    }
   } else if (kind==26) {
     m.albedo=tint*.95; m.rough=.09; m.clear=.9;
     m.emit=tint*.05;
@@ -825,6 +1062,19 @@ void main(){
       float bead=step(.985,det(uvW*31.).a)*(1.-worn);
       m.f0=mix(.04,.4,bead); m.rough=mix(m.rough,.2,bead);
     }
+    if (real) {
+      m.albedo=realSurface(stex,slot,m.albedo,kind==22?1.:.7,.003,surfH);
+      relief=.5;
+    }
+  }
+
+  // Relief from the texture's own shading (screen-space bump mapping).
+  surfH*=relief*(1.-smoothstep(.004,.03,px));
+  vec2 surfSlope=vec2(dFdx(surfH),dFdy(surfH));
+  if (relief>0.) {
+    vec3 r1=cross(sdpy,ng), r2=cross(ng,sdpx);
+    float area=dot(sdpx,r1);
+    n=normalize(abs(area)*n-sign(area)*(surfSlope.x*r1+surfSlope.y*r2));
   }
 
   // ---------- liquid ink on paintable floors ----------
@@ -1210,4 +1460,223 @@ void main(){
   float grain=hash12(gl_FragCoord.xy+fract(uTime*7.31)*vec2(311.,173.))-.5;
   c+=grain*.022*(1.-c*.7);
   frag=vec4(c,1.);
+}`;
+
+// ---------- lightweight path ----------
+// One cheap pass for the lite and ultra-lite modes: flat sun and ambient
+// light, no shadow maps, no reflections, no detail map. Geometry fades into
+// the horizon colour before the shortened draw distance cuts it off.
+export const LITE_FRAGMENT=`#version 300 es
+precision highp float;
+precision highp sampler2DArray;
+in vec3 vPos;
+in vec3 vNormal;
+in vec2 vUV;
+flat in vec4 vTint;
+flat in vec4 vExtra;
+flat in vec3 vSize;
+flat in float vSeed;
+uniform int uShape;
+uniform vec3 uEye;
+uniform vec3 uSun;
+uniform float uClock;
+uniform sampler2DArray uInk;
+uniform sampler2D uAtlas;
+uniform vec2 uAtlasGrid;
+uniform float uUnderX;
+uniform float uUnderY;
+uniform float uCabinX;
+uniform float uRailCabinX;
+uniform float uCabinY;
+uniform vec2 uInkBounds;
+uniform vec3 uFog;
+uniform vec2 uFogRange;
+out vec4 frag;
+${SURFACE_CORE}
+// The texture's colour against the surface's own (sRGB, no relief).
+vec3 liteSurface(vec3 t,int slot,vec3 base){
+  vec3 mean=max(surfaceMean(slot),vec3(.02));
+  return mix(base*t/mean,t*(sfLum(base)/max(sfLum(mean),.02)),S_TAKE[slot]);
+}
+float sat(float x){return clamp(x,0.,1.);}
+float hash(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
+vec3 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
+  vec4 cell=texelFetch(uInk,ivec3(clamp(pixel,ivec2(0),size-1),layer),0);
+  float bed=${f(FILM_HEIGHT_ORIGIN)}+(round(cell.a*255.)-1.)*${f(FILM_HEIGHT_STEP)};
+  return cell.a>0. && abs(height-bed)<tolerance?cell.rgb:vec3(0.);
+}
+void main(){
+  vec3 ng=normalize(vNormal);
+  vec3 V=uEye-vPos;
+  float dist=length(V);
+  V/=dist;
+  int kind=int(vTint.a+.5);
+  if (kind==22 && ng.y<.5) discard;
+  vec3 tint=vTint.rgb;
+  vec2 xz=vPos.xz;
+  float zoneInterior=vPos.x>uUnderX*.5?1.:smoothstep(-.4,-3.2,vPos.y);
+  float far=smoothstep(uFogRange.x,uFogRange.y,dist);
+  float haze=mix(far,max(far,.55*(1.-exp(-dist*.011))),zoneInterior);
+  vec3 fogCol=mix(uFog,vec3(.07,.075,.072),zoneInterior);
+
+  if (kind==28) {
+    float r=length(vUV-.5)*2.;
+    frag=vec4(0.,0.,0.,pow(sat(1.-r),1.7)*vExtra.x);
+    return;
+  }
+  if (kind==24) {
+    float r=vUV.y, u=vUV.x, age=vExtra.x, fade=sat(vExtra.w-1.);
+    float angle=(u>.5?u-1.:u)*6.2831853, halfAngle=vExtra.y*3.14159265;
+    bool sector=halfAngle>.001;
+    if (sector && abs(angle)>halfAngle) discard;
+    float soft=max(.006,fwidth(r)*.78);
+    float rim=1.-smoothstep(.012,.045+soft,abs(r-.961));
+    float seam=sector?smoothstep(halfAngle-.056,halfAngle,abs(angle))*.81:0.;
+    float phase=sector?sat((angle+halfAngle)/(2.*halfAngle)):r;
+    float wave=1.-smoothstep(.015,.075+soft,abs(phase-age));
+    vec3 col; float alpha;
+    if (vExtra.w<1.) {
+      float light=max(max(rim,seam),wave*.85);
+      col=mix(tint,vec3(1.),light*.7);
+      alpha=min(.96,max(rim*.77,seam*.77)+wave*.30+.13*(.55+.45*age));
+    } else {
+      float charge=max(wave*.91,rim*.27);
+      float trail=step(phase,age+.045)*.34*max(.11,1.-fade);
+      col=mix(tint,vec3(1.),charge*.75);
+      alpha=min(.86,trail+charge*.68)*(1.-fade);
+    }
+    frag=vec4(col,alpha);
+    return;
+  }
+  if (kind==25) {
+    float rim=pow(1.-max(0.,dot(ng,V)),2.5);
+    vec3 col=min(tint*(1.05+.3*max(dot(ng,uSun),0.))+vec3(.5,.42,.5)*rim,vec3(1.));
+    frag=vec4(mix(col,fogCol,haze),1.);
+    return;
+  }
+  if (kind==17) {
+    if (dot(ng,V)<=0.) discard;
+    float edge=1.-smoothstep(.01,.035,min(min(vUV.x,1.-vUV.x),min(vUV.y,1.-vUV.y)));
+    frag=vec4(mix(tint*.7+.22,fogCol,haze),.22+edge*.3);
+    return;
+  }
+  if (kind==16) {
+    if (dot(ng,V)<=0.) discard;
+    float border=1.-smoothstep(.012,.065,min(min(vUV.x,1.-vUV.x),min(vUV.y,1.-vUV.y)));
+    float flow=.5+.5*sin(vUV.x*45.+vUV.y*13.-uClock*5.);
+    frag=vec4(min(tint*(1.+border*.5),vec3(1.)),(.26+border*.44+flow*.08)*(1.-vExtra.x*.64));
+    return;
+  }
+  if (kind==12) {
+    float contour=sin(vUV.y*3.14159)*(.65+.35*sin(vUV.x*21.+uClock*8.));
+    frag=vec4(min(tint*1.25,vec3(1.)),max(0.,contour)*(.5*(1.-vExtra.x)));
+    return;
+  }
+  if (kind==7) {
+    float index=vExtra.x;
+    vec2 tile=vec2(mod(index,uAtlasGrid.x),floor(index/uAtlasGrid.x));
+    vec2 uv=(tile+vec2(mix(.01,.99,vUV.x),mix(.02,.98,1.-vUV.y)))/uAtlasGrid;
+    if (dot(ng,V)<=0.) discard;
+    float a=texture(uAtlas,uv).a;
+    if (a<.012) discard;
+    frag=vec4(mix(tint*.92,fogCol,haze),a);
+    return;
+  }
+  if (kind==27 && dot(xz,xz)>${CITY_RADIUS**2}.0) discard;
+
+  vec3 an=abs(ng);
+  vec3 col=tint*.93;
+  float glow=0.;
+  // Real surface texture: a single tap and no relief in the lightweight modes.
+  bool cabinZone=vPos.x>uCabinX-640., lowerZone=vPos.x>uUnderX*.5 && !cabinZone;
+  vec2 uvW=an.y>.6?xz:(an.x>an.z?vPos.zy:vPos.xy);
+  vec2 sdx=dFdx(uvW), sdy=dFdy(uvW);
+  int slot=uSurfaceSheets>0?surfaceFor(kind,tint,ng,vSeed,vSize,uShape,lowerZone,cabinZone,vExtra.y,
+    vPos.y-(cabinZone?uCabinY:lowerZone?uUnderY:0.)):-1;
+  bool real=surfaceReady(slot) && kind!=8;
+  vec4 stex=real?surfaceTap(slot,uvW,sdx,sdy):vec4(0.);
+  if (kind==3) {col=min(tint*1.18+.05,vec3(1.));glow=1.;}
+  else if (kind==5) col=tint*.72;
+  else if (kind==11) {
+    if (an.y>.55) col=tint*.66;
+    else {
+      vec2 g=vec2((an.x>an.z?vPos.z:vPos.x)/2.2,vPos.y/3.15);
+      vec2 c=fract(g);
+      float win=step(.17,c.x)*step(c.x,.83)*step(.24,c.y)*step(c.y,.86);
+      float lit=step(.72,hash(floor(g)));
+      col=mix(real?liteSurface(stex.rgb,slot,tint*.9):tint*.9,mix(vec3(.13,.19,.23),vec3(.78,.66,.42),lit*.55),win*(1.-smoothstep(36.,70.,dist)*.6));
+    }
+  }
+  else if (kind==8 || kind==6) col=mix(vec3(.10,.16,.20),tint,.35)+.10*sat(ng.y);
+  else if (kind==14) col=tint*(.62+.38*hash(floor(vPos.xz*.9)+floor(vPos.y*.9)));
+  else if (kind==13) col=tint*(.9-.12*step(.9,fract(vPos.y/.296)));
+  else if (kind==9 || kind==26) col=tint*.98;
+  if (real && kind!=11) {
+    vec3 base=col;
+    col=liteSurface(stex.rgb,slot,base);
+    float cover=0.;
+    int patchSlot=kind==27?outerPatch(xz,cover):-1;
+    if (cover>0. && surfaceReady(patchSlot)) col=mix(col,liteSurface(surfaceTap(patchSlot,uvW,sdx,sdy).rgb,patchSlot,base),cover);
+  }
+
+  bool lowerInk=vExtra.y>=1.5 && vExtra.y<3.5;
+  bool cabinInk=vExtra.y>4.5;
+  float cabinOrigin=vExtra.y>5.5?uRailCabinX:uCabinX;
+  float inkFloor=cabinInk?uCabinY:lowerInk?uUnderY:0.;
+  float inked=0.;
+  if ((kind==1 || kind==5 || kind==15 || kind==22) && ng.y>.48 && (kind==15 || vPos.y>inkFloor-.055)) {
+    vec2 mapPoint=vec2(xz.x-(cabinInk?cabinOrigin:lowerInk?uUnderX:0.),xz.y);
+    vec2 inkUV=(mapPoint/uInkBounds+1.)*.5;
+    if (all(greaterThan(inkUV,vec2(0))) && all(lessThan(inkUV,vec2(1)))) {
+      ivec2 size=textureSize(uInk,0).xy;
+      int layer=int(vExtra.y);
+      float clearance=kind==15 || layer==4?.207:${f(FILM_HEIGHT_TOLERANCE)};
+      // Four taps keep the ink edge smooth even at 300 lines.
+      vec2 grid=inkUV*vec2(size)-.5;
+      ivec2 pixel=ivec2(floor(grid));
+      vec2 part=fract(grid);
+      part=part*part*(3.-2.*part);
+      vec3 a=filmCell(pixel,size,layer,vPos.y,clearance);
+      vec3 b=filmCell(pixel+ivec2(1,0),size,layer,vPos.y,clearance);
+      vec3 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
+      vec3 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
+      vec3 st=mix(mix(a,b,part.x),mix(c,d,part.x),part.y);
+      float mask=smoothstep(.42,.58,st.r+st.g);
+      if (mask>.003) {
+        vec3 ink=(st.r>=st.g?vec3(.063,.847,.745):vec3(1.,.424,.2))*(1.-st.b*.16);
+        col=mix(col,ink,mask);
+        inked=mask;
+      }
+    }
+  }
+
+  float ndl=max(dot(ng,uSun),0.);
+  vec3 sunLight=vec3(.60,.63,.69)+vec3(.50,.45,.36)*ndl+.06*ng.y;
+  vec3 roomLight=vec3(.74,.73,.70)+.16*ng.y;
+  vec3 light=mix(sunLight,roomLight,zoneInterior);
+  light=mix(light,vec3(1.),max(glow,inked*.4));
+  col*=light;
+  if (kind==9 || kind==26) col+=tint*.08;
+  frag=vec4(mix(col,fogCol,haze),1.);
+}`;
+
+export const LITE_SKY_FRAGMENT=`#version 300 es
+precision highp float;
+in vec2 vUV;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uForward;
+uniform vec3 uSun;
+uniform vec3 uFog;
+uniform vec2 uField;
+uniform float uInterior;
+out vec4 frag;
+void main(){
+  vec2 s=vUV*2.-1.;
+  vec3 ray=normalize(uForward+uRight*s.x*uField.x+uUp*s.y*uField.y);
+  float h=clamp(ray.y,0.,1.), sun=max(dot(ray,uSun),0.);
+  vec3 col=mix(uFog,vec3(.30,.50,.80),1.-pow(1.-h,3.2));
+  col+=vec3(1.,.92,.74)*pow(sun,420.)*1.2+vec3(.25,.20,.12)*pow(sun,10.);
+  if (ray.y<0.) col=mix(uFog,uFog*.72,clamp(-ray.y*5.,0.,1.));
+  frag=vec4(mix(col,vec3(.055,.062,.058),uInterior),1.);
 }`;
