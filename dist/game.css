@@ -420,16 +420,21 @@ h1 i { color: var(--orange); font-style: normal; }
   --lock-bright:#fff5d5;
   --lock-shadow:#67351e;
   position:absolute;
-  transform:translate(-50%,-50%);
+  left:0;
+  top:0;
   opacity:var(--lock-alpha,1);
   pointer-events:none;
+  will-change:transform,width,height,opacity;
+  contain:layout style;
 }
 #focus-lock.boss { --lock-accent:#f6aaff; --lock-bright:#fff0ff; --lock-shadow:#713a88; }
+#focus-lock.homing { --lock-accent:#7ef5df; --lock-bright:#eafffa; --lock-shadow:#0d5a52; }
 .lock-brackets {
   position:absolute;
   inset:0;
-  transform:scale(var(--lock-zoom,1));
+  transform:scale(var(--lock-zoom,1)) rotate(var(--lock-twist,0deg));
   filter:drop-shadow(0 1px 1px #211b17) drop-shadow(0 0 3px var(--lock-shadow));
+  will-change:transform;
 }
 .lock-brackets > i {
   position:absolute;
@@ -437,6 +442,7 @@ h1 i { color: var(--orange); font-style: normal; }
   height:clamp(9px,24%,33px);
   background:linear-gradient(135deg,var(--lock-bright),var(--lock-accent) 58%,transparent 98%);
   clip-path:polygon(0 0,100% 0,78% 18%,29% 18%,16% 32%,16% 79%,0 100%);
+  transform:translate(calc(var(--lock-spread,0px)*-1),calc(var(--lock-spread,0px)*-1));
 }
 .lock-brackets > i:nth-child(1) { inset:0 auto auto 0; }
 .lock-brackets > i:nth-child(2) { inset:0 0 auto auto; scale:-1 1; }
@@ -467,6 +473,79 @@ h1 i { color: var(--orange); font-style: normal; }
   transform:scale(var(--lock-halo,1));
   opacity:var(--lock-wave,0);
 }
+/* Two dashed orbits turn in opposite directions around the locked target. */
+.lock-ring {
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:max(124%,64px);
+  aspect-ratio:1;
+  translate:-50% -50%;
+  overflow:visible;
+  opacity:var(--lock-ring,.0);
+  scale:var(--lock-ring-size,1);
+  filter:drop-shadow(0 0 3px var(--lock-shadow));
+}
+.lock-orbit {
+  fill:none;
+  stroke:var(--lock-accent);
+  stroke-width:1.6;
+  stroke-dasharray:22 12 4 12;
+  stroke-linecap:round;
+  transform-origin:50px 50px;
+  animation:lock-orbit 2.6s linear infinite;
+}
+.lock-orbit.reverse { stroke:var(--lock-bright); stroke-width:1; stroke-dasharray:3 9; animation:lock-orbit 3.9s linear infinite reverse; }
+#focus-lock.tracking .lock-orbit { animation-duration:.95s; }
+#focus-lock.tracking .lock-orbit.reverse { animation-duration:1.4s; }
+@keyframes lock-orbit { to { transform:rotate(360deg); } }
+/* Afterimages trail the frame while it follows a moving target. */
+.lock-ghost {
+  position:absolute;
+  inset:0;
+  border:1px solid var(--lock-accent);
+  clip-path:polygon(0 0,26% 0,26% 2px,2px 2px,2px 26%,0 26%,0 0,74% 0,100% 0,100% 26%,calc(100% - 2px) 26%,calc(100% - 2px) 2px,74% 2px,74% 0,
+    100% 74%,100% 100%,74% 100%,74% calc(100% - 2px),calc(100% - 2px) calc(100% - 2px),calc(100% - 2px) 74%,100% 74%,
+    26% 100%,0 100%,0 74%,2px 74%,2px calc(100% - 2px),26% calc(100% - 2px),26% 100%);
+  opacity:0;
+  will-change:transform,opacity;
+}
+.lock-pip {
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:7px;
+  height:7px;
+  margin:-3.5px;
+  border:1px solid var(--lock-bright);
+  background:var(--lock-accent);
+  box-shadow:0 0 6px var(--lock-accent);
+  transform:translate(var(--lock-pip-x,0px),var(--lock-pip-y,0px)) rotate(45deg) scale(var(--lock-pip,1));
+  will-change:transform;
+}
+/* Chevrons point the way the target is moving while the frame keeps up. */
+.lock-chevrons {
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:0;
+  height:0;
+  transform:rotate(var(--lock-heading,0deg)) translateX(calc(50% + var(--lock-lead,0px)));
+  opacity:var(--lock-motion,0);
+}
+.lock-chevrons i {
+  position:absolute;
+  top:-5px;
+  width:7px;
+  height:10px;
+  background:var(--lock-bright);
+  clip-path:polygon(0 0,45% 0,100% 50%,45% 100%,0 100%,55% 50%);
+  animation:lock-chevron .54s linear infinite;
+}
+.lock-chevrons i:nth-child(1) { left:0; }
+.lock-chevrons i:nth-child(2) { left:8px; animation-delay:-.18s; }
+.lock-chevrons i:nth-child(3) { left:16px; animation-delay:-.36s; }
+@keyframes lock-chevron { 0% { opacity:.15; } 40% { opacity:1; } 100% { opacity:.15; } }
 .lock-brackets b {
   position:absolute;
   left:50%;
@@ -484,11 +563,60 @@ h1 i { color: var(--orange); font-style: normal; }
   letter-spacing:.10em;
 }
 .lock-brackets b i { width:5px; height:5px; border:1px solid currentColor; transform:rotate(45deg); }
+.lock-brackets b small { font:700 8px/1 var(--mono); letter-spacing:.02em; opacity:.8; }
 #focus-lock.tracking .lock-sweep, #focus-lock.tracking .lock-ticks { opacity:.18; }
+#lock-tether { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+#lock-tether line { stroke:#ffd58a; stroke-width:1.2; stroke-dasharray:3 6; stroke-linecap:round; opacity:.75; animation:lock-tether .5s linear infinite; }
+@keyframes lock-tether { to { stroke-dashoffset:-18; } }
 #reticle.enemy i { background:#ffe5a4; box-shadow:0 0 5px #ffae5c; }
+/* A large cross snaps open around the reticle whenever a shot connects. */
+#hit-marker { position:absolute; left:50%; top:50%; width:0; height:0; pointer-events:none; opacity:0; }
+#hit-marker i { position:absolute; left:-1.5px; top:-1.5px; width:3px; height:20px; background:#fff; box-shadow:0 0 8px #ffd58a,0 0 2px #2a1a10; transform-origin:1.5px 1.5px; }
+#hit-marker i:nth-child(1) { transform:rotate(45deg) translateY(13px); }
+#hit-marker i:nth-child(2) { transform:rotate(135deg) translateY(13px); }
+#hit-marker i:nth-child(3) { transform:rotate(225deg) translateY(13px); }
+#hit-marker i:nth-child(4) { transform:rotate(315deg) translateY(13px); }
+#hit-marker b { position:absolute; left:-26px; top:-26px; width:52px; height:52px; border:2px solid #fff3d0; border-radius:50%; opacity:.0; }
+#hit-marker.hit { animation:hit-pop .30s cubic-bezier(.2,.9,.25,1); }
+#hit-marker.hit b { animation:hit-ring .30s ease-out; }
+#hit-marker.kill { animation:hit-pop .56s cubic-bezier(.2,.9,.25,1); }
+#hit-marker.kill i { background:#ff5a3c; height:30px; box-shadow:0 0 12px #ff8a5a,0 0 2px #2a1a10; }
+#hit-marker.kill b { border-color:#ff8a5a; animation:hit-ring .56s ease-out; }
+@keyframes hit-pop { 0% { opacity:1; scale:2.1; } 35% { opacity:1; scale:1; } 100% { opacity:0; scale:1.25; } }
+@keyframes hit-ring { 0% { opacity:.9; scale:.4; } 100% { opacity:0; scale:1.9; } }
+#fps { position:absolute; right:max(8px,env(safe-area-inset-right)); bottom:max(4px,env(safe-area-inset-bottom)); font:700 9px var(--mono); color:#d7f5ecb0; text-shadow:0 1px 2px #071419; letter-spacing:.05em; }
+#floaters > span.marked { color:#fff2c2; }
+#floaters > span.marked::before { content:'◆ '; color:#ffb24d; animation:lock-chevron .7s linear infinite; }
+#floaters > span.copy { opacity:.75; }
+.career { cursor:default; }
+.career b { margin-left:2px; }
+.dialog-panel.wide { width:min(100%,860px); }
+.result-table { width:100%; margin-top:10px; border-collapse:collapse; font:700 11px/1.35 var(--mono); }
+.result-table th { padding:4px 5px; text-align:right; font-weight:800; color:#9fc4bb; border-bottom:1px solid #6f928b80; white-space:nowrap; }
+.result-table th:first-child, .result-table td:first-child, .result-table th:nth-child(2), .result-table td:nth-child(2) { text-align:left; }
+.result-table td { padding:3px 5px; text-align:right; border-bottom:1px solid #2b474a; white-space:nowrap; }
+.result-table td:nth-child(2) { white-space:normal; color:#b9ccc7; font-weight:600; }
+.result-table tr.cyan td:first-child { color:var(--ink); }
+.result-table tr.amber td:first-child { color:var(--orange); }
+.result-table tr.you td { background:#1d4846; }
+.result-table tr.mvp td:first-child::after { content:' MVP'; color:#ffd58a; font-size:9px; }
+.result-table td.exp { color:#ffd58a; }
+.result-table td.total { color:#d9e7df; }
+.result-scroll { max-height:min(46dvh,420px); overflow:auto; -webkit-overflow-scrolling:touch; }
+.result-note { margin:8px 0 0; font-size:11px; color:#a9c1bb; }
+.film-form { display:grid; gap:10px; }
+.film-form label { display:grid; grid-template-columns:7em 1fr; align-items:center; gap:10px; font-size:12px; }
+.film-form select { min-height:34px; padding:3px 6px; color:#eff7ed; background:#213d3e; border:1px solid #8ca8a1; }
+.film-status { margin:8px 0 0; font:700 12px/1.5 var(--mono); color:#d9e7df; white-space:pre-wrap; }
+.film-bar { height:8px; margin-top:8px; background:#0a181d; border:1px solid #6f928b80; }
+.film-bar i { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--ink),#ffd58a); }
+#game.filming #title-screen, #game.filming #hud { visibility:hidden; }
+#game.filming .dialog-wrap { background:transparent; backdrop-filter:none; align-items:end; justify-items:end; padding:10px; }
+#game.filming .dialog-panel { width:min(100%,360px); background:#102126e6; }
 @media (prefers-reduced-motion: reduce) {
   .lock-brackets { transform:none; }
-  .lock-sweep, .lock-halo { display:none; }
+  .lock-sweep, .lock-halo, .lock-ghost, .lock-chevrons { display:none; }
+  .lock-orbit, #lock-tether line { animation:none; }
 }
 #player-meter {
   display: grid;

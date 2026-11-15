@@ -13,6 +13,8 @@ import {fullscreenElement,setFullscreen} from './fullscreen.js';
 import {STAIRS,stairLane,stairPoint} from './stairs.js';
 import {SUBWEAPONS,subweaponById} from './subweapons.js';
 import {inkReadout,inkResult} from './ink-hud.js';
+import {bankResults,levelOf,loadCareer,matchResults,mostActive,playerExp} from './progress.js';
+import {BOSS_RESPAWN_SECONDS,EXP_PER_KILL,RESPAWN_SECONDS} from './battle.js';
 import {TRAIN_DOORS} from './train-model.js';
 import {BOSS_BODY_HEIGHT} from './boss-model.js';
 import {StageObjects} from './stage-objects.js';
@@ -37,8 +39,8 @@ let renderer, world, demoStage, paint, localPaint, battle=null, camera=null, yaw
 let state='title', dialogKind=null, activeClock=0, prevTime=0, hudTime=0, mapTime=0, watchYaw=0;
 let usingTouch=matchMedia('(pointer: coarse)').matches;
 let mute=true, audio, noise, jumpQueued=false, shotQueued=false, desktopFire=false, rotationGate=false, hadPointerLock=false;
-let viewActor=null, viewZone=-1, viewHeight=0, cameraReach=1, watchAerial=true;
-let focus=null;
+let viewActor=null, viewZone=-1, viewHeight=0, viewX=0, viewZ=0, watchPitch=0, cameraReach=1, watchAerial=true;
+let focus=null, lockTrail=[], lastHitAt=-Infinity, fpsTime=0, tagCursor=0, film=null;
 let superQueued=false, droneQueued=false, useQueued=false, subQueued=false, demoTrain;
 let remote=null, connecting=null, accessCode='', cloudCheck=null, cloud=null;
 let sceneData, graphicsLost=false, graphicsTimeout=0;
@@ -65,19 +67,27 @@ function readPrefs() {
     sub:subweaponById(saved.sub).id,
     teamSize:saved.teamSize===4?4:8,
     sensitivity:Number.isFinite(saved.sensitivity)?clamp(saved.sensitivity,.55,1.75):1,
-    quality:['lite','high'].includes(saved.quality)?saved.quality:'auto'
+    quality:['ultra','lite','high'].includes(saved.quality)?saved.quality:'auto'
   };
 }
 
-function lightQuality() {
-  return prefs.quality==='lite' || (prefs.quality==='auto' && (usingTouch || !!renderer?.cpuRenderer));
+const QUALITY_NAMES={high:'高画質',lite:'軽量 400p',ultra:'超軽量 300p'};
+
+// Automatic: phones and software rendering use the lightweight 400p mode,
+// and step down to the ultra-light mode while a server match is streaming.
+function qualityLevel() {
+  if (prefs.quality!=='auto') return prefs.quality;
+  if (!usingTouch && !renderer?.cpuRenderer) return 'high';
+  return remote?'ultra':'lite';
 }
 
+const lightQuality=()=>qualityLevel()!=='high';
+
 function applyQuality() {
-  const light=lightQuality();
-  renderer?.setQuality(light);
-  $('quality').querySelector('b').textContent=light?'軽量':'高画質';
-  $('quality').setAttribute('aria-pressed',String(light));
+  const level=qualityLevel();
+  renderer?.setQuality(level);
+  $('quality').querySelector('b').textContent=QUALITY_NAMES[level];
+  $('quality').setAttribute('aria-pressed',String(level!=='high'));
 }
 
 function createRenderer() {
@@ -147,14 +157,18 @@ function sound(kind) {
   const now=audio.currentTime;
   const out=audio.createGain();
   out.connect(audio.destination);
-  const hit=['shot','lob','damage','hit'].includes(kind);
-  const duration={shot:.11,lob:.19,hit:.10,damage:.19,tick:.13,go:.31,down:.29,super:.30,drone:.22,boss:.65,bossDown:.59,finish:.5}[kind] || .14;
+  const hit=['shot','lob','damage','hit','blast','bomb'].includes(kind);
+  if (kind==='hit') lastHitAt=performance.now();
+  if (kind==='down') showHit(true);
+  const duration={shot:.11,lob:.19,hit:.10,damage:.19,tick:.13,go:.31,down:.29,super:.30,drone:.22,boss:.65,bossDown:.59,finish:.5,
+    blast:.34,bomb:.30,mark:.18}[kind] || .14;
   out.gain.setValueAtTime(.001,now);
   out.gain.exponentialRampToValueAtTime(kind==='shot'?.08:.12,now+.006);
   out.gain.exponentialRampToValueAtTime(.001,now+duration);
   const oscillator=audio.createOscillator();
   oscillator.type=kind==='shot'?'sine':kind==='damage'?'triangle':'sine';
-  const freq={shot:260,lob:142,hit:840,damage:127,tick:554,go:830,down:730,super:620,drone:440,boss:110,bossDown:493,finish:660}[kind] || 440;
+  const freq={shot:260,lob:142,hit:840,damage:127,tick:554,go:830,down:730,super:620,drone:440,boss:110,bossDown:493,finish:660,
+    blast:92,bomb:104,mark:988}[kind] || 440;
   oscillator.frequency.setValueAtTime(freq,now);
   oscillator.frequency.exponentialRampToValueAtTime(freq*(kind==='shot'?.44:kind==='damage'?.58:1.34),now+duration*.73);
   oscillator.connect(out);
@@ -214,8 +228,11 @@ function suspendInput() {
   remote?.flush();
 }
 
+// While waiting to respawn the player can still look around.
+const canLook=()=>canControl() || !!battle?.player && battle.player.down>0 && state==='match' && !dialogKind && !rotationGate && !graphicsLost;
+
 function aimMove(dx,dy,isTouch=false) {
-  if (!canControl()) return;
+  if (!canLook()) return;
   const screenScale=isTouch?clamp(430/arena.clientHeight,.76,1.21):1;
   const sensitivity=prefs.sensitivity*screenScale;
   yaw=(yaw+dx*(isTouch?.0052:.0031)*sensitivity)%(Math.PI*2);
@@ -293,7 +310,8 @@ function settings() {
   const labelGraphics=document.createElement('span');
   labelGraphics.textContent='描画品質';
   const quality=document.createElement('select');
-  for (const [value,name] of [['auto','自動（スマホは軽量）'],['lite','軽量（簡易な影・反射なし）'],['high','高画質（全エフェクト）']]) {
+  for (const [value,name] of [['auto','自動（スマホは軽量・サーバー戦は超軽量）'],['ultra','超軽量（300p・最短の描画距離）'],
+      ['lite','軽量（400p・影と反射なし・短い描画距離）'],['high','高画質（全エフェクト）']]) {
     const option=document.createElement('option');
     option.value=value;
     option.textContent=name;
@@ -302,7 +320,11 @@ function settings() {
   quality.value=prefs.quality;
   quality.addEventListener('change',()=>{prefs.quality=quality.value;savePrefs();});
   graphics.append(labelGraphics,quality);
-  block.append(row,graphics);
+  const rate=document.createElement('p');
+  rate.className='result-note';
+  const hz=Math.round(1000/(renderer?.refreshInterval || 16.7));
+  rate.textContent='フレームレートはどの画質でも最大120fps（この画面は約'+hz+'Hz）。高画質は必要に応じて内部解像度を下げて維持します。';
+  block.append(row,graphics,rate);
   return block;
 }
 

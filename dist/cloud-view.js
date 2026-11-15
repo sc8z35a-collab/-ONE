@@ -44,7 +44,7 @@ export function crewView(battle,actor,{yaw=actor.yaw,pitch=actor.pitch,height=ac
 
 export function aerialView(aspect) {
   const distance=Math.min(245,Math.max(94,116/aspect+10));
-  return {eye:[0,distance*.9682,distance*.25],target:[0,1,0]};
+  return {eye:[0,distance*.9682,distance*.25],target:[0,1,0],overview:true};
 }
 
 export function serverCamera(battle,actor,input) {
@@ -54,4 +54,5 @@ export function serverCamera(battle,actor,input) {
 export const AVATAR_FIELDS=['team','index','name','isPlayer','weapon','drone','ride','lift','x','y','z','yaw','pitch','vx','vy','vz',
   'steps','tank','tankMax','hp','maxHp','down','shield','recoil','damageAge','guard','giant','swimming','charge','superCharge',
   'superUntil','droneReady','rangeFactor','kills','downs','painted','cabinVisits','active','attack','inkSwimming','climbing','inkPenalty','intent','climbNormal','airborne','landing','rolling','subId','subReady','doorReady','muzzleBlocked',
-  'slam','beaming','lastDamageAt','activeSpecial','bodyYaw','poseBank','feet','brace','peek','readyPose','flare'];
+  'slam','beaming','lastDamageAt','activeSpecial','bodyYaw','poseBank','feet','brace','peek','readyPose','flare',
+  'dealt','supers','subs','revealUntil','revealTeam','downBy','clone','apartmentVisits'];

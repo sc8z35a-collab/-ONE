@@ -1,7 +1,7 @@
 import {localX} from './layout.js';
 
-export const CLOUD_PROTOCOL=5;
-export const SOCKET_PROTOCOL='inkshift.v5';
+export const CLOUD_PROTOCOL=6;
+export const SOCKET_PROTOCOL='inkshift.v6';
 export const INK_SIZE={width:384,height:272};
 const TILE=16, CELLS=TILE*TILE, HEADER=4, RECORD=6, MAGIC=73;
 const MASK=32, RAW=CELLS*2, BUDGET=7200;

@@ -7,11 +7,13 @@ import {TAU,clamp,forward} from '../dist/render.js';
 import {STAIR_VIEW_MARGIN,stairLane} from '../dist/stairs.js';
 import {World} from '../dist/world.js';
 import {checkpointOf,restoreCheckpoint} from './checkpoint.js';
-import {frameOf} from './frame.js';
+import {frameOf,packFrame} from './frame.js';
 
 export {STORAGE_KEYS} from './checkpoint.js';
 export const HZ=24;
-const STEP=1/HZ, FRAME_MS=95, CHECKPOINT_PERIOD=18;
+// One state frame per simulation step. A frame is small (only what changed),
+// so the link carries 24 of them a second; ink tiles keep their own slower pace.
+const STEP=1/HZ, FRAME_MS=1000/HZ-6, INK_MS=80, CHECKPOINT_PERIOD=18;
 const INPUT_LEASE_MS=450, IDLE_ROOM_MS=8000;
 const LIVE_WORLD_INK=ZONES[0].inkMask | ZONES[1].inkMask;
 const taps=['jump','press','super','drone','use','cycle','sub'];
@@ -67,6 +69,8 @@ export class RoomEngine {
     this.intent=null;
     this.lock=null;
     this.lastFrame=-Infinity;
+    this.lastInk=-Infinity;
+    this.link={};
     this.remainder=0;
     this.lastSeq=0;
     this.appliedSeq=0;
@@ -94,10 +98,13 @@ export class RoomEngine {
     this.inkMask=mask;
     const ink=[];
     if (fullMask) ink.push(...paintPackets(b.paint,fullMask,true,focus));
-    const changes=mask & ~fullMask, nearby=changes & localMask, remote=changes & ~localMask;
-    if (nearby) ink.push(...paintPackets(b.paint,nearby,false,focus));
-    if (remote) ink.push(...paintPackets(b.paint,remote));
-    const frame=frameOf(b,zone,fullMask,this.sounds.splice(0),mergeStairs);
+    if (force || urgent || b.finished || now-this.lastInk>=INK_MS) {
+      this.lastInk=now;
+      const changes=mask & ~fullMask, nearby=changes & localMask, remote=changes & ~localMask;
+      if (nearby) ink.push(...paintPackets(b.paint,nearby,false,focus));
+      if (remote) ink.push(...paintPackets(b.paint,remote));
+    }
+    const frame=packFrame(b,frameOf(b,zone,fullMask,this.sounds.splice(0),mergeStairs),this.link,force);
     return [JSON.stringify({...frame,tick:this.tick,inputAck:this.appliedSeq,lock:this.lockView(),inkPackets:ink.length}),...ink];
   }
 

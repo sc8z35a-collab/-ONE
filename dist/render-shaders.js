@@ -1211,3 +1211,205 @@ void main(){
   c+=grain*.022*(1.-c*.7);
   frag=vec4(c,1.);
 }`;
+
+// ---------- lightweight path ----------
+// One cheap pass for the lite and ultra-lite modes: flat sun and ambient
+// light, no shadow maps, no reflections, no detail map. Geometry fades into
+// the horizon colour before the shortened draw distance cuts it off.
+export const LITE_FRAGMENT=`#version 300 es
+precision highp float;
+precision highp sampler2DArray;
+in vec3 vPos;
+in vec3 vNormal;
+in vec2 vUV;
+flat in vec4 vTint;
+flat in vec4 vExtra;
+uniform vec3 uEye;
+uniform vec3 uSun;
+uniform float uClock;
+uniform sampler2DArray uInk;
+uniform sampler2D uAtlas;
+uniform vec2 uAtlasGrid;
+uniform float uUnderX;
+uniform float uUnderY;
+uniform float uCabinX;
+uniform float uRailCabinX;
+uniform float uCabinY;
+uniform vec2 uInkBounds;
+uniform vec3 uFog;
+uniform vec2 uFogRange;
+uniform int uInkDetail;
+out vec4 frag;
+float sat(float x){return clamp(x,0.,1.);}
+float hash(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
+vec3 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
+  vec4 cell=texelFetch(uInk,ivec3(clamp(pixel,ivec2(0),size-1),layer),0);
+  float bed=${f(FILM_HEIGHT_ORIGIN)}+(round(cell.a*255.)-1.)*${f(FILM_HEIGHT_STEP)};
+  return cell.a>0. && abs(height-bed)<tolerance?cell.rgb:vec3(0.);
+}
+void main(){
+  vec3 ng=normalize(vNormal);
+  vec3 V=uEye-vPos;
+  float dist=length(V);
+  V/=dist;
+  int kind=int(vTint.a+.5);
+  if (kind==22 && ng.y<.5) discard;
+  vec3 tint=vTint.rgb;
+  vec2 xz=vPos.xz;
+  float zoneInterior=vPos.x>uUnderX*.5?1.:smoothstep(-.4,-3.2,vPos.y);
+  float far=smoothstep(uFogRange.x,uFogRange.y,dist);
+  float haze=mix(far,max(far,.55*(1.-exp(-dist*.011))),zoneInterior);
+  vec3 fogCol=mix(uFog,vec3(.07,.075,.072),zoneInterior);
+
+  if (kind==28) {
+    float r=length(vUV-.5)*2.;
+    frag=vec4(0.,0.,0.,pow(sat(1.-r),1.7)*vExtra.x);
+    return;
+  }
+  if (kind==24) {
+    float r=vUV.y, u=vUV.x, age=vExtra.x, fade=sat(vExtra.w-1.);
+    float angle=(u>.5?u-1.:u)*6.2831853, halfAngle=vExtra.y*3.14159265;
+    bool sector=halfAngle>.001;
+    if (sector && abs(angle)>halfAngle) discard;
+    float soft=max(.006,fwidth(r)*.78);
+    float rim=1.-smoothstep(.012,.045+soft,abs(r-.961));
+    float seam=sector?smoothstep(halfAngle-.056,halfAngle,abs(angle))*.81:0.;
+    float phase=sector?sat((angle+halfAngle)/(2.*halfAngle)):r;
+    float wave=1.-smoothstep(.015,.075+soft,abs(phase-age));
+    vec3 col; float alpha;
+    if (vExtra.w<1.) {
+      float light=max(max(rim,seam),wave*.85);
+      col=mix(tint,vec3(1.),light*.7);
+      alpha=min(.96,max(rim*.77,seam*.77)+wave*.30+.13*(.55+.45*age));
+    } else {
+      float charge=max(wave*.91,rim*.27);
+      float trail=step(phase,age+.045)*.34*max(.11,1.-fade);
+      col=mix(tint,vec3(1.),charge*.75);
+      alpha=min(.86,trail+charge*.68)*(1.-fade);
+    }
+    frag=vec4(col,alpha);
+    return;
+  }
+  if (kind==25) {
+    float rim=pow(1.-max(0.,dot(ng,V)),2.5);
+    vec3 col=min(tint*(1.05+.3*max(dot(ng,uSun),0.))+vec3(.5,.42,.5)*rim,vec3(1.));
+    frag=vec4(mix(col,fogCol,haze),1.);
+    return;
+  }
+  if (kind==17) {
+    if (dot(ng,V)<=0.) discard;
+    float edge=1.-smoothstep(.01,.035,min(min(vUV.x,1.-vUV.x),min(vUV.y,1.-vUV.y)));
+    frag=vec4(mix(tint*.7+.22,fogCol,haze),.22+edge*.3);
+    return;
+  }
+  if (kind==16) {
+    if (dot(ng,V)<=0.) discard;
+    float border=1.-smoothstep(.012,.065,min(min(vUV.x,1.-vUV.x),min(vUV.y,1.-vUV.y)));
+    float flow=.5+.5*sin(vUV.x*45.+vUV.y*13.-uClock*5.);
+    frag=vec4(min(tint*(1.+border*.5),vec3(1.)),(.26+border*.44+flow*.08)*(1.-vExtra.x*.64));
+    return;
+  }
+  if (kind==12) {
+    float contour=sin(vUV.y*3.14159)*(.65+.35*sin(vUV.x*21.+uClock*8.));
+    frag=vec4(min(tint*1.25,vec3(1.)),max(0.,contour)*(.5*(1.-vExtra.x)));
+    return;
+  }
+  if (kind==7) {
+    float index=vExtra.x;
+    vec2 tile=vec2(mod(index,uAtlasGrid.x),floor(index/uAtlasGrid.x));
+    vec2 uv=(tile+vec2(mix(.01,.99,vUV.x),mix(.02,.98,1.-vUV.y)))/uAtlasGrid;
+    if (dot(ng,V)<=0.) discard;
+    float a=texture(uAtlas,uv).a;
+    if (a<.012) discard;
+    frag=vec4(mix(tint*.92,fogCol,haze),a);
+    return;
+  }
+  if (kind==27 && dot(xz,xz)>${CITY_RADIUS**2}.0) discard;
+
+  vec3 an=abs(ng);
+  vec3 col=tint*.93;
+  float glow=0.;
+  if (kind==3) {col=min(tint*1.18+.05,vec3(1.));glow=1.;}
+  else if (kind==5) col=tint*.72;
+  else if (kind==11) {
+    if (an.y>.55) col=tint*.66;
+    else {
+      vec2 g=vec2((an.x>an.z?vPos.z:vPos.x)/2.2,vPos.y/3.15);
+      vec2 c=fract(g);
+      float win=step(.17,c.x)*step(c.x,.83)*step(.24,c.y)*step(c.y,.86);
+      float lit=step(.72,hash(floor(g)));
+      col=mix(tint*.9,mix(vec3(.13,.19,.23),vec3(.78,.66,.42),lit*.55),win*(1.-smoothstep(36.,70.,dist)*.6));
+    }
+  }
+  else if (kind==8 || kind==6) col=mix(vec3(.10,.16,.20),tint,.35)+.10*sat(ng.y);
+  else if (kind==14) col=tint*(.62+.38*hash(floor(vPos.xz*.9)+floor(vPos.y*.9)));
+  else if (kind==13) col=tint*(.9-.12*step(.9,fract(vPos.y/.296)));
+  else if (kind==9 || kind==26) col=tint*.98;
+
+  bool lowerInk=vExtra.y>=1.5 && vExtra.y<3.5;
+  bool cabinInk=vExtra.y>4.5;
+  float cabinOrigin=vExtra.y>5.5?uRailCabinX:uCabinX;
+  float inkFloor=cabinInk?uCabinY:lowerInk?uUnderY:0.;
+  float inked=0.;
+  if ((kind==1 || kind==5 || kind==15 || kind==22) && ng.y>.48 && (kind==15 || vPos.y>inkFloor-.055)) {
+    vec2 mapPoint=vec2(xz.x-(cabinInk?cabinOrigin:lowerInk?uUnderX:0.),xz.y);
+    vec2 inkUV=(mapPoint/uInkBounds+1.)*.5;
+    if (all(greaterThan(inkUV,vec2(0))) && all(lessThan(inkUV,vec2(1)))) {
+      ivec2 size=textureSize(uInk,0).xy;
+      int layer=int(vExtra.y);
+      float clearance=kind==15 || layer==4?.207:${f(FILM_HEIGHT_TOLERANCE)};
+      vec3 st;
+      float mask;
+      if (uInkDetail>0) {
+        vec2 grid=inkUV*vec2(size)-.5;
+        ivec2 pixel=ivec2(floor(grid));
+        vec2 part=fract(grid);
+        part=part*part*(3.-2.*part);
+        vec3 a=filmCell(pixel,size,layer,vPos.y,clearance);
+        vec3 b=filmCell(pixel+ivec2(1,0),size,layer,vPos.y,clearance);
+        vec3 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
+        vec3 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
+        st=mix(mix(a,b,part.x),mix(c,d,part.x),part.y);
+        mask=smoothstep(.42,.58,st.r+st.g);
+      } else {
+        st=filmCell(ivec2(inkUV*vec2(size)),size,layer,vPos.y,clearance);
+        mask=step(.5,st.r+st.g);
+      }
+      if (mask>.003) {
+        vec3 ink=(st.r>=st.g?vec3(.063,.847,.745):vec3(1.,.424,.2))*(1.-st.b*.16);
+        col=mix(col,ink,mask);
+        inked=mask;
+      }
+    }
+  }
+
+  float ndl=max(dot(ng,uSun),0.);
+  vec3 sunLight=vec3(.60,.63,.69)+vec3(.50,.45,.36)*ndl+.06*ng.y;
+  vec3 roomLight=vec3(.74,.73,.70)+.16*ng.y;
+  vec3 light=mix(sunLight,roomLight,zoneInterior);
+  light=mix(light,vec3(1.),max(glow,inked*.4));
+  col*=light;
+  if (kind==9 || kind==26) col+=tint*.08;
+  frag=vec4(mix(col,fogCol,haze),1.);
+}`;
+
+export const LITE_SKY_FRAGMENT=`#version 300 es
+precision highp float;
+in vec2 vUV;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec3 uForward;
+uniform vec3 uSun;
+uniform vec3 uFog;
+uniform vec2 uField;
+uniform float uInterior;
+out vec4 frag;
+void main(){
+  vec2 s=vUV*2.-1.;
+  vec3 ray=normalize(uForward+uRight*s.x*uField.x+uUp*s.y*uField.y);
+  float h=clamp(ray.y,0.,1.), sun=max(dot(ray,uSun),0.);
+  vec3 col=mix(uFog,vec3(.30,.50,.80),1.-pow(1.-h,3.2));
+  col+=vec3(1.,.92,.74)*pow(sun,420.)*1.2+vec3(.25,.20,.12)*pow(sun,10.);
+  if (ray.y<0.) col=mix(uFog,uFog*.72,clamp(-ray.y*5.,0.,1.));
+  frag=vec4(mix(col,vec3(.055,.062,.058),uInterior),1.);
+}`;

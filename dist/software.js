@@ -83,7 +83,11 @@ export class SoftwareRenderer {
   }
   project(point) { return Renderer.prototype.project.call(this,point); }
 
-  setQuality(lightweight) { this.lite=lightweight; }
+  setQuality(level) {
+    this.quality=level===true?'lite':level===false?'high':level;
+    this.lite=this.quality!=='high';
+    this.ultra=this.quality==='ultra';
+  }
 
   seal() {
     for (const [name,batch] of Object.entries(this.batches)) {

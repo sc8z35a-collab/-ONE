@@ -81,7 +81,7 @@ export class NpcCombat {
   position(a,s,p) {
     const b=this.battle,w=a.weapon,d=Math.max(.01,gap(a,p));
     const ux=(p.x-a.x)/d,uz=(p.z-a.z)/d;
-    const preferred=a.giant?2.2:w.roller?2.7:w.charge?16:w.id==='fan'?6.0:w.id==='lob'?12:9.1;
+    const preferred=a.giant?2.2:w.roller?2.7:w.charge?16:w.id==='fan'?6.0:w.blast?5.4:w.id==='lob'?12:w.id==='rd2'?11:9.1;
     const progress=clamp((d-preferred)*.32,-1.8,2.2);
     const enemyEye=[p.x,p.y+1.19,p.z], look=gap(a,p)<8?1.15:.85;
     const candidates=[[0,0],[progress,0],[progress,1.58],[progress,-1.58],[0,1.95],[0,-1.95],[-1.5,0]];

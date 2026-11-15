@@ -3,14 +3,14 @@ import {BASE_TANK,CABIN_X,INK_REGIONS,PAINT_LAYERS,RAIL_CABIN_X,UNDER_X,inkOrigi
 import {STAIRS} from '../dist/stairs.js';
 import {RAIDER_WEAPON} from '../dist/raiders.js';
 import {add,dot,scale} from '../dist/render.js';
-import {weaponById} from '../dist/weapons.js';
+import {shotWeaponById,weaponById} from '../dist/weapons.js';
 import {randomGenerator} from '../dist/world.js';
 
-const STORAGE_VERSION=5;
+const STORAGE_VERSION=6;
 const filmKeys=Array.from({length:PAINT_LAYERS},(_,i)=>'ink'+i);
 const flowKeys=Array.from({length:INK_REGIONS},(_,i)=>'flow'+i);
 export const STORAGE_KEYS=['game',...filmKeys,...flowKeys];
-const SKIP=new Set(['goal','target','enemy','travelLine','travelGoal','travelPath','route','drone','weapon','battle']);
+const SKIP=new Set(['goal','target','enemy','travelLine','travelGoal','travelPath','route','drone','weapon','battle','cloneOf']);
 function fields(value) {
   return Object.fromEntries(Object.entries(value).filter(([key,v])=>!SKIP.has(key) && (v===null || (typeof v!=='object' && typeof v!=='function'))));
 }
@@ -124,7 +124,7 @@ export function checkpointOf(b) {
   const game={
     version:STORAGE_VERSION,field:{width:b.paint.w,height:b.paint.h,boundX:b.paint.boundX,boundZ:b.paint.boundZ},
     clock:b.clock,elapsed:b.elapsed,left:b.left,countdown:b.countdown,watching:b.watching,finished:b.finished,shotSequence:b.shotSequence,
-    actors:b.actors.map(a=>({...actor(a),weaponId:a.weapon.id})),
+    actors:b.actors.map(a=>({...actor(a),weaponId:a.weapon.id,...(a.cloneOf && {casterIndex:b.actors.indexOf(a.cloneOf)})})),
     tactics:{
       crew:b.actors.map(a=>savedTactics(b.tactics.states.get(a))),
       raiders:b.raiders.members.map(a=>savedTactics(b.tactics.states.get(a))),
@@ -182,13 +182,19 @@ function migratePositions(data) {
 
 export function restoreCheckpoint(b,stored) {
   const saved=stored.get('game');
-  if (!saved || ![1,2,3,4,STORAGE_VERSION].includes(saved.version) || saved.actors.length!==b.actors.length) return;
+  if (!saved || ![1,2,3,4,5,STORAGE_VERSION].includes(saved.version) ||
+      saved.actors.filter(a=>a.casterIndex===undefined).length!==b.actors.length) return;
   const data=saved.version<5?migratePositions(clone(saved)):saved;
   for (const key of ['clock','elapsed','left','countdown','watching','finished']) b[key]=data[key];
   b.shotSequence=data.shotSequence??0;
+  // ebot copies follow the regular crew in the saved order, so every stored
+  // crew index still points at the same fighter after the restore.
+  for (const row of data.actors) {
+    if (row.casterIndex!==undefined && b.actors[row.casterIndex]) b.addClone(b.actors[row.casterIndex]);
+  }
   for (let i=0;i<b.actors.length;i++) {
     const a=b.actors[i];
-    const {weaponId,...saved}=data.actors[i];
+    const {weaponId,casterIndex,...saved}=data.actors[i];
     Object.assign(a,saved,{drone:null,beaming:false,route:[],travelLine:null,travelGoal:null,enemy:null,goal:null});
     if (weaponId) a.weapon=weaponById(weaponId);
     a.rollHold=0;
@@ -262,7 +268,7 @@ export function restoreCheckpoint(b,stored) {
   }
   for (const {source,departed,weapon,...shot} of data.shots??[]) {
     const actor=fighter(b,source) ?? departed;
-    if (actor) b.shots.push({...shot,actor,weapon:weapon===RAIDER_WEAPON.id?RAIDER_WEAPON:weaponById(weapon)});
+    if (actor) b.shots.push({...shot,actor,weapon:weapon===RAIDER_WEAPON.id?RAIDER_WEAPON:shotWeaponById(weapon)});
   }
   for (const {owner,hit,damage,...motion} of data.effects??[]) {
     const actor=b.actors[owner];

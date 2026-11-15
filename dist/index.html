@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="mark-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <link rel="stylesheet" href="game.css?v=21">
+  <link rel="stylesheet" href="game.css?v=22">
 </head>
 <body>
   <main id="game" aria-label="INK//SHIFT">
@@ -46,6 +46,8 @@
         <div class="hero-toolbar">
           <button id="loadout" class="text-action" type="button"><span aria-hidden="true">◇</span> 武器を選ぶ <b id="active-weapon">シューター</b></button>
           <button id="how" class="text-action" type="button"><span aria-hidden="true">ⓘ</span> 操作ガイド</button>
+          <button id="film" class="text-action" type="button"><span aria-hidden="true">●</span> NPC戦を動画に書き出す</button>
+          <span id="career" class="text-action career" title="撃破1回につき30 EXP。試合終了後に加算されます。"><span aria-hidden="true">★</span> EXP <b id="career-exp">0</b> · Lv.<b id="career-level">1</b></span>
           <a id="apk-download" class="text-action apk-download" href="./inkshift-android.apk" download="inkshift-android.apk">Android APK 1.3</a>
           <a id="android-cloud" class="text-action" href="https://appassets.androidplatform.net/__cloud_server" hidden>Cloudflare接続先</a>
         </div>
@@ -112,14 +114,23 @@
         </div>
       </div>
       <div id="reticle" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
+      <div id="hit-marker" aria-hidden="true"><i></i><i></i><i></i><i></i><b></b></div>
+      <svg id="lock-tether" aria-hidden="true" hidden><line x1="0" y1="0" x2="0" y2="0"></line></svg>
       <div id="focus-lock" hidden aria-hidden="true">
+        <i class="lock-ghost"></i><i class="lock-ghost"></i>
         <div class="lock-halo"></div>
+        <svg class="lock-ring" viewBox="0 0 100 100" aria-hidden="true">
+          <circle class="lock-orbit" cx="50" cy="50" r="46"></circle>
+          <circle class="lock-orbit reverse" cx="50" cy="50" r="38"></circle>
+        </svg>
         <div class="lock-brackets">
           <i></i><i></i><i></i><i></i>
           <span class="lock-sweep"></span>
           <span class="lock-ticks"></span>
-          <b><i></i>LOCK</b>
+          <b><i></i><span id="lock-label">LOCK</span><small id="lock-range"></small></b>
         </div>
+        <span class="lock-pip"></span>
+        <span class="lock-chevrons"><i></i><i></i><i></i></span>
       </div>
       <div id="battle-message" aria-live="polite"></div>
       <div id="network-note" hidden role="status"></div>
@@ -148,6 +159,7 @@
         </div>
       </div>
       <div id="spectator-label" hidden><span class="live-dot"></span> 観戦中 <b id="viewing"></b></div>
+      <div id="fps" aria-hidden="true"></div>
 
       <div id="touch" aria-label="タッチ操作">
         <div id="stick" aria-label="移動スティック"><span></span></div>
@@ -183,6 +195,6 @@
     <div id="loading" role="status"><span class="live-dot"></span><span id="loading-caption">第07高架街区を読み込み中</span></div>
     <noscript>プレイするにはJavaScriptを有効にしてください。</noscript>
   </main>
-  <script type="module" src="main.js?v=26"></script>
+  <script type="module" src="main.js?v=27"></script>
 </body>
 </html>
