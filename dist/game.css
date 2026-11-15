@@ -733,3 +733,4 @@ h1 i { color: var(--orange); font-style: normal; }
   .touch-active #meter-tip { display:none; }
   .touch-active #transit-action { padding-inline:8px; min-height:32px; font-size:10px; }
 }
+#game.filming #arena { object-fit:contain; background:#000; }

@@ -43,6 +43,7 @@ function decode(text) {
       seq:a.seq,x:clamp(a.x,-1,1),z:clamp(a.z,-1,1),yaw:a.yaw%TAU,pitch:clamp(a.pitch,-.86,.70),
       paused:a.paused===true,fire:a.fire===true,swim:a.swim===true,overview:a.overview!==false,
       loadout:typeof a.loadout?.weapon==='string' && typeof a.loadout?.sub==='string'?a.loadout:null,
+      eye:Array.isArray(a.eye) && a.eye.length===3 && a.eye.every(Number.isFinite)?a.eye:null,
       ...Object.fromEntries(taps.map(key=>[key,a[key]===true]))
     };
   } catch { return null; }
@@ -92,13 +93,14 @@ export class RoomEngine {
     const localMask=ZONES[zone].inkMask | (mergeStairs?ZONES[1-zone].inkMask:0);
     const mask=localMask | LIVE_WORLD_INK;
     const fullMask=force?mask:mask & ~this.inkMask;
-    if (!fullMask && this.zone===zone && !urgent && now-this.lastFrame<FRAME_MS) return [];
+    const moved=this.zone!==zone;
+    if (!fullMask && !moved && !urgent && now-this.lastFrame<FRAME_MS) return [];
     this.lastFrame=now;
     this.zone=zone;
     this.inkMask=mask;
     const ink=[];
     if (fullMask) ink.push(...paintPackets(b.paint,fullMask,true,focus));
-    if (force || urgent || b.finished || now-this.lastInk>=INK_MS) {
+    if (force || urgent || moved || b.finished || now-this.lastInk>=INK_MS) {
       this.lastInk=now;
       const changes=mask & ~fullMask, nearby=changes & localMask, remote=changes & ~localMask;
       if (nearby) ink.push(...paintPackets(b.paint,nearby,false,focus));
@@ -223,8 +225,8 @@ export class RoomEngine {
     this.inputAt=now;
     this.paused=false;
     this.overview=b.mode==='watch' && command.overview;
-    const {seq,x,z,yaw,pitch,fire,swim,overview}=command;
-    this.intent={seq,x,z,yaw,pitch,fire,swim,overview};
+    const {seq,x,z,yaw,pitch,fire,swim,overview,eye}=command;
+    this.intent={seq,x,z,yaw,pitch,fire,swim,overview,eye};
     for (const key of taps) this.pending[key]=this.pending[key] || command[key];
     this.advance(now);
     return this.emit(now,equipped);

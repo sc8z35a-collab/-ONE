@@ -1465,15 +1465,19 @@ export class Battle {
       for (const side of [-1,1]) renderer.add('box',chip.x+Math.cos(chip.yaw)*side*.122,chip.y+.057,
         chip.z-Math.sin(chip.yaw)*side*.122,.063,.011,.153,0xa29670,4,opts);
     }
+    // The lightweight modes draw nothing beyond their fogged draw distance.
+    const reach=renderer.reach??Infinity, within=(x,z,limit)=>limit===Infinity || Math.hypot(x-viewX,z-viewZ)<limit;
     for (const actor of this.actors) {
-      if (actor!==hideCrew && actor.down<=0 && !actor.ride && sameLevel(actor.x,viewX)) drawCrew(renderer,actor,visualClock);
+      if (actor!==hideCrew && actor.down<=0 && !actor.ride && sameLevel(actor.x,viewX) && within(actor.x,actor.z,reach+6)) {
+        drawCrew(renderer,actor,visualClock);
+      }
     }
     this.abilities.draw(renderer,viewX);
     this.subweapons.draw(renderer,viewX);
     this.boss.draw(renderer,viewX);
     this.raiders.draw(renderer,viewX);
     for (const shot of this.shots) {
-      if (!sameLevel(shot.pos[0],viewX)) continue;
+      if (!sameLevel(shot.pos[0],viewX) || !within(shot.pos[0],shot.pos[2],reach)) continue;
       const y=unit(shot.vel), x=unit(cross(y,[0,1,0])), z=cross(x,y);
       const position=add(shot.pos,scale(y,-.11));
       const size=shot.weapon.size, ink=TEAM_INK[shot.actor.team] ?? RAIDER_INK;
@@ -1488,17 +1492,18 @@ export class Battle {
         renderer.add('orb',...trail,size*.48,size*1.22,size*.48,ink,9,{dynamic:true,basis:[x,y,z]});
       }
     }
-    for (let i=0;i<this.drops.length;i+=renderer.lite?2:1) {
+    for (let i=0;i<this.drops.length;i+=renderer.ultra?3:renderer.lite?2:1) {
       const d=this.drops[i];
-      if (!sameLevel(d.p[0],viewX)) continue;
+      if (!sameLevel(d.p[0],viewX) || !within(d.p[0],d.p[2],reach*.7)) continue;
       const size=d.size*(.46+.54*d.life/d.max);
       renderer.add('orb',...d.p,size,size*1.42,size,TEAM_INK[d.team] ?? 0xb573c7,9,{dynamic:true});
     }
     for (const hit of this.inkImpacts) {
       if (sameLevel(hit.p[0],viewX)) drawInkImpact(renderer,hit,[viewX,viewY,viewZ],this.clock+(this.impactAgeOffset??0));
     }
+    const markReach=Math.min(140,reach*.8);
     for (const decal of this.decals) {
-      if (!sameLevel(decal.p[0],viewX) || Math.hypot(decal.p[0]-viewX,decal.p[2]-viewZ)>140) continue;
+      if (!sameLevel(decal.p[0],viewX) || Math.hypot(decal.p[0]-viewX,decal.p[2]-viewZ)>markReach) continue;
       const tint=TEAM_INK[decal.team];
       const shape=decalShape(this.world.geometry,decal);
       if (shape.fan) {

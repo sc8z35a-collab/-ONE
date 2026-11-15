@@ -306,10 +306,10 @@ export class RemoteMatch {
     const loadout=now-this.lastLoadoutSentAt>=300?this.pendingLoadout:null;
     if (paused?this.pauseSent && !loadout:now-this.lastPauseSentAt<30) return;
     if (socket.bufferedAmount>65536) return;
-    const {x,z,yaw,pitch,fire,swim,front,overview}=paused?neutral:this.intent;
+    const {x,z,yaw,pitch,fire,swim,front,overview,eye}=paused?neutral:this.intent;
     const taps=paused?{}:this.pending;
     socket.send(JSON.stringify({type:'input',seq:++this.seq,x,z,yaw,pitch,fire,swim,front,overview,...taps,paused,
-      ...(loadout && {loadout})}));
+      ...(loadout && {loadout}),...(eye && {eye:eye.map(n=>Math.round(n*100)/100)})}));
     this.sentInputAt=now;
     if (!paused) {
       const sent=this.sentAt ??= new Map();

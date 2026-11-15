@@ -766,7 +766,8 @@ export class Renderer {
         ['uInvSize','uProj','uRadius','uIntensity','uStep','uTexel','uFirst','uThreshold','uWeight','uExposure',
           'uBloomStrength','uAOStrength','uTime','uInterior','uAOOn','uBloomOn','uFXAA']);
       const counts=gl.getInternalformatParameter(gl.RENDERBUFFER,gl.RGBA16F,gl.SAMPLES);
-      post.samples=counts && counts.length?Math.min(this.maxSamples??4,Math.max(...counts)):0;
+      post.deviceSamples=counts && counts.length?Math.max(...counts):0;
+      post.samples=Math.min(this.maxSamples??4,post.deviceSamples);
       return post;
     } catch (error) {
       console.warn('HDR post-processing disabled',error);
@@ -961,6 +962,17 @@ export class Renderer {
 
   exposure() {
     return mix(1,1.32,this.interior??0);
+  }
+
+  // Multisample count of the HDR target (the film renderer lowers it for 4K).
+  setSamples(count) {
+    this.maxSamples=count;
+    const post=this.post;
+    if (!post) return;
+    const samples=Math.min(count,post.deviceSamples??0);
+    if (samples===post.samples) return;
+    post.samples=samples;
+    post.w=post.h=0;
   }
 
   // Holds the display's refresh rate, up to 120 fps, by trading internal
@@ -1192,19 +1204,25 @@ export class Renderer {
       }
       this.inkSource=paint;
       this.lastInkMask=0;
-      paint.dirtyMask=(1<<paint.layers)-1;
+      if (paint.touchLayers) paint.touchLayers((1<<paint.layers)-1);
+      else paint.dirtyMask=(1<<paint.layers)-1;
     }
     const visibleMask=ZONES[this.viewZone].inkMask | (this.mergeStairs?ZONES[1-this.viewZone].inkMask:0);
     const changed=paint.dirtyMask & visibleMask;
     const visibilityChanged=this.lastInkMask!==visibleMask;
     if (changed && (visibilityChanged || clock-this.inkTime>(this.ultra?.085:this.lite?.055:.033) || clock<this.inkTime)) {
-      const length=paint.layerSize*4;
+      const length=paint.layerSize*4, stride=paint.w*4;
       for (let layer=0;layer<paint.layers;layer++) {
         if (!(changed & (1<<layer))) continue;
-        const data=paint.pixels.subarray(layer*length,(layer+1)*length);
-        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,0,layer,paint.w,paint.h,1,gl.RGBA,gl.UNSIGNED_BYTE,data);
+        // Only the rows that changed since the last upload are sent.
+        const first=paint.dirtyRows?paint.dirtyRows[layer*2]:0, last=paint.dirtyRows?paint.dirtyRows[layer*2+1]:paint.h-1;
+        if (last<first) continue;
+        const start=layer*length+first*stride, rows=last-first+1;
+        gl.texSubImage3D(gl.TEXTURE_2D_ARRAY,0,0,first,layer,paint.w,rows,1,gl.RGBA,gl.UNSIGNED_BYTE,
+          paint.pixels.subarray(start,start+rows*stride));
       }
       paint.dirtyMask&=~changed;
+      paint.clearRows?.(changed);
       this.inkTime=clock;
     }
     this.lastInkMask=visibleMask;

@@ -14,10 +14,10 @@ import {Renderer,multiply,perspective,view} from '../dist/render.js';
 import {STAIRS,STAIR_SEAM,stairEnd,stairPoint} from '../dist/stairs.js';
 import {trainArrival} from '../dist/tactics.js';
 import {World} from '../dist/world.js';
-import {drawCrew} from '../dist/battle.js';
+import {BOSS_RESPAWN_SECONDS,EXP_PER_KILL,INK_HIT_DURATION,RESPAWN_SECONDS,drawCrew} from '../dist/battle.js';
 import {collectShapes,Geometry,makeShape} from '../dist/collision.js';
 import {TouchControls} from '../dist/touch.js';
-import {WEAPONS} from '../dist/weapons.js';
+import {DRONE_WEAPON,EBOT,SUPERS,WEAPONS,weaponById} from '../dist/weapons.js';
 import {RAIDER_WEAPON} from '../dist/raiders.js';
 import {SUBWEAPONS} from '../dist/subweapons.js';
 import {TRAIN_DOORS} from '../dist/train-model.js';
@@ -402,7 +402,7 @@ test('ink swimming is faster than swimming over dry ground and produces no wake 
 
 test('main weapons fire four shots with their original cost of one shot',()=>{
   const b=new RoomEngine(options).battle, p=b.player;
-  const former={jet:4.9,fan:9,charge:14,lob:18,blast:12,dual:6.3,surge:8.7,coil:7.5,prism:9,roller:5.39};
+  const former={jet:4.9,fan:9,charge:14,lob:18,blast:12,dual:6.3,surge:8.7,coil:7.5,prism:9,roller:5.39,rd2:48,td:30};
   const target=[p.x+5,p.y+1,p.z];
   for (const weapon of WEAPONS) {
     Object.assign(p,{weapon,tank:former[weapon.id],fire:0});
@@ -412,7 +412,8 @@ test('main weapons fire four shots with their original cost of one shot',()=>{
       assert(Math.abs(p.tank-former[weapon.id]*(1-i/4))<1e-9,weapon.id);
       p.fire=0;
     }
-    assert.equal(b.shots.length,weapon.pellets*4);
+    // The TD shock cannon resolves its blast at once and leaves no round in flight.
+    assert.equal(b.shots.length,weapon.blast?0:weapon.pellets*4);
     p.fire=0;
     assert(!b.shoot(p,target),weapon.id);
   }
@@ -467,6 +468,23 @@ test('bomb fuses, moving paint, proximity trigger and enemy-only cover work thro
       b.clock=item.until+.01;
       b.subweapons.update(1/24);
       assert(enemy.hp<100 && b.subweapons.items.length===0);
+      continue;
+    }
+    if(spec.id==='see') {
+      // The sensor flies like a bomb, rests, tags whoever steps inside 3 m and never explodes.
+      for(let i=0;i<150;i++) {b.clock+=1/60;b.subweapons.update(1/60);}
+      assert(!item.v && Math.hypot(...item.p.map((n,i)=>n-start[i]))>1);
+      const enemy=b.actors[4], far=b.actors[5], painted=p.painted;
+      Object.assign(enemy,{x:item.p[0]+2.2,y:item.p[1]-.17,z:item.p[2],shield:0,down:0});
+      Object.assign(far,{x:item.p[0]+3.6,y:item.p[1]-.17,z:item.p[2],shield:0,down:0});
+      b.clock+=.2;
+      b.subweapons.update(1/60);
+      assert(Math.abs(enemy.revealUntil-b.clock-spec.mark)<.01 && enemy.revealTeam===p.team);
+      assert(!(far.revealUntil>b.clock) && enemy.hp===100);
+      b.clock=item.until+.01;
+      b.subweapons.update(1/60);
+      assert.equal(b.subweapons.items.length,0);
+      assert.equal(p.painted,painted);
       continue;
     }
     const before=p.painted;
@@ -655,7 +673,7 @@ test('jumping preserves primary fire, including an aerial roller flick and a rel
     }
     assert(p.airborne && p.y>0,weapon.id+' is in the air');
     if (weapon.charge) {input.fire=false;b.control(p,input,1/60,camera);}
-    assert(b.shots.length>=weapon.pellets,weapon.id+' fires during the jump');
+    assert(weapon.blast || b.shots.length>=weapon.pellets,weapon.id+' fires during the jump');
     assert(p.tank<p.tankMax,weapon.id+' pays for its airborne shot');
     if (weapon.roller) assert(!p.rolling && p.rollHold===0);
   }
@@ -729,7 +747,7 @@ test('a grazing projectile can hit without widening focus detection or steering 
   assert.equal(b.shots.length,0);
   assert.equal(b.inkImpacts.filter(impact=>impact.target===target).length,1);
   assert(b.inkImpacts.some(impact=>impact.normal));
-  b.clock+=.51;
+  b.clock+=INK_HIT_DURATION;
   b.updateShots(1/24);
   assert.equal(b.inkImpacts.length,0);
 });
@@ -1341,11 +1359,11 @@ test('a one-cell win shows distinct percentages in the result dialog',()=>{
   const battle={player:null}, paint={percent:team=>[20.0314,20.0304][team]};
   const document={createElement:()=>({})}, noOp=()=>{};
   let result;
-  const render=new Function('paint','battle','document','button','showTitle','showDialog','drawMap','inkResult',
+  const render=new Function('paint','battle','document','button','showTitle','showDialog','drawMap','inkResult','matchRecord',
     'let state,remote;'+source+'\nfinish();');
   render(paint,battle,document,noOp,noOp,(_kind,title,content)=>{
     result={title,scores:content.innerHTML.match(/[\d.]+%/g)};
-  },noOp,inkHud.inkResult);
+  },noOp,inkHud.inkResult,noOp);
   assert.equal(result.title,'シアンの勝利');
   assert(result.scores.length===2 && result.scores[0]!==result.scores[1]);
 });
@@ -1489,8 +1507,11 @@ test('cloud meters do not round up into false ammo or super readiness',()=>{
   const row=frame(engine.frames(0,true)).actors.find(a=>a[AVATAR_FIELDS.indexOf('isPlayer')]);
   const displayed=Object.fromEntries(AVATAR_FIELDS.map((name,index)=>[name,row[index]]));
   assert(inkReadout({...displayed,weapon:p.weapon}).empty);
-  assert.equal(displayed.superCharge,p.superCharge);
-  assert.equal(displayed.charge,p.charge);
+  // Meters are cut to a thousandth, always downward.
+  for (const key of ['tank','superCharge','charge']) {
+    assert(displayed[key]<=p[key] && p[key]-displayed[key]<.001,key);
+  }
+  assert(displayed.superCharge<100 && displayed.charge<1);
 });
 
 test('cloud subweapon availability knows whether the player is beaming or slamming',()=>{
@@ -1608,8 +1629,11 @@ test('browser adapter receives state and paint through the same framed socket pr
     const marks=[];
     const r={lite:true,add(...args){if (args[2]>12 && args[2]<14) marks.push(args);},beam(){},label(){}};
     scene.draw(r,-6,0,null,14);
-    assert(marks.some(args=>args[0]==='ripple' && args[9].label===0));
-    assert.equal(marks.filter(args=>args[0]==='tri' && args[8]===3).length,4);
+    // The streamed impact starts at the very beginning of its animation.
+    assert(marks.some(args=>args[0]==='ripple' && args[9].label<.02));
+    // A body hit is drawn large: eight spikes around a four-armed cross.
+    assert.equal(marks.filter(args=>args[0]==='tri' && args[8]===3).length,12);
+    assert(marks.filter(args=>args[0]==='ripple').length>=3);
     delete snapshot.inkImpacts;
     delete snapshot.inkPackets;
     snapshot.fullInk=0;
@@ -1623,13 +1647,14 @@ test('browser adapter receives state and paint through the same framed socket pr
     b.shots=[projectile];
     target.yaw=3.10;
     deliver();
-    remote.advance(remote.frameAt+97);
+    remote.advance(remote.frameDue);
     projectile.pos[0]+=4;
     target.yaw=-3.10;
     deliver();
     assert.equal(scene.shots[0].pos[0],-26);
-    remote.advance(remote.frameAt+48.5);
-    assert.equal(scene.shots[0].pos[0],-24);
+    // Halfway to the moment the snapshot is due, the round is halfway along.
+    remote.advance((remote.frameAt+remote.frameDue)/2);
+    assert(Math.abs(scene.shots[0].pos[0]+24)<1e-6);
     assert(Math.abs(Math.abs(scene.actors[4].yaw)-Math.PI)<.001);
     b.shots=[];
     deliver();
