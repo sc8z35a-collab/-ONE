@@ -1,4 +1,4 @@
-// The realistic surface textures. Eighteen sheets of nine: each sheet is one
+// The realistic surface textures. Nineteen sheets of nine: each sheet is one
 // 3×3 image (generated with gpt-image-2.5-sunburst, see the texture-sheets
 // skill, or supplied as a finished image), cut into nine texture layers when
 // the game loads. A texture's place in this list is its slot in the shaders;
@@ -17,7 +17,14 @@
 //          shingles), so the texture repeats as it is: no mirroring, which
 //          would turn every other storey or shingle row upside down.
 
-export const TEXTURE_VERSION=2;
+export const TEXTURE_VERSION=3;
+// Texels per texture layer, [large surfaces, small parts]. Large surfaces use
+// a third of the memory of a 512 layer; textures of small parts (repeats of
+// half a metre or less: gear, grips, fabric) about a sixth, in their own array.
+export const SURFACE_SIZES={high:[296,208],lite:[148,104]};
+export const SMALL_SURFACE_METERS=.5;
+// Shipped sheet images only need to cover the large layer size.
+export const SHEET_PIXELS=960;
 // Cells are cut a little inside their borders, in case the image has thin gaps.
 export const CELL_INSET=.035;
 
@@ -219,11 +226,26 @@ export const SURFACE_SHEETS=[
     {id:'facade_office_far',meters:10,take:.6,pattern:true,repeat:true,crop:[.014,.014,.805,.693],prompt:'front of a grey office building, a regular grid of windows with blinds and ceiling lights'},
     {id:'facade_apartment_far',meters:6,take:.6,pattern:true,repeat:true,crop:[.014,.006,.533,.5],prompt:'front of a Japanese apartment block, balconies with frosted glass rails over beige tile walls'},
     {id:'facade_retail_far',meters:10,take:.6,pattern:true,crop:[.225,0,.92,.74],prompt:'front of a narrow Japanese mixed-use building, office windows, blank sign panels and vertical signboards'}
+  ]},
+  // Drawn by .claude/skills/texture-sheets/scripts/draw-apartments.py: one
+  // dwelling unit wide and two storeys tall, tiled exactly over the single-box
+  // apartment blocks (the shader fits whole units to each face).
+  {id:'apartments',title:'Apartment block facades',cells:[
+    {id:'apt_balcony',meters:1,take:.75,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'apartment front, beige tiles, full-width balconies with frosted glass rails and air-conditioner units'},
+    {id:'apt_loggia',meters:1,take:.75,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'apartment front, white concrete with recessed loggias behind solid parapets and slim handrails'},
+    {id:'apt_ribbon',meters:1,take:.75,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'apartment front, grey tiles with continuous ribbon windows and sill bands'},
+    {id:'apt_fins',meters:1,take:.75,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'apartment front with tall windows between vertical concrete fins'},
+    {id:'apt_screen',meters:1,take:.75,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'apartment front, balconies behind perforated metal screen panels'},
+    {id:'apt_brick',meters:1,take:.8,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'low-rise brick apartment front, punched windows with stone sills and French balcony rails'},
+    {id:'apt_glass',meters:1,take:.8,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'glass apartment tower front, floor-to-ceiling windows behind tinted glass balcony rails'},
+    {id:'apt_corridor',meters:1,take:.75,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'back of an apartment block, open access corridors with steel doors, meter boxes and grilled windows'},
+    {id:'apt_endwall',meters:1,take:.7,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'gable end wall of an apartment block, painted concrete with small windows and a drain pipe'}
   ]}
 ];
 
 export const SURFACES=SURFACE_SHEETS.flatMap((sheet,s)=>sheet.cells.map((cell,c)=>({...cell,sheet:sheet.id,layer:s*9+c})));
 export const SURFACE_COUNT=SURFACES.length;
+export const smallSurface=surface=>surface.meters<=SMALL_SURFACE_METERS;
 export const surfaceSlot=id=>SURFACES.findIndex(surface=>surface.id===id);
 export const sheetFile=sheet=>'textures/'+sheet.id+'.webp?v='+TEXTURE_VERSION;
 

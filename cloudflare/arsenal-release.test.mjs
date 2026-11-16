@@ -185,10 +185,10 @@ test('a finishing ink hit is marked for the larger splat effect',()=>{
   assert.equal(b.inkImpacts.at(-1).kind,2);
 });
 
-test('162 textures in eighteen 3×3 sheets, every one of them used by the city shader',()=>{
-  assert.equal(SURFACE_SHEETS.length,18);
+test('171 textures in nineteen 3×3 sheets, every one of them used by the city shader',()=>{
+  assert.equal(SURFACE_SHEETS.length,19);
   assert(SURFACE_SHEETS.every(sheet=>sheet.cells.length===9));
-  assert.equal(new Set(SURFACES.map(surface=>surface.id)).size,162);
+  assert.equal(new Set(SURFACES.map(surface=>surface.id)).size,171);
   // Exact-period crops tile as they are, so they must be patterns with a crop.
   for (const surface of SURFACES) if (surface.repeat) assert(surface.pattern && surface.crop,surface.id+' repeat');
   for (const surface of SURFACES) if (surface.crop) {
@@ -206,4 +206,63 @@ test('162 textures in eighteen 3×3 sheets, every one of them used by the city s
     assert(prompt.includes('3×3') && /No borders.*text/.test(prompt));
     assert(sheet.cells.every(cell=>prompt.includes(cell.prompt)));
   }
+});
+
+test('SW OUT: two half-power rounds that follow a locked enemy at twice the ink; plain shots cost the base',()=>{
+  const {battle:b}=new RoomEngine({...options,weapon:'swout'}), p=b.player, enemy=b.actors.find(a=>a.team!==p.team);
+  const jet=weaponById('jet'), sw=weaponById('swout');
+  b.countdown=0;
+  alone(b,p,enemy);
+  assert.equal(sw.pellets,2);
+  assert.equal(sw.damage,jet.damage/2);
+  assert(sw.cost>jet.cost);
+  Object.assign(enemy,{x:p.x+12,y:p.y,z:p.z,shield:0,down:0});
+  const chest=[enemy.x,enemy.y+.9,enemy.z];
+  p.tank=100;p.fire=0;
+  assert(b.shoot(p,chest));
+  const guided=b.shots.filter(s=>s.actor===p);
+  assert.equal(guided.length,2);
+  assert(guided.every(s=>s.homing?.target===enemy));
+  assert(Math.abs(100-p.tank-sw.cost*2)<1e-9);
+  b.shots.length=0;
+  p.tank=100;p.fire=0;
+  assert(b.shoot(p,[p.x,p.y+5,p.z+20]));
+  assert(b.shots.filter(s=>s.actor===p).every(s=>!s.homing));
+  assert(Math.abs(100-p.tank-sw.cost)<1e-9);
+  // A locked shot keeps turning toward the target as it moves away.
+  b.shots.length=0;
+  p.tank=100;p.fire=0;
+  b.shoot(p,chest);
+  const shot=b.shots.find(s=>s.actor===p);
+  enemy.z+=2.4;
+  const before=Math.atan2(shot.vel[2],shot.vel[0]);
+  b.guideShot(shot,.1);
+  assert(Math.atan2(shot.vel[2],shot.vel[0])>before);
+});
+
+test('SW OUT II: player-only, lighter, faster and longer, guidance at no extra ink, CO mode trades fire rate for tracking',()=>{
+  const sw=weaponById('swout'), two=weaponById('swout2');
+  assert(two.playerOnly && !sw.playerOnly);
+  assert(Math.abs(two.cost-sw.cost*.6)<1e-9);
+  assert(Math.abs(two.speed-sw.speed*1.3)<1e-9);
+  assert(Math.abs(two.range-sw.range*1.5)<1e-9);
+  assert(Math.abs(two.autoAim.turn-sw.autoAim.turn*1.5)<1e-9 && Math.abs(two.autoAim.reach-sw.autoAim.reach*1.5)<1e-9);
+  assert.equal(two.autoAim.ink,1);
+  const {battle:b}=new RoomEngine({...options,weapon:'swout2'}), p=b.player, enemy=b.actors.find(a=>a.team!==p.team);
+  b.countdown=0;
+  alone(b,p,enemy);
+  assert(b.actors.filter(a=>!a.isPlayer).every(a=>!a.weapon.playerOnly));
+  Object.assign(enemy,{x:p.x+12,y:p.y,z:p.z,shield:0,down:0});
+  p.tank=100;p.fire=0;
+  b.shoot(p,[enemy.x,enemy.y+.9,enemy.z]);
+  assert(Math.abs(100-p.tank-two.cost)<1e-9);
+  const normalTurn=b.shots.find(s=>s.actor===p).homing.turn;
+  assert(Math.abs(p.fire-two.delay)<1e-9);
+  b.control(p,{...still,co:true},.016,camera());
+  assert.equal(p.coMode,true);
+  b.shots.length=0;
+  p.tank=100;p.fire=0;
+  b.shoot(p,[enemy.x,enemy.y+.9,enemy.z]);
+  assert(Math.abs(b.shots.find(s=>s.actor===p).homing.turn-normalTurn*2)<1e-9);
+  assert(Math.abs(p.fire-two.delay*2)<1e-9);
 });

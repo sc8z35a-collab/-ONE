@@ -1,6 +1,9 @@
 import {floorWeathering,wallWeathering} from './weathering.js';
 
-const CONCRETE=0xc8c3b3, PAVING=0xa9b0a7, FRAME=0x697d80, GLASS=0x7cacae;
+const PAVING=0xa9b0a7;
+// Lots in a row touch (the hair of a gap keeps parcel lines from overlapping;
+// the blocks bridge it).
+const ROW_GAP=.02;
 
 const PROFILES=[
   // Name, form, width, depth, floors, facade, roof, cladding.
@@ -39,19 +42,6 @@ const PROFILES=[
 export const RESIDENTIAL_TYPES=PROFILES.map(([name,form,width,depth,floors,facade,roof,tint])=>
   ({name,form,width,depth,floors,facade,roof,tint,height:floors*2.92+1.1}));
 
-const volumes={
-  slab:[[0,0,1,1,0,1]],
-  terrace:[[0,0,1,1,0,.46],[-.09,-.09,.78,.75,.46,.73],[-.16,-.17,.55,.57,.73,1]],
-  court:[[-.36,0,.28,1,0,1],[.36,0,.28,1,0,.87],[0,-.34,.44,.32,0,.92],[0,.36,.44,.28,0,.43]],
-  corner:[[-.13,-.04,.74,.92,0,1],[.37,-.21,.26,.57,0,.74],[.16,.36,.40,.28,0,.64]],
-  bridge:[[-.31,-.04,.37,.88,0,1],[.31,.04,.37,.92,0,.92],[0,0,.32,.53,.57,.68]],
-  split:[[-.25,-.02,.50,.96,0,.76],[.25,-.07,.50,.86,0,1]],
-  pin:[[0,0,1,1,0,.18],[0,-.05,.76,.74,.18,1]],
-  ell:[[-.28,0,.44,1,0,1],[.22,-.27,.56,.46,0,.76]],
-  twin:[[-.28,0,.43,.88,0,1],[.29,-.07,.41,.86,0,.87],[0,.05,1,.9,0,.15]],
-  cross:[[0,0,.55,1,0,1],[0,0,1,.47,0,.69]],
-  offset:[[-.11,-.07,.78,.80,0,.32],[.08,.08,.82,.81,.32,.67],[-.13,-.13,.71,.72,.67,1]]
-};
 
 export function residentialLot(width,depth,height) {
   const scale=Math.sqrt(width*depth);
@@ -79,7 +69,7 @@ export function residentialSites(reserved=[]) {
   ];
   for (const [i,street] of streets.entries()) {
     const group=RESIDENTIAL_TYPES.slice(i*6,i*6+6).map(type=>({type,lot:residentialLot(type.width,type.depth,type.height)}));
-    const gap=2.4, width=group.reduce((sum,a)=>sum+a.lot.width,0)+(group.length-1)*gap;
+    const gap=ROW_GAP, width=group.reduce((sum,a)=>sum+a.lot.width,0)+(group.length-1)*gap;
     const quarter=i===4;
     const first=quarter?-width/2:Math.min(-10-width/2,76-width);
     const side=street.yaw===0?-1:1;
@@ -122,102 +112,48 @@ function parcelArtist(r,site) {
     r.add(type,x+dx*cy+dz*sy,y,z-dx*sy+dz*cy,w,h,d,tint,kind,{...opts,yaw:yaw+(opts.yaw??0)});
 }
 
-function roofDetails(part,x,y,z,w,d,roof) {
-  part('bevel',x,y+.09,z,w+.14,.19,d+.14,CONCRETE,2);
-  for (const sign of [-1,1]) {
-    part('box',x,y+.25,z+sign*(d*.5-.07),w,.31,.14,CONCRETE,2);
-    part('box',x+sign*(w*.5-.07),y+.25,z,.14,.31,d,CONCRETE,2);
-  }
-  if (roof==='gable') {
-    const pitch=Math.atan2(1.15,d*.5);
-    for (const sign of [-1,1]) part('box',x,y+.95,z+sign*d*.25,w+.15,.19,Math.hypot(d*.5,1.15),
-      0x7a514e,4,{pitch:sign*pitch});
-    return;
-  }
-  if (roof==='garden') {
-    part('box',x,y+.29,z,w*.70,.18,d*.66,0x677d58,2);
-    for (const dx of [-.24,0,.24]) for (const dz of [-.22,.22]) {
-      part('bevel',x+dx*w,y+.46,z+dz*d,w*.18,.30,d*.18,0x847b63);
-      part('orb',x+dx*w,y+.77,z+dz*d,w*.14,.52,d*.16,0x779758,14);
-    }
-    return;
-  }
-  if (roof==='solar') {
-    for (const dx of [-.23,0,.23]) part('box',x+dx*w,y+.54,z,w*.18,.12,d*.44,0x3c5c72,4,{pitch:-.24});
-    return;
-  }
-  part('bevel',x+w*.13,y+.81,z-d*.13,w*.28,1.60,d*.31,0x99a29c,2);
-  part('bevel',x-w*.23,y+.43,z+d*.17,w*.16,.69,d*.26,FRAME,4);
-  part('cylinder',x+w*.19,y+2.18,z-d*.13,.09,1.90,.09,FRAME,4);
+// Facade styles of the drawn apartment texture sheet (surfaces.js
+// 'apartments'): the front of every block shows one of these; backs show
+// open corridors and the ends plain gable walls.
+export const APARTMENT_STYLES=['balcony','loggia','ribbon','vertical','screen','brick','glass'];
+// Street-facing setback of the blocks; the lots themselves touch.
+const SETBACK=1.6;
+
+function facadeStyle(type) {
+  const r=type.tint>>16&255, g=type.tint>>8&255;
+  if (r>g+24) return APARTMENT_STYLES.indexOf('brick');
+  if (type.form==='pin' || type.floors>=18) return APARTMENT_STYLES.indexOf('glass');
+  return Math.max(0,APARTMENT_STYLES.indexOf(type.facade));
 }
 
-function drawResidence(r,site,wear) {
-  const {type,lot}=site, {width:w,depth:d,height:h,facade,tint}=type, p=parcelArtist(r,site);
-  p('box',0,-.08,0,lot.width,.19,lot.depth,PAVING,1);
-  p('box',0,-lot.foundationDepthBelowGrade/2,0,lot.foundationWidth,lot.foundationDepthBelowGrade,lot.foundationDepth,0x858985,2);
-  p('bevel',0,lot.podium/2,0,lot.foundationWidth,lot.podium,lot.foundationDepth,CONCRETE,2);
-  p('box',0,.032,d*.5+1.42,lot.width-.55,.061,1.72,0xc8c2ae,1);
-  const sy=Math.sin(site.yaw), cy=Math.cos(site.yaw);
-  const front=d*.5+1.42;
+// One block = one box. Its balconies, windows, corridors and gable walls are
+// all in the facade texture, so a whole block costs twelve triangles. Blocks
+// span their full lot width, so neighbours in a row stand wall to wall, and
+// every block is solid: nobody walks into or between them.
+function drawResidence(world,site,wear) {
+  const r=world.r, {type,lot}=site, p=parcelArtist(r,site);
+  const cy=Math.cos(site.yaw), sy=Math.sin(site.yaw);
+  const width=lot.width+ROW_GAP, depth=type.depth, height=type.height;
+  const dz=lot.depth*.5-SETBACK-depth*.5;
+  p('box',0,-.08,0,width,.19,lot.depth,PAVING,1);
+  p('box',0,height*.5,dz,width,height,depth,type.tint,10,{label:facadeStyle(type)});
+  // The same block as a collision box, axis-aligned (blocks face the four axes).
+  const cx=site.x+dz*sy, cz=site.z+dz*cy;
+  const spanX=Math.abs(cy)*width+Math.abs(sy)*depth, spanZ=Math.abs(sy)*width+Math.abs(cy)*depth;
+  world.obstacle(cx,height*.5,cz,spanX,height,spanZ,false);
+  const front=dz+depth*.5;
   if (wear===22 || wear===29 || wear===30) {
-    floorWeathering(r,wear,site.x+front*sy,.063,site.z+front*cy,Math.abs(sy)>.5?1.61:lot.width-.72,
-      Math.abs(sy)>.5?lot.width-.72:1.61,0xc8c2ae);
+    const walk=front+SETBACK*.5;
+    floorWeathering(r,wear,site.x+walk*sy,.063,site.z+walk*cy,Math.abs(sy)>.5?SETBACK-.2:width-.72,
+      Math.abs(sy)>.5?width-.72:SETBACK-.2,PAVING);
   } else {
-    const plinth=lot.foundationDepth*.5;
-    wallWeathering(r,wear,site.x+plinth*sy,.04,site.z+plinth*cy,site.yaw,
-      lot.foundationWidth-.50,lot.podium-.081,CONCRETE,Math.round(site.x));
-  }
-  for (const sign of [-1,1]) {
-    const dx=sign*(lot.width*.5-1.07), dz=d*.18;
-    p('box',dx,.14,dz,1.31,.27,d*.68,0x779164,14);
-    p('cylinder',dx,.78,dz,.18,1.4,.18,0x796c54,2);
-    p('orb',dx,1.85,dz,1.52,1.65,1.48,0x72935a,14);
-  }
-  for (const [i,[dx,dz,width,depth,low,high]] of volumes[type.form].entries()) {
-    const x=dx*w,z=dz*d,bw=width*w,bd=depth*d;
-    const base=lot.podium+low*h, top=lot.podium+high*h, span=top-base;
-    const body=type.form==='corner' || type.form==='offset'?'bevel':'box';
-    p(body,x,base+span*.5,z,bw,span,bd,tint,11);
-    const windowWidth=bw*.78, front=z+bd*.5;
-    p('box',x,base+span*.5,front+.035,windowWidth,span-.29,.082,GLASS,6);
-    p('box',x,base+span*.5,z-bd*.5-.031,windowWidth,span-.29,.076,GLASS,6);
-    for (const side of [-1,1]) {
-      p('box',x+side*(bw*.50+.024),base+span*.5,z,bd*.70,span-.32,.071,GLASS,6,{yaw:Math.PI/2});
-    }
-    if (facade==='vertical' || facade==='screen') {
-      const bars=facade==='vertical'?5:8;
-      for (let n=1;n<=bars;n++) {
-        const px=x+bw*(n/(bars+1)-.5);
-        p('box',px,base+span*.50,front+.115,facade==='vertical'?.14:.078,span-.05,.29,facade==='screen'?tint:CONCRETE,2);
-      }
-    }
-    const stories=Math.floor(span/2.92);
-    for (let j=1;j<=stories;j++) {
-      const floor=base+j*span/(stories+1);
-      const rail=facade==='balcony'||facade==='loggia';
-      if (!rail && j%2 && facade!=='ribbon') continue;
-      const deck=facade==='balcony'?1.02:facade==='loggia'?.58:.25;
-      const across=bw*(facade==='loggia'?.63:.92);
-      p('box',x,floor,front+deck*.41,across,.15,deck,CONCRETE,2);
-      if (rail) {
-        p('box',x,floor+.43,front+deck*.86,across,.60,.079,0x7d9b9c,8);
-        p('box',x,floor+.75,front+deck*.87,across,.063,.096,FRAME,4);
-        for (const side of [-1,1]) p('box',x+side*(across*.5-.05),floor+.39,front+deck*.87,.074,.69,.082,FRAME,4);
-      }
-    }
-    if (low===0) {
-      p('box',x,base+1.31,front+.052,Math.min(bw*.55,4.1),2.56,.17,0x627c80,8);
-      p('box',x,base+2.68,front+.57,Math.min(bw*.69,5.2),.19,1.45,CONCRETE,2);
-    }
-    const buried=volumes[type.form].some(([ox,oz,ow,od,under])=>under===high &&
-      Math.abs(dx-ox)<(width+ow)/2 && Math.abs(dz-oz)<(depth+od)/2);
-    if (!buried) roofDetails(p,x,top,z,bw,bd,i===0?type.roof:'service');
+    wallWeathering(r,wear,site.x+(front+.02)*sy,.04,site.z+(front+.02)*cy,site.yaw,width-.8,.9,type.tint,Math.round(site.x));
   }
 }
 
 export function buildResidentialDistrict(world) {
   for (const [index,site] of residentialSites(world.towerSites).entries()) {
     world.towerSites.push(site);
-    drawResidence(world.r,site,index+1);
+    drawResidence(world,site,index+1);
   }
 }

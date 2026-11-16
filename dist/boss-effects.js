@@ -4,7 +4,8 @@ import {drawTentacle} from './creature-models.js';
 export const BOSS_ATTACK_TIMING={
   mortar:{active:0,linger:.94},
   sweep:{active:.38,linger:.66},
-  slam:{active:.48,linger:.76}
+  slam:{active:.48,linger:.76},
+  lash:{active:0,linger:.7}
 };
 
 const palette=[
@@ -104,14 +105,14 @@ function impact(r,a,kind,age,spec,color) {
   r.add('hazard',x,y+.023,z,radius*2,1,radius*2,color.fluid,24,
     {dynamic:true,yaw:-(a.yaw??0),label:travel,layer:sector,effect:1+fade});
   if (kind==='sweep' && travel<1) sweepingArm(r,a,travel,color);
-  if (kind==='slam' || kind==='mortar') {
+  if (kind==='slam' || kind==='mortar' || kind==='lash') {
     const wave=kind==='slam'?.10+travel*.9:.22+.84*clamp(age/.34,0,1);
     r.add('ripple',x,y+.074,z,radius*2*wave,.04,radius*2*wave,color.core,12,{dynamic:true,label:fade*.87});
     if (!r.lite) r.add('ripple',x,y+.16*(1-fade)+.046,z,radius*2*wave*.86,.03,radius*2*wave*.86,
       color.edge,12,{dynamic:true,label:Math.min(1,.13+fade)});
     const jet=Math.max(0,1-age/.35);
     if (jet>0) {
-      const height=(kind==='slam'?2.34:3.26)*jet;
+      const height=(kind==='slam'?2.34:kind==='lash'?1.6:3.26)*jet;
       r.add('taper',x,y+height*.43,z,radius*.33*jet+.13,height,radius*.31*jet+.12,color.fluid,25,
         {dynamic:true,label:jet});
       r.add('orb',x,y+height*.67,z,.33+.51*jet,.41+height*.36,.32+.51*jet,color.core,3,{dynamic:true});

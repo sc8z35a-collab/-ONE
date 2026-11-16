@@ -127,10 +127,11 @@ test('a shot reaches ground outside the old boundary, leaves unscored ink, and r
   const generator=b.rng;
   b.rng=()=>.5;
   b.paint.reset();
-  assert(b.shoot(p,[-113,-.065,12]));
+  // Open street past the old edge (the apartment blocks start at x≈-104).
+  assert(b.shoot(p,[-100,-.065,12]));
   for (let i=0;i<460 && b.shots.length;i++) {b.clock+=1/60;b.updateShots(1/60);}
   const mark=b.decals.at(-1);
-  assert(mark && Math.abs(mark.p[0]+113)<.15 && mark.normal[1]>.98);
+  assert(mark && Math.abs(mark.p[0]+100)<.15 && mark.normal[1]>.98);
   assert.equal(b.paint.count[0],0);
   b.rng=generator;
   const restored=new RoomEngine(options,checkpoint(e)).battle;

@@ -1,4 +1,4 @@
-import {RAIL} from './layout.js';
+import {RAIL,railPath} from './layout.js';
 import {cross,dot,sub,unit} from './render.js';
 import {TEAM_INK} from './world.js';
 import {doorWindowId,drawTrainWindow,seatWindowId} from './train-glass.js';
@@ -28,9 +28,14 @@ const WINDOW=0x466663, RUBBER=0x414d4b, FRAME=0x596762, STEEL=0x84918d;
 const ROOF=0xa9b4ad, GOLD=0xc6a773;
 
 export function trainPose(t,line=RAIL) {
-  const cy=Math.cos(t.yaw),sy=Math.sin(t.yaw),cr=Math.cos(t.roll),sr=Math.sin(t.roll);
+  // On the looped line the train follows the curve: t.x is the distance
+  // along the track, and the heading turns the whole car.
+  const path=line.loop?railPath(t.x):null, heading=path?.yaw??0, yaw=t.yaw+heading;
+  const cy=Math.cos(yaw),sy=Math.sin(yaw),cr=Math.cos(t.roll),sr=Math.sin(t.roll);
   const cp=Math.cos(t.routePitch??0),sp=Math.sin(t.routePitch??0);
-  const baseZ=line.z+t.lateral, baseY=line.y+t.lift, baseX=line.center+t.x;
+  const baseY=line.y+t.lift;
+  const baseX=path?line.center+path.x+Math.sin(heading)*t.lateral:line.center+t.x;
+  const baseZ=path?path.z+Math.cos(heading)*t.lateral:line.z+t.lateral;
   function rotate(x,y,z) {
     const side=y*sr+z*cr;
     const height=y*cr-z*sr, along=x*cp-height*sp;

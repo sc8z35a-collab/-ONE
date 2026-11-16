@@ -19,6 +19,7 @@ import {BOSS_RESPAWN_SECONDS,EXP_PER_KILL,RESPAWN_SECONDS} from './battle.js';
 import {TRAIN_DOORS} from './train-model.js';
 import {BOSS_BODY_HEIGHT} from './boss-model.js';
 import {StageObjects} from './stage-objects.js';
+import {SURFACE_SIZES} from './surfaces.js';
 
 const $ = id => document.getElementById(id);
 const setText=(id,text)=>{
@@ -35,6 +36,13 @@ $('android-cloud').hidden=!embeddedApp;
 const mapTabs=[...document.querySelectorAll('[data-map-level]')];
 const keys=new Set();
 const PREF_KEY='inkshift-controls-v2';
+// Draw-distance steps of the settings slider, nearest first; the last draws
+// the whole city.
+const DRAW_DISTANCES=[60,80,110,150,210,300,420,Infinity];
+const drawDistanceName=index=>Number.isFinite(DRAW_DISTANCES[index])?DRAW_DISTANCES[index]+'m':'最大';
+// Shortest frame gap each frame-rate cap allows (a little under the period,
+// so a display running exactly at the cap is never skipped).
+const frameGap=fps=>fps>=120?0:1000/fps-1.5;
 const portrait=window.matchMedia('(orientation: portrait)');
 let renderer, world, demoStage, paint, localPaint, battle=null, camera=null, yaw=Math.PI/2, pitch=REST_PITCH;
 let state='title', dialogKind=null, activeClock=0, prevTime=0, hudTime=0, mapTime=0, watchYaw=0;
@@ -42,7 +50,7 @@ let usingTouch=matchMedia('(pointer: coarse)').matches;
 let mute=true, audio, noise, jumpQueued=false, shotQueued=false, desktopFire=false, rotationGate=false, hadPointerLock=false;
 let viewActor=null, viewZone=-1, viewHeight=0, viewX=0, viewZ=0, watchPitch=0, cameraReach=1, watchAerial=true;
 let focus=null, fpsTime=0, film=null;
-let superQueued=false, droneQueued=false, useQueued=false, subQueued=false, demoTrain;
+let superQueued=false, droneQueued=false, useQueued=false, subQueued=false, coQueued=false, demoTrain;
 let remote=null, connecting=null, accessCode='', cloudCheck=null, cloud=null;
 let sceneData, graphicsLost=false, graphicsTimeout=0;
 let renderedWidth=0, renderedHeight=0;
@@ -68,9 +76,14 @@ function readPrefs() {
     sub:subweaponById(saved.sub).id,
     teamSize:saved.teamSize===4?4:8,
     sensitivity:Number.isFinite(saved.sensitivity)?clamp(saved.sensitivity,.55,1.75):1,
-    quality:['ultra','lite','high'].includes(saved.quality)?saved.quality:'auto'
+    quality:['ultra','lite','high'].includes(saved.quality)?saved.quality:'auto',
+    resolution:['fhd','2k'].includes(saved.resolution)?saved.resolution:'auto',
+    fps:[30,60].includes(saved.fps)?saved.fps:120,
+    reflections:saved.reflections!==false,
+    drawDistance:Number.isInteger(saved.drawDistance)?clamp(saved.drawDistance,0,DRAW_DISTANCES.length-1):DRAW_DISTANCES.length-1
   };
 }
+
 
 const QUALITY_NAMES={high:'高画質',lite:'軽量 400p',ultra:'超軽量 300p'};
 
@@ -87,6 +100,10 @@ const lightQuality=()=>qualityLevel()!=='high';
 function applyQuality() {
   const level=qualityLevel();
   renderer?.setQuality(level);
+  if (renderer?.options) Object.assign(renderer.options,{resolution:prefs.resolution,reflections:prefs.reflections,
+    drawDistance:DRAW_DISTANCES[prefs.drawDistance],fps:prefs.fps});
+  // The frame loop skips display frames that come sooner than the FPS cap.
+  if (renderer) renderer.minFrameGap=frameGap(prefs.fps);
   $('quality').querySelector('b').textContent=QUALITY_NAMES[level];
   $('quality').setAttribute('aria-pressed',String(level!=='high'));
 }
@@ -253,9 +270,9 @@ function aimMove(dx,dy,isTouch=false) {
 function getInput() {
   const x=touch.x+(keys.has('KeyD')||keys.has('ArrowRight')?1:0)-(keys.has('KeyA')||keys.has('ArrowLeft')?1:0);
   const z=touch.z+(keys.has('KeyW')||keys.has('ArrowUp')?1:0)-(keys.has('KeyS')||keys.has('ArrowDown')?1:0);
-  const jump=jumpQueued, press=shotQueued, superMove=superQueued, drone=droneQueued, use=useQueued, subMove=subQueued;
-  jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=false;
-  return {x,z,yaw,pitch,press,super:superMove,drone,use,sub:subMove,fire:touch.fire||desktopFire||keys.has('KeyF'),
+  const jump=jumpQueued, press=shotQueued, superMove=superQueued, drone=droneQueued, use=useQueued, subMove=subQueued, co=coQueued;
+  jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=coQueued=false;
+  return {x,z,yaw,pitch,press,super:superMove,drone,use,sub:subMove,co,fire:touch.fire||desktopFire||keys.has('KeyF'),
     swim:touch.swim||keys.has('ShiftLeft')||keys.has('ShiftRight'),jump,overview:watchAerial,eye:battle?.player?camera?.eye:null};
 }
 
@@ -333,11 +350,48 @@ function settings() {
   quality.value=prefs.quality;
   quality.addEventListener('change',()=>{prefs.quality=quality.value;savePrefs();});
   graphics.append(labelGraphics,quality);
+  const choice=(name,key,options,parse=value=>value)=>{
+    const row=document.createElement('label');
+    row.className='graphics-setting';
+    const label=document.createElement('span');
+    label.textContent=name;
+    const select=document.createElement('select');
+    for (const [value,text] of options) {
+      const option=document.createElement('option');
+      option.value=String(value);
+      option.textContent=text;
+      select.append(option);
+    }
+    select.value=String(prefs[key]);
+    select.addEventListener('change',()=>{prefs[key]=parse(select.value);savePrefs();});
+    row.append(label,select);
+    return row;
+  };
+  const resolution=choice('解像度','resolution',[['auto','自動（画面と負荷に合わせる）'],['fhd','FHD（1920×1080）'],['2k','2K（2560×1440）']]);
+  const fps=choice('フレームレート','fps',[[30,'30 fps'],[60,'60 fps'],[120,'120 fps']],Number);
+  const mirror=choice('路面の反射','reflections',[[true,'反射あり'],[false,'反射なし']],value=>value==='true');
+  const far=document.createElement('label');
+  const farLabel=document.createElement('span');
+  farLabel.textContent='描画距離';
+  const farRange=document.createElement('input');
+  farRange.type='range';
+  farRange.min='0';
+  farRange.max=String(DRAW_DISTANCES.length-1);
+  farRange.step='1';
+  farRange.value=String(prefs.drawDistance);
+  const farValue=document.createElement('output');
+  farValue.textContent=drawDistanceName(prefs.drawDistance);
+  farRange.addEventListener('input',()=>{
+    prefs.drawDistance=Number(farRange.value);
+    farValue.textContent=drawDistanceName(prefs.drawDistance);
+    savePrefs();
+  });
+  far.append(farLabel,farRange,farValue);
   const rate=document.createElement('p');
   rate.className='result-note';
   const hz=Math.round(1000/(renderer?.refreshInterval || 16.7));
-  rate.textContent='フレームレートはどの画質でも最大120fps（この画面は約'+hz+'Hz）。高画質は必要に応じて内部解像度を下げて維持します。';
-  block.append(row,graphics,rate);
+  rate.textContent='この画面は約'+hz+'Hz。解像度の固定は高画質のときに使われ、自動では負荷に応じて内部解像度を下げて維持します。描画距離を縮めると、遠くの街並みは霞に溶けて描かれなくなります。';
+  block.append(row,graphics,resolution,fps,mirror,far,rate);
   return block;
 }
 
@@ -350,17 +404,18 @@ function guide() {
     <dt>武器選択</dt><dd>タイトルの「武器を選ぶ」か、対戦中の「武器変更」でメインとサブを選べます。装備を変えてもインク残量と待ち時間は引き継ぎます。</dd>
     <dt>ローラー・サブ</dt><dd>ローラーは短押しで振り、長押ししながら前進すると転がして塗れます。ジャンプ中に押すと空中でインクを振り飛ばします。メインとは別にサブを1つ選択。画面左上のサブボタンかGで使います。敵の時限ボムの輪からは離れましょう。</dd>
     <dt>外周街区・高架道路</dt><dd>街区は中心から半径500mです。中央通りから外周道路へ歩いて探索できます。高架道路の上り口は南側の ROUTE 07 標識が目印です。</dd>
-    <dt>4駅直通列車</dt><dd>地上西駅→地上東駅→地下東駅→地下西駅の順に巡回します。停車中に乗車ボタンかR、または開いた扉へ歩いて乗れます。車内では移動・射撃・塗りができ、停車駅で降車ボタンか扉へ歩いて降ります。乗降しても視点の向きは維持されます。広いB1へは街の4か所の階段からも歩いて降りられます。</dd>
+    <dt>列車</dt><dd>高架線は街をぐるりと一周する環状線で、地上西駅→地上東駅→東のカーブ→南側の高架→西のカーブ→地上西駅の順に一方向へ走ります。B1の地下鉄は地下西駅と地下東駅を往復します。停車中に乗車ボタンかR、または開いた扉へ歩いて乗れます。車内では移動・射撃・塗りができ、停車駅で降車ボタンか扉へ歩いて降ります。乗降しても視点の向きは維持されます。広いB1へは街の4か所の階段からも歩いて降りられます。</dd>
     <dt>スーパー・ドローン</dt><dd>塗りと攻撃でスーパーがたまると、画面左上のボタンで発動できます。武器ごとに技が異なります。ドローンは1人1機で、塗りを広げながら、見えている敵へ1秒に1発の追従インク弾を撃ちます。召喚から60秒で再使用できます。</dd>
     <dt>新しい武器とスーパー</dt><dd>RD II QUATRO＋は5発の重弾。威力は絶大ですが、塗りは狭く、移動が遅くなり、インク消費も激しい武器です。TDは前方の扇形を一気に塗って敵を吹き飛ばす衝撃砲。OM Bombは弾が敵を追従する強化、OM BOMB IIはその2連発版（1発の攻撃は半分、塗りは2倍）、ebotは体力60・塗りと攻撃が半分の分身を2体呼びます。</dd>
+    <dt>SW OUT / SW OUT II</dt><dd>1回で2発撃つ拳銃。照準が敵をロックしているときに撃つと、弾が敵をある程度追いかけます。SW OUTは追従が働く射撃だけインクを2倍使い、攻撃力は通常の半分。プレイヤー専用のSW OUT IIは追従中も消費が増えず、基本消費4割減・弾速1.3倍・追従力と範囲と射程1.5倍。COモード（CキーかCOボタン）では発射間隔が2倍になる代わりに追従力がさらに2倍になります。</dd>
     <dt>See Elite</dt><dd>投げた場所の半径3mに敵が入ると、その敵を20秒間マーキングします。壁越しに名前が見え、ミニマップにも表示されます。</dd>
     <dt>復活とEXP</dt><dd>倒されると復活まで12秒、オオモノイカに倒された場合は15秒かかります。敵を1人倒すごとに30 EXP。試合終了後に全員分が集計され、リザルトで全クルーの記録とEXPを確認できます。EXPはこの端末に貯まります。</dd>
-    <dt>画質とフレームレート</dt><dd>軽量は400p・影と反射なし・短い描画距離、超軽量は300pでさらに軽い描画です。どの画質でも画面のリフレッシュレートに合わせて最大120fpsで動きます。</dd>
+    <dt>画質とフレームレート</dt><dd>軽量は400p・影と反射なし・短い描画距離、超軽量は300pでさらに軽い描画です。下の設定で、解像度（自動・FHD・2K）、フレームレートの上限（30・60・120fps）、路面の反射の有無、描画距離（60m〜最大）を選べます。</dd>
     <dt>スーパーギガチップ</dt><dd>ステージに落ちたチップを拾うと、その試合中は持てるインクが2倍になります。</dd>
     <dt>街の遮蔽物</dt><dd>木箱、レンガ、コンクリートブロックや、マンションと店舗のガラスはインク弾で壊せます。舗装路の先にある3棟は、1試合につき各キャラ1棟1回入れて室内を塗れます。</dd>
     <dt>タイムレスバトル</dt><dd>時間無制限の4対4。最初の襲撃は80秒後で、以降118秒ごとにオクトパスゼイアン4体が現れます。</dd>
     <dt>7分のナワバリ戦</dt><dd>床の塗り面積で勝敗が決まり、開始3分でオオモノイカが乱入します。</dd>
-    <dt>PC</dt><dd>WASD、マウス、左クリックまたはFで射撃、Shiftで潜る、Spaceでジャンプ、Gでサブ、Qでスーパー、Eでドローン。</dd>
+    <dt>PC</dt><dd>WASD、マウス、左クリックまたはFで射撃、Shiftで潜る、Spaceでジャンプ、Gでサブ、Qでスーパー、Eでドローン、CでSW OUT IIのCOモード。</dd>
   </dl>`;
   content.append(settings());
   showDialog('guide','操作ガイド',content,[button('閉じる','primary',()=>{
@@ -1065,6 +1120,12 @@ function updateAbilities(p) {
     p.swimming?'潜水解除で使用':p.airborne && !['throw','see'].includes(sub.id)?'着地して使う':'準備OK');
   subButton.disabled=!battle.subweapons.canUse(p);
   subButton.classList.toggle('ready',!subButton.disabled);
+  const coButton=$('co-action'), hasCo=!!p.weapon?.coMode;
+  if (coButton.hidden===!!hasCo) coButton.hidden=!hasCo;
+  if (hasCo) {
+    setText('co-state',p.coMode?'ON':'OFF');
+    coButton.classList.toggle('ready',!!p.coMode);
+  }
   const cabin=isCabin(p.x);
   const stairs=stairLane(p.x,p.z,1.3);
   $('stairs-note').hidden=!stairs || p.down>0;
@@ -1454,7 +1515,7 @@ function frame(now) {
     requestAnimationFrame(frame);
     return;
   }
-  const quiet=state==='title'?84:dialogKind || rotationGate?110:0;
+  const quiet=state==='title'?84:dialogKind || rotationGate?110:renderer.minFrameGap??0;
   if (document.hidden || (prevTime && now-prevTime<quiet)) {
     if (document.hidden) prevTime=now;
     requestAnimationFrame(frame);
@@ -1486,7 +1547,7 @@ function frame(now) {
         input.yaw=player.yaw=yaw;
         input.pitch=player.pitch=pitch;
       }
-      input.jump=input.press=input.super=input.drone=input.use=input.sub=false;
+      input.jump=input.press=input.super=input.drone=input.use=input.sub=input.co=false;
     }
   }
   camera=cameraFor(dt);
@@ -1571,6 +1632,7 @@ for (const [id,action] of [
   ['super-action',()=>{superQueued=true;}],
   ['drone-action',()=>{droneQueued=true;}],
   ['sub-action',()=>{subQueued=true;}],
+  ['co-action',()=>{coQueued=true;}],
   ['transit-action',()=>{useQueued=true;}]
 ]) {
   $(id).addEventListener('click',()=>{
@@ -1647,6 +1709,7 @@ document.addEventListener('keydown',event=>{
     if (event.code==='KeyQ') superQueued=true;
     if (event.code==='KeyE') droneQueued=true;
     if (event.code==='KeyG') subQueued=true;
+    if (event.code==='KeyC') coQueued=true;
     if (event.code==='KeyR') useQueued=true;
     if (event.code==='KeyB') loadout(true);
   }
@@ -1709,7 +1772,8 @@ arena.addEventListener('webglcontextrestored',()=>{
 // The real surface textures load after the title is up; phones and the
 // lightweight modes keep smaller layers.
 function loadTextures() {
-  renderer.loadSurfaces?.({size:usingTouch || lightQuality()?256:512}).catch(error=>console.warn('Surface textures unavailable',error));
+  const [size,small]=SURFACE_SIZES[usingTouch || lightQuality()?'lite':'high'];
+  renderer.loadSurfaces?.({size,small}).catch(error=>console.warn('Surface textures unavailable',error));
 }
 
 async function readProgress(response) {

@@ -44,10 +44,25 @@ export const WEAPONS = [
   {id:'rd2',name:'RD II QUATRO＋',role:'5連重弾・高火力',detail:'5発の重弾を束ねて撃つ。威力は絶大だが塗りは狭く、重さで移動が遅くなり、インク消費も激しい。',special:'om2',
     speed:72,gravity:6.6,range:30,damage:44,cost:24,delay:.66,radius:.42,depth:.030,pellets:5,spread:.034,arc:0,size:.19,weight:.76},
   {id:'td',name:'TD',role:'衝撃砲・広範囲',detail:'前方へインクを爆発させる衝撃砲。1発ずつだが扇形を一気に塗り、範囲内の敵を吹き飛ばす。',special:'ebot',
-    speed:40,gravity:9,range:10.5,damage:132,cost:15,delay:1.05,radius:1.25,depth:.050,pellets:1,spread:0,arc:0,size:.40,blast:{reach:10.5,half:.56}}
+    speed:40,gravity:9,range:10.5,damage:132,cost:15,delay:1.05,radius:1.25,depth:.050,pellets:1,spread:0,arc:0,size:.40,blast:{reach:10.5,half:.56}},
+  // Two-round pistols. Fired at a locked-on enemy, the rounds follow it (see
+  // AUTO_AIM): turn = steering rate, cone = how far off the flight line the
+  // target may drift, reach = how far the guidance works, ink = cost factor
+  // while it is working.
+  {id:'swout',name:'SW OUT',role:'2発拳銃・自動追尾',detail:'1回で2発撃つ拳銃。ロック中の敵に撃つと、弾がある程度追いかける（追従が働く射撃はインク消費2倍）。基本消費はやや多く、攻撃力は半分。',special:'om',
+    speed:63,gravity:8,range:28,damage:14.5,cost:2.9,delay:.26,radius:.98,depth:.040,pellets:2,spread:.018,arc:0,size:.17,
+    autoAim:{turn:2.6,cone:.30,reach:22,ink:2}},
+  {id:'swout2',name:'SW OUT II',role:'後継2発拳銃・プレイヤー専用',detail:'SW OUTの後継機。追従中も消費は増えず、基本消費4割減、弾速1.3倍、追従力・追従範囲・射程1.5倍。Cキー（またはCOボタン）でCOモードを切り替え：発射間隔が2倍になる代わりに追従力がさらに2倍。',special:'om2',playerOnly:true,
+    speed:63*1.3,gravity:8,range:28*1.5,damage:14.5,cost:2.9*.6,delay:.26,radius:.98,depth:.040,pellets:2,spread:.018,arc:0,size:.17,
+    autoAim:{turn:2.6*1.5,cone:.30*1.5,reach:22*1.5,ink:1},coMode:{delay:2,turn:2}}
 ].map(weapon=>({...weapon,cost:weapon.cost*INK_COST_FACTOR,radius:weapon.radius*PAINT_RADIUS_FACTOR}));
 
 export const weaponById=id=>WEAPONS.find(weapon=>weapon.id===id) ?? WEAPONS[0];
+// Weapons a computer-controlled crew may carry (SW OUT II is for players only).
+export const NPC_WEAPONS=WEAPONS.filter(weapon=>!weapon.playerOnly);
+// A locked-on shot: the enemy must sit on the aim line, within its body's
+// width (radians, plus this much) at the distance it stands.
+export const AUTO_AIM_LOCK={body:1.05,slack:.035};
 
 // The drone's own tracking round: one a second, never selectable as a main weapon.
 export const DRONE_WEAPON={id:'drone',name:'ドローン',speed:27,gravity:0,range:17,damage:27,cost:0,delay:1,radius:.62,depth:.030,

@@ -1,10 +1,15 @@
 import {TAU,add,clamp,forward,scale} from './render.js';
 import {zoneOf} from './layout.js';
-import {drawBossModel} from './boss-model.js';
+import {BOSS_TENTACLES,drawBossModel} from './boss-model.js';
 import {BOSS_ATTACK_TIMING,bossArc,drawBossAttack} from './boss-effects.js';
 
 export const BOSS_TIME=180;
 const CADENCE=[3.17,2.65,2.16];
+// How far the tentacles reach: the sweep and the five-tentacle lash.
+export const TENTACLE_REACH=10;
+// It roams the whole street fast, to break up the fight.
+export const BOSS_SPEED=[6.2,6.9,7.6];
+const PATROL={near:8,far:48,every:2.6};
 const distance=(a,b)=>Math.hypot(a.x-b.x,a.z-b.z);
 
 function reached(attack,actor,previous,current) {
@@ -131,11 +136,12 @@ export class Boss {
     this.yaw=Math.atan2(target.x-this.x,this.z-target.z);
     const turn=this.volley++;
     let attack;
-    if (range<=11.6 && (turn%3!==2 || range<=5.5)) {
-      const slam=range<=8.6 && turn%2!==0;
-      attack=slam?this.attack(this.x,this.z,5.2+phase*.76,1.05,112+phase*11,{kind:'slam',y:this.y+.025}):
-        this.attack(this.x,this.z,9.8+phase*.73,.92,106+phase*10,
-          {kind:'sweep',y:this.y+.025,halfAngle:.96+phase*.085});
+    if (range<=TENTACLE_REACH) {
+      const pick=turn%3;
+      if (pick===2) attack=this.lash(targets);
+      else if (pick===1 && range<=8.6) attack=this.attack(this.x,this.z,5.2+phase*.76,1.05,112+phase*11,{kind:'slam',y:this.y+.025});
+      else attack=this.attack(this.x,this.z,TENTACLE_REACH,.92,106+phase*10,
+        {kind:'sweep',y:this.y+.025,halfAngle:.96+phase*.085});
     } else {
       const group=[0,1].map(team=>targets.find(actor=>actor.team===team && distance(this,actor)<38+phase*2)).filter(Boolean);
       for (const [i,actor] of group.entries()) {
@@ -146,7 +152,28 @@ export class Boss {
     }
     this.next=clock+CADENCE[phase-1];
     if (attack) this.cast={kind:attack.kind,start:attack.start,at:attack.at,
-      end:attack.at+BOSS_ATTACK_TIMING[attack.kind].active+.30,yaw:this.yaw};
+      end:attack.at+BOSS_ATTACK_TIMING[attack.kind].active+.30,yaw:this.yaw,
+      ...(attack.kind==='lash' && {points:this.attacks.filter(a=>a.volley===turn).map(a=>[a.x,a.z])})};
+  }
+
+  // All five tentacles strike at once: one at each crew member within reach
+  // (nearest first), the rest at random spots around the boss.
+  lash(targets) {
+    const b=this.battle, phase=this.phase, turn=this.volley-1;
+    const near=targets.filter(actor=>distance(this,actor)<=TENTACLE_REACH).sort((a,c)=>distance(this,a)-distance(this,c));
+    let first=null;
+    for (let i=0;i<BOSS_TENTACLES;i++) {
+      const actor=near[i], angle=b.rng()*TAU, reach=TENTACLE_REACH*(.35+.65*b.rng());
+      let x=actor?actor.x+(actor.vx??0)*.18:this.x+Math.cos(angle)*reach, z=actor?actor.z+(actor.vz??0)*.18:this.z+Math.sin(angle)*reach;
+      const dx=x-this.x, dz=z-this.z, out=Math.hypot(dx,dz);
+      if (out>TENTACLE_REACH) {x=this.x+dx/out*TENTACLE_REACH;z=this.z+dz/out*TENTACLE_REACH;}
+      x=clamp(x,-52.7,52.7);
+      z=clamp(z,-34.2,34.2);
+      const a=this.attack(x,z,1.75,.62,96+phase*8,{kind:'lash',wait:i*.06});
+      a.volley=turn;
+      first??=a;
+    }
+    return first;
   }
 
   updateAttacks(dt,targets) {
@@ -190,15 +217,15 @@ export class Boss {
     this.target=sight.visible?sight.enemy:null;
     const contact=sight.foot && b.clock-sight.at<6?sight.foot:sight.heard;
     if (!contact && (b.clock>this.patrolAt || !this.patrol || distance(this,this.patrol)<3)) {
-      const points=b.tactics.sectors[0].filter(node=>distance(this,node)>5 && distance(this,node)<20 && Math.abs(node.x)<33 &&
-        b.nav.clear(this,node,this.radius,this.height));
+      const points=b.tactics.sectors[0].filter(node=>distance(this,node)>PATROL.near && distance(this,node)<PATROL.far &&
+        b.world.stand(node.x,node.z,this.radius));
       this.patrol=points.length?points[Math.floor(b.rng()*points.length)]:null;
-      this.patrolAt=b.clock+3.8;
+      this.patrolAt=b.clock+PATROL.every;
     }
     const goal=contact ?? this.patrol;
     const range=goal?distance(this,goal):Infinity;
     if (goal && range>5) {
-      if (!b.navigate(this,goal,dt,2.96+this.phase*.57)) b.motion.drive(this,0,0,dt,{look:Math.atan2(goal.x-this.x,this.z-goal.z)});
+      if (!b.navigate(this,goal,dt,BOSS_SPEED[this.phase-1])) b.motion.drive(this,0,0,dt,{look:Math.atan2(goal.x-this.x,this.z-goal.z)});
       this.y=b.world.floor(this.x,this.z).y;
     } else b.motion.drive(this,0,0,dt,{look:goal?Math.atan2(goal.x-this.x,this.z-goal.z):this.yaw+dt*.63});
     if (!sight.visible || b.clock<Math.max(this.next,sight.react) || range>38+this.phase*2) return;

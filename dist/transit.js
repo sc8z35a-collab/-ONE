@@ -2,7 +2,7 @@ import {resetGait} from './npc-motion.js';
 import {surfacePaintRadius} from './ink.js';
 import {add,clamp,cross,dot,mix,scale,splatRadius,sub,unit} from './render.js';
 import {collectShapes,surfaceRim,traceShapes} from './collision.js';
-import {CABIN_Y,METRO,RAIL,STATIONS,giantHeight,isCabin,localX,railEnd,sameLevel,stationAt} from './layout.js';
+import {CABIN_Y,LOOP_LENGTH,METRO,RAIL,STATIONS,giantHeight,isCabin,localX,loopAhead,loopWrap,railEnd,railPath,sameLevel,stationAt} from './layout.js';
 import {drawTrain,TRAIN_AXLES,TRAIN_DOORS,TRAIN_HULLS,trainPose} from './train-model.js';
 import {rayBox} from './world.js';
 import {STAIRS,stairPoint} from './stairs.js';
@@ -14,7 +14,11 @@ const PORTAL_TIME=6;
 const BOARDING_MARGIN=.80;
 const COAT_RIM=Array.from({length:12},(_,i)=>splatRadius(i*Math.PI/6));
 const portalStop=line=>Math.max(line.x+27,line.edge+10.05);
-const NETWORK_STOPS=STATIONS.map(stop=>[stop.level,stop.side]);
+// Each line serves its own two stations: the elevated loop runs one way
+// round (west → east → round the loop → west), the metro shuttles.
+const lineStops=level=>STATIONS.filter(stop=>stop.level===level).map(stop=>[stop.level,stop.side]);
+// Track distance from one station to the next one this line serves.
+const legLength=(line,fromSide)=>line.loop?(fromSide<0?2*line.x:LOOP_LENGTH-2*line.x):2*line.x;
 const nearestDoor=x=>TRAIN_DOORS.reduce((a,b)=>Math.abs(a-x)<Math.abs(b-x)?a:b);
 const lineSpeed=level=>level===1?10.4:11.25;
 function runningSpeed(speed,distance,adhesion,limit,dt) {
@@ -74,7 +78,7 @@ export class Transit {
   nextStop() {
     const t=this.train;
     if (this.connection) return {level:this.connection.to,side:this.connection.side};
-    return {level:this.section,side:t.stop || (t.phase==='return'?t.destination??t.direction:t.direction)};
+    return {level:this.section,side:t.stop || (t.phase==='return' || this.line.loop?t.destination??t.direction:t.direction)};
   }
 
   stopInfo() {
@@ -87,7 +91,7 @@ export class Transit {
 
   runSeconds(side) {
     const {x,speed,wetness,phase}=this.train;
-    const distance=Math.abs(side*this.line.x-x), limit=phase==='return'?4.8:lineSpeed(this.section);
+    const distance=this.line.loop?loopAhead(x,side*this.line.x):Math.abs(side*this.line.x-x), limit=phase==='return'?4.8:lineSpeed(this.section);
     const prior=this.runEstimate;
     if (prior && prior.distance===distance && prior.speed===speed && prior.wetness===wetness && prior.limit===limit) {
       return prior.seconds;
@@ -115,22 +119,22 @@ export class Transit {
   arrival(fromLevel,fromSide,toLevel,toSide,ready) {
     const t=this.train;
     if (this.failed() || t.phase==='return' || this.integrity<150 || this.connection?.waiting) return Infinity;
-    const next=this.nextStop();
-    let index=NETWORK_STOPS.findIndex(([level,side])=>level===next.level && side===next.side);
-    let at=this.connection?this.time+CONNECTION_TIME-this.connection.age:t.stop?this.time:this.time+this.runSeconds(next.side);
-    let depart=t.stop?this.time+t.wait:at+(next.level===1?METRO.dwell:RAIL.dwell), boarded=false;
-    for (let i=0;i<16;i++) {
-      const [level,side]=NETWORK_STOPS[index];
+    const next=this.nextStop(), stops=lineStops(this.section), line=this.line;
+    // A line never changes level: other levels are reached by the stairs.
+    if (fromLevel!==this.section || toLevel!==null && toLevel!==this.section) return Infinity;
+    let index=stops.findIndex(([level,side])=>level===next.level && side===next.side);
+    if (index<0) return Infinity;
+    let at=t.stop?this.time:this.time+this.runSeconds(next.side);
+    let depart=t.stop?this.time+t.wait:at+line.dwell, boarded=false;
+    for (let i=0;i<8;i++) {
+      const [level,side]=stops[index];
       if (boarded && level===toLevel && side===toSide) return at;
       if (level===fromLevel && side===fromSide && ready+BOARDING_MARGIN<depart) {
         if (toLevel===null) return Math.max(at,ready);
         boarded=true;
       }
-      const previous=level;
-      index=(index+1)%NETWORK_STOPS.length;
-      const nextLevel=NETWORK_STOPS[index][0], line=nextLevel===1?METRO:RAIL;
-      const trip=previous!==nextLevel?CONNECTION_TIME:line.x*2/(lineSpeed(nextLevel)*(1-.37*t.wetness))+1.43;
-      at=depart+trip;
+      index=(index+1)%stops.length;
+      at=depart+legLength(line,side)/(lineSpeed(this.section)*(1-.37*t.wetness))+1.43;
       depart=at+line.dwell;
     }
     return Infinity;
@@ -159,8 +163,7 @@ export class Transit {
     const pose=trainPose(t,line);
     for (const dx of TRAIN_AXLES) {
       for (const side of [-1,1]) {
-        const [x]=pose.at(dx,0,side*line.gauge);
-        const z=line.z+side*line.gauge;
+        const [x,,z]=pose.at(dx,0,side*line.gauge);
         const depth=this.paint.depthAt(x,z,line.layer);
         if (side<0) left+=depth;
         else right+=depth;
@@ -238,10 +241,10 @@ export class Transit {
       t.wait-=dt;
       t.doorOpen=smooth(clamp(Math.min((line.dwell-t.wait)/.64,t.wait/.72),0,1));
       if (t.wait<=0) {
-        const connects=this.section===0?t.stop===1:t.stop===-1;
-        if (connects) this.connection={from:this.section,to:1-this.section,side:t.stop,age:0};
-        t.phase=connects?'connector':'drive';
-        t.direction=-t.stop;
+        // On to the line's other station: the loop always runs forward.
+        t.phase='drive';
+        t.destination=-t.stop;
+        t.direction=line.loop?1:-t.stop;
         t.stop=0;
         t.doorOpen=0;
       }
@@ -249,9 +252,12 @@ export class Transit {
     }
     if (t.phase==='derailed') {
       t.speed=Math.max(0,t.speed-dt*5.6);
-      const limit=railEnd(line);
-      t.x=clamp(t.x+t.speed*t.direction*dt,-limit,limit);
-      if (Math.abs(t.x)>=limit) t.speed=0;
+      if (line.loop) t.x=loopWrap(t.x+t.speed*t.direction*dt);
+      else {
+        const limit=railEnd(line);
+        t.x=clamp(t.x+t.speed*t.direction*dt,-limit,limit);
+        if (Math.abs(t.x)>=limit) t.speed=0;
+      }
       t.lateral=clamp(t.lateral+t.sideSpeed*dt,-1.55,1.55);
       t.sideSpeed*=Math.exp(-dt*2.65);
       t.roll=mix(t.roll,Math.sign(t.lateral||t.sideSpeed)*.37,1-Math.exp(-dt*2.7));
@@ -270,8 +276,14 @@ export class Transit {
         for (const property of ['lateral','sideSpeed','roll','yaw','lift','wetness','routePitch']) t[property]=mix(t[property]??0,0,settle);
       }
       if (t.wait<=0) {
-        t.destination=t.x<0?-1:1;
-        t.direction=Math.sign(t.destination*line.x-t.x) || -t.destination;
+        if (line.loop) {
+          // Creep forward to whichever station comes up first.
+          t.destination=loopAhead(t.x,-line.x)<loopAhead(t.x,line.x)?-1:1;
+          t.direction=1;
+        } else {
+          t.destination=t.x<0?-1:1;
+          t.direction=Math.sign(t.destination*line.x-t.x) || -t.destination;
+        }
         t.risk=0;
         t.phase='return';
         this.integrity=line.integrity ?? 720;
@@ -286,8 +298,8 @@ export class Transit {
     const [left,right]=this.readRails();
     const load=clamp(Math.max(left,right)*15,0,1);
     t.wetness=mix(t.wetness,load,1-Math.exp(-dt*5.6));
-    const returning=t.phase==='return', destination=returning?t.destination:t.direction;
-    const target=destination*line.x, distance=Math.abs(target-t.x);
+    const returning=t.phase==='return', destination=returning || line.loop?t.destination??t.direction:t.direction;
+    const target=destination*line.x, distance=line.loop?loopAhead(t.x,target):Math.abs(target-t.x);
     const adhesion=1-.66*t.wetness;
     t.speed=runningSpeed(t.speed,distance,adhesion,returning?4.8:lineSpeed(this.section),dt);
     const bias=clamp((right-left)*22,-1,1);
@@ -303,7 +315,11 @@ export class Transit {
     t.spray-=dt;
     if (this.paint && t.wetness>.21 && t.spray<=0) {
       t.spray=.16;
-      for (const side of [-1,1]) this.paint.kick(line.center+t.x+t.direction*2.08,line.z+side*line.gauge,line.layer,t.direction*t.speed*.49,t.sideSpeed);
+      const pose=trainPose(t,line);
+      for (const side of [-1,1]) {
+        const [kx,,kz]=pose.at(t.direction*2.08,0,side*line.gauge);
+        this.paint.kick(kx,kz,line.layer,t.direction*t.speed*.49,t.sideSpeed);
+      }
     }
     if (!returning && t.risk>=1) {
       this.derail('インクで脱線',Math.sign(bias||oscillation)*3.34);
@@ -318,6 +334,7 @@ export class Transit {
       return;
     }
     t.x+=t.direction*t.speed*dt;
+    if (line.loop) t.x=loopWrap(t.x);
   }
 
   option(actor) {
@@ -403,9 +420,9 @@ export class Transit {
   blocksActor(actor) {
     const line=this.line,t=this.train;
     if (!sameLevel(actor.x,line.center) || !this.visibleIn(this.section) ||
-        Math.abs(actor.x-line.center-t.x)>10.4 || Math.abs(actor.z-line.z-t.lateral)>2.5 ||
         actor.y>line.y+5.3 || actor.y+(actor.height??1.72)<line.y+.7) return false;
     const pose=trainPose(t,line), foot=pose.local([actor.x,actor.y,actor.z]);
+    if (Math.abs(foot[0])>10.4 || Math.abs(foot[2])>2.5) return false;
     const head=pose.local([actor.x,actor.y+(actor.height??(actor.swimming?.58:1.72)),actor.z]);
     const radius=actor.radius??(actor.swimming?.33:.4);
     return TRAIN_HULLS.some(({min,max})=>{
@@ -439,8 +456,10 @@ export class Transit {
   unboard(actor,emergency) {
     const t=this.train, line=this.line;
     const fromCabin=isCabin(actor.x), offset=fromCabin?nearestDoor(localX(actor.x)):actor.ride.offset;
-    const outsideStation=emergency && Math.abs(t.x)>line.edge-2;
-    const x=line.center+(outsideStation?Math.sign(t.x)*line.x:t.x)+offset, z=line.platformZ-line.doorSide*.43;
+    // Off the station straight (anywhere on the loop) riders are led to the nearer platform.
+    const along=line.loop?railPath(t.x).x:t.x, onStraight=!line.loop || Math.abs(loopWrap(t.x))<=line.edge && Math.abs(along-t.x)<.01;
+    const outsideStation=emergency && (Math.abs(along)>line.edge-2 || !onStraight);
+    const x=line.center+(outsideStation?(Math.sign(along) || 1)*line.x:t.x)+offset, z=line.platformZ-line.doorSide*.43;
     const exits=emergency?[[x,z+line.doorSide*2.5],[x,z+line.doorSide*4.7],[x-2.1,z+line.doorSide*3.5],
       [x+2.1,z+line.doorSide*3.5],[x,z+line.doorSide*6.4]]:[[x,z]];
     const [px,pz]=exits.find(([px,pz])=>this.world.stand(px,pz,.52))
@@ -488,12 +507,13 @@ export class Transit {
   }
 
   trace(start,end,precise=false,clearance=0) {
-    const t=this.train, line=this.line, x=line.center+t.x, z=line.z+t.lateral;
+    const t=this.train, line=this.line, pose=trainPose(t,line), [x,,z]=pose.at(0,0,0);
+    // On a curve the car is turned: test against a box that holds it at any heading.
+    const reachX=line.loop?9.8:9.4, reachZ=line.loop?9.8:3.63;
     if (!this.visibleIn(sameLevel(start[0],RAIL.center)?0:1) ||
         !sameLevel(start[0],line.center) || Math.max(start[1],end[1])<line.y-.05-clearance || Math.min(start[1],end[1])>line.y+5.3+clearance ||
-        Math.max(start[0],end[0])<x-9.4-clearance || Math.min(start[0],end[0])>x+9.4+clearance ||
-        Math.max(start[2],end[2])<z-3.63-clearance || Math.min(start[2],end[2])>z+3.63+clearance) return null;
-    const pose=trainPose(t,line);
+        Math.max(start[0],end[0])<x-reachX-clearance || Math.min(start[0],end[0])>x+reachX+clearance ||
+        Math.max(start[2],end[2])<z-reachZ-clearance || Math.min(start[2],end[2])>z+reachZ+clearance) return null;
     if (precise) {
       if (!this.posedTrain || this.posedTrain.time!==this.time || this.posedTrain.train!==t || this.posedTrain.doorOpen!==t.doorOpen) {
         this.posedTrain={time:this.time,train:t,doorOpen:t.doorOpen,shapes:collectShapes(r=>this.draw(r))};

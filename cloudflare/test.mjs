@@ -20,7 +20,7 @@ import {TouchControls} from '../dist/touch.js';
 import {DRONE_WEAPON,EBOT,SUPERS,WEAPONS,weaponById} from '../dist/weapons.js';
 import {RAIDER_WEAPON} from '../dist/raiders.js';
 import {SUBWEAPONS} from '../dist/subweapons.js';
-import {TRAIN_DOORS} from '../dist/train-model.js';
+import {TRAIN_DOORS,trainPose} from '../dist/train-model.js';
 import * as inkHud from '../dist/ink-hud.js';
 import {CONNECTION_TIME} from '../dist/transit.js';
 
@@ -311,7 +311,8 @@ test('overhead geometry cannot raise the camera and staircase approaches blend c
   const b=new RoomEngine(options).battle, p=b.player;
   Object.assign(p,{x:-50.55,y:0,z:-26.85,yaw:0});
   const underPlatform=crewView(b,p);
-  assert(underPlatform.eye[1]<2.36);
+  // The boom height (pivot 1.27 + 1.3) is all the lift there is.
+  assert(underPlatform.eye[1]<2.58);
   Object.assign(p,{swimming:true,inkSwimming:true});
   assert.deepEqual(crewView(b,p),underPlatform);
   const poses=[-.18,-.13].map(t=>{
@@ -402,7 +403,7 @@ test('ink swimming is faster than swimming over dry ground and produces no wake 
 
 test('main weapons fire four shots with their original cost of one shot',()=>{
   const b=new RoomEngine(options).battle, p=b.player;
-  const former={jet:4.9,fan:9,charge:14,lob:18,blast:12,dual:6.3,surge:8.7,coil:7.5,prism:9,roller:5.39,rd2:48,td:30};
+  const former={jet:4.9,fan:9,charge:14,lob:18,blast:12,dual:6.3,surge:8.7,coil:7.5,prism:9,roller:5.39,rd2:48,td:30,swout:5.8,swout2:3.48};
   const target=[p.x+5,p.y+1,p.z];
   for (const weapon of WEAPONS) {
     Object.assign(p,{weapon,tank:former[weapon.id],fire:0});
@@ -501,57 +502,52 @@ test('bomb fuses, moving paint, proximity trigger and enemy-only cover work thro
   }
 });
 
-test('a boarded train completes a through service, retains the cabin and survives a tunnel restore',()=>{
+test('a boarded elevated train laps the whole loop back to the west station, keeping the cabin across a restore',()=>{
   const engine=new RoomEngine(options), b=engine.battle,p=b.player, rail=b.transit;
   rail.update(.9);
   Object.assign(p,{x:rail.line.center-rail.line.x,y:rail.line.platformY,z:rail.line.platformZ,doorReady:0});
   assert(rail.use(p));
   assert.equal(rail.option(p)?.label,'乗降中');
   const cabinX=p.x;
-  for(let i=0;i<1000 && !rail.connection;i++) rail.update(rail.time+.1);
-  assert(rail.connection && Number.isFinite(rail.arrival(0,1,1,1,rail.time)));
-  const period=2.56, phase=x=>x/period-Math.round(x/period);
-  assert(Math.abs(phase(rail.sceneryX(period)-rail.train.x))<.03);
-  const phaseBefore=rail.sceneryX(period);
-  rail.update(rail.time+18);
-  assert.notEqual(rail.sceneryX(period),phaseBefore);
+  for(let i=0;i<1000 && rail.train.stop!==1;i++) rail.update(rail.time+.1);
+  assert.equal(rail.train.stop,1);
+  // From the east station the train runs on round the east curve and along the south side.
+  const onSouthSide=()=>{const [x,,z]=trainPose(rail.train,rail.line).at(0,0,0);return z>38 && Math.abs(x)<50;};
+  for(let i=0;i<2000 && !onSouthSide();i++) rail.update(rail.time+.1);
+  const south=trainPose(rail.train,rail.line).at(0,0,0);
+  assert(south[2]>38 && Math.abs(south[0])<50,'the train runs the south side');
+  assert(!rail.connection && rail.section===0);
+  assert.equal(rail.arrival(0,1,1,1,rail.time),Infinity);
   b.elapsed=rail.time;
   b.clock=rail.time+3;
   b.metro.update(rail.time);
   const replay=new RoomEngine(options,new Map(Object.entries(engine.checkpoint()))).battle;
   assert.equal(replay.player.x,cabinX);
-  assert(replay.transit.connection && replay.transit.section===1);
-  assert.equal(replay.transit.line.cabinX,RAIL_CABIN_X);
-  let lastScenery;
-  for(let i=0;i<1500 && replay.transit.connection;i++) {
-    lastScenery=replay.transit.sceneryX(period);
-    replay.transit.update(replay.transit.time+.01);
-  }
-  assert(Math.abs(phase(replay.transit.sceneryX(period)-lastScenery))<.05);
+  assert(Math.abs(replay.transit.train.x-rail.train.x)<.02);
+  for(let i=0;i<2000 && replay.transit.train.stop!==-1;i++) replay.transit.update(replay.transit.time+.1);
+  assert.equal(replay.transit.train.stop,-1);
   replay.transit.update(replay.transit.time+.9);
-  assert(replay.transit.train.stop===1 && replay.transit.train.doorOpen>.36);
-  assert.equal(replay.transit.train.routePitch,0);
+  assert(replay.transit.train.doorOpen>.36);
   replay.player.z=replay.transit.line.doorSide*.9;
   assert(replay.transit.use(replay.player));
-  assert.equal(zoneOf(replay.player.x),1);
-  assert(replay.player.y>METRO.y);
+  assert.equal(zoneOf(replay.player.x),0);
   assert.equal(replay.player.yaw,b.player.yaw);
 });
 
-test('damage in a connector stops and recovers the train at its actual location',()=>{
+test('damage on the loop stops the train where it is and it creeps on to the next station',()=>{
   const b=new RoomEngine(options).battle,rail=b.transit,p=b.player;
   rail.dock(1);
-  rail.update(10.8);
-  assert(rail.connection && rail.visibleIn(0));
+  for (let i=0;i<600 && trainPose(rail.train,rail.line).at(0,0,0)[0]<70;i++) rail.update(rail.time+.05);
   const position=rail.train.x,speed=rail.train.speed;
+  assert(speed>0 && rail.visibleIn(0));
   Object.assign(p,{x:RAIL_CABIN_X,y:CABIN_Y,z:0});
   rail.damage(10000);
   assert(rail.failed() && rail.train.x===position && rail.train.speed===speed);
   rail.update(rail.time+.05);
   assert(rail.train.x>position && rail.train.x-position<.6 && rail.train.speed<speed);
   assert(rail.carry(p,1/24) && zoneOf(p.x)===0 && b.world.stand(p.x,p.z,.48));
-  for (let i=0;i<600 && !rail.train.stop;i++) rail.update(rail.time+.05);
-  assert.equal(rail.stopInfo().station.id,'G-E');
+  for (let i=0;i<4000 && !rail.train.stop;i++) rail.update(rail.time+.05);
+  assert.equal(rail.stopInfo().station.id,'G-W');
   assert.equal(rail.integrity,720);
 });
 
@@ -617,7 +613,7 @@ test('an open train wins over another service waiting at the same level',()=>{
   assert.equal(zoneOf(p.x),3);
 });
 
-test('walking through an open doorway boards a train, visits four stations and exits onto a real platform',()=>{
+test('walking through an open doorway boards a train, laps the loop and exits onto a real platform',()=>{
   const b=new RoomEngine(options).battle,p=b.player,rail=b.transit,door=TRAIN_DOORS[1];
   rail.update(.9);
   Object.assign(p,{x:-RAIL.x+door,y:RAIL.platformY,z:RAIL.z+2.4,doorReady:0,vy:0});
@@ -631,14 +627,15 @@ test('walking through an open doorway boards a train, visits four stations and e
   const cabin=p.x;
   b.paint.stamp(p.x,p.z,.9,p.team,rail.line.cabinLayer);
   const visited=['G-W'];
-  for(let i=0;i<1600 && visited.length<5;i++) {
+  for(let i=0;i<1600 && visited.length<3;i++) {
     rail.update(rail.time+.1);
     b.metro.update(rail.time);
     const stop=rail.stopInfo();
     if (stop.docked && stop.doors && stop.station.id!==visited.at(-1)) visited.push(stop.station.id);
     assert.equal(p.x,cabin);
   }
-  assert.deepEqual(visited,['G-W','G-E','B-E','B-W','G-W']);
+  // Once round the loop: east station, then back to the west one.
+  assert.deepEqual(visited,['G-W','G-E','G-W']);
   assert.equal(b.paint.get(p.x,p.z,rail.line.cabinLayer),1);
   p.z=rail.line.doorSide*.78;
   b.move(p,0,rail.line.doorSide*2,.08,false,false);
@@ -981,31 +978,28 @@ test('train ETA accounts for acceleration and braking from the first departure f
   }
 });
 
-test('a delayed train occupies its track until through service can enter safely',()=>{
-  const b=new RoomEngine(options).battle, held=b.transit, arriving=b.metro;
-  held.dock(1);
-  held.train.wait=60;
-  arriving.setSection(0);
-  arriving.connection={from:1,to:0,side:1,age:CONNECTION_TIME-6.5};
-  Object.assign(arriving.train,{phase:'connector',stop:0});
-  const tick=dt=>{
-    const now=held.time+dt;
-    held.update(now);
-    arriving.update(now);
-  };
-  for (let i=0;i<150;i++) tick(.05);
-  assert(!arriving.visibleIn(0));
-  assert.equal(arriving.stopInfo().status,'信号待ち');
-  assert.equal(arriving.stopInfo().seconds,null);
-  assert.equal(arriving.train.speed,0);
-  held.train.wait=.01;
-  let stop=false;
-  for (let i=0;i<400 && !stop;i++) {
-    tick(.05);
-    assert(!(held.visibleIn(0) && arriving.visibleIn(0)));
-    stop=arriving.stopInfo().docked;
+test('each line keeps to its own level: the elevated train laps the whole loop and the metro shuttles',()=>{
+  const b=new RoomEngine(options).battle, rail=b.transit, metro=b.metro;
+  const seen={rail:[],metro:[]};
+  let minX=0,maxX=0,maxZ=-Infinity;
+  for (let i=0;i<2400;i++) {
+    const now=rail.time+.1;
+    rail.update(now);
+    metro.update(now);
+    for (const [name,line] of [['rail',rail],['metro',metro]]) {
+      const info=line.stopInfo();
+      if (info.docked && info.station.id!==seen[name].at(-1)) seen[name].push(info.station.id);
+      assert(!line.connection);
+    }
+    assert(rail.section===0 && metro.section===1);
+    const [x,,z]=trainPose(rail.train,rail.line).at(0,0,0);
+    minX=Math.min(minX,x);maxX=Math.max(maxX,x);maxZ=Math.max(maxZ,z);
   }
-  assert(stop && arriving.stopInfo().station.id==='G-E');
+  assert.deepEqual(seen.rail.slice(0,4),['G-W','G-E','G-W','G-E']);
+  assert.deepEqual(seen.metro.slice(0,3),['B-W','B-E','B-W']);
+  assert(minX<-85 && maxX>85 && maxZ>40,'the elevated train rounds both curves and the south side');
+  assert.equal(metro.arrival(1,1,0,1,metro.time),Infinity);
+  assert(Number.isFinite(rail.arrival(0,-1,0,1,rail.time)));
 });
 
 test('an enemy ink curtain blocks the beam and takes damage while allied beams pass',()=>{
@@ -1629,7 +1623,7 @@ test('browser adapter receives state and paint through the same framed socket pr
     assert.equal(scene.inkImpacts.length,1);
     assert.equal(scene.inkImpacts[0].team,b.player.team);
     const marks=[];
-    const r={lite:true,add(...args){if (args[2]>12 && args[2]<14) marks.push(args);},beam(){},label(){}};
+    const r={lite:true,add(...args){if (args[2]>11 && args[2]<15) marks.push(args);},beam(){},label(){}};
     scene.draw(r,-6,0,null,14);
     // The streamed impact starts at the very beginning of its animation.
     assert(marks.some(args=>args[0]==='ripple' && args[9].label<.02));
