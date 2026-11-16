@@ -15,22 +15,31 @@ const floats=(name,values)=>`const float ${name}[${values.length}]=float[${value
 const SURFACE_CORE=`
 ${SURFACES.map((surface,i)=>`const int S_${surface.id.toUpperCase()}=${i};`).join('\n')}
 ${floats('S_METERS',SURFACES.map(surface=>surface.meters))}
-${floats('S_MIRROR',SURFACES.map(surface=>surface.pattern?1:0))}
+${floats('S_MIRROR',SURFACES.map(surface=>surface.pattern && !surface.repeat?1:0))}
 ${floats('S_TAKE',SURFACES.map(surface=>surface.take))}
 uniform highp sampler2DArray uSurface;
 uniform int uSurfaceSheets;
 uniform float uSurfaceEdge;
-uniform vec3 uSurfaceMean[${SURFACES.length}];
-bool surfaceReady(int slot){return slot>=0 && ((uSurfaceSheets>>(slot/9))&1)==1;}
+// Per slot: average colour (rgb) and texture-array layer (a, -1 = not loaded).
+// A uniform block, so the table can grow without eating into the plain
+// uniform space that small mobile GPUs keep tight (224 vectors at minimum).
+layout(std140) uniform SurfaceTable{vec4 uSurfaceMean[${SURFACES.length}];};
+bool surfaceReady(int slot){return slot>=0 && uSurfaceMean[slot].a>-.5;}
 // p: world-plane position in metres; dx, dy: its screen derivatives, taken
 // outside any branch so a texture can be chosen per pixel.
 vec4 surfaceTap(int slot,vec2 p,vec2 dx,vec2 dy){
   float s=1./S_METERS[slot];
   vec2 uv=p*s;
   if (S_MIRROR[slot]>.5) uv=clamp(1.-abs(1.-mod(uv,2.)),uSurfaceEdge,1.-uSurfaceEdge);
-  return textureGrad(uSurface,vec3(uv,float(slot)),dx*s,dy*s);
+  return textureGrad(uSurface,vec3(uv,uSurfaceMean[slot].a),dx*s,dy*s);
 }
-vec3 surfaceMean(int slot){return uSurfaceMean[slot];}
+// For places without usable derivatives (rooms traced behind windows).
+vec4 surfaceLod(int slot,vec2 p,float lod){
+  vec2 uv=p/S_METERS[slot];
+  if (S_MIRROR[slot]>.5) uv=clamp(1.-abs(1.-mod(uv,2.)),uSurfaceEdge,1.-uSurfaceEdge);
+  return textureLod(uSurface,vec3(uv,uSurfaceMean[slot].a),lod);
+}
+vec3 surfaceMean(int slot){return uSurfaceMean[slot].rgb;}
 float sfLum(vec3 c){return dot(c,vec3(.2126,.7152,.0722));}
 float sfChroma(vec3 c){return max(max(c.r,c.g),c.b)-min(min(c.r,c.g),c.b);}
 float sfHash(vec2 p){vec3 q=fract(vec3(p.xyx)*.1031);q+=dot(q,q.yzx+33.33);return fract((q.x+q.y)*q.z);}
@@ -41,70 +50,162 @@ float sfNoise(vec2 p){
 }
 // tint: the instance colour as stored (sRGB). Returns -1 for surfaces that
 // keep their procedural look (lights, glass panes with rooms, ink, labels).
+// Flat roofs: membrane, gravel, timber decks and a few solar arrays.
+int roofFor(float seed){return seed<.45?S_ROOF_MEMBRANE:seed<.7?S_ROOF_GRAVEL:seed<.87?S_ROOFTOP_DECK:S_SOLAR_PANEL;}
 int surfaceFor(int kind,vec3 tint,vec3 ng,float seed,vec3 size,int shape,bool under,bool cabin,float layer,float above){
   float l=sfLum(tint), chroma=sfChroma(tint);
-  bool warm=tint.r>tint.b+.06, red=tint.r>tint.g+.15, green=tint.g>tint.r+.015 && tint.g>=tint.b-.02;
-  bool level=ng.y>.6, ceiling=ng.y<-.6;
+  bool warm=tint.r>tint.b+.06, red=tint.r>tint.g+.15, green=tint.g>tint.r+.015 && tint.g>=tint.b-.02, blue=tint.b>tint.r+.06;
+  bool level=ng.y>.6, ceiling=ng.y<-.6, sloped=ng.y>.6 && ng.y<.995;
   float longest=max(max(size.x,size.y),size.z), thinnest=min(min(size.x,size.y),size.z);
+  float middle=size.x+size.y+size.z-longest-thinnest;
+  // Facades choose by their paint, not per box, so every block of one
+  // building (and all of its faces) wears the same cladding.
+  float house=fract(dot(tint,vec3(31.7,19.3,23.9)));
+  // Undersides of decks, the overpass and apartment ceilings.
+  if (ceiling && !under && !cabin && above>2. && (kind==1 || kind==2 || kind==15)) return l>.72?S_GYPSUM_PAINTED:S_CONCRETE_SOFFIT;
+  // Track: rail heads and sleepers on both lines.
+  if (kind==1 && !warm && thinnest<.07 && middle<.2 && longest>15.) return S_RAIL_STEEL;
+  if (kind==1 && !warm && longest<3. && middle<.32 && thinnest<.12 && (layer>3.5 && layer<4.5 || under)) return S_CONCRETE_SLEEPER;
   // The sides of slabs, kerbs, risers and poles made of a floor material.
-  if ((kind==1 || kind==5 || kind==15 || kind==27) && !level) return cabin?S_HARD_PLASTIC:under?S_CONCRETE_FORMWORK:S_CONCRETE_WEATHERED;
-  if (kind==5) return S_ASPHALT;
+  if ((kind==1 || kind==5 || kind==15 || kind==27) && !level) {
+    if (cabin) return S_HARD_PLASTIC;
+    if (under) return S_CONCRETE_FORMWORK;
+    return size.y<.4 && above<.5?S_GRANITE_CURB:S_CONCRETE_WEATHERED;
+  }
+  if (kind==5) {
+    if (under) return S_WET_ASPHALT;
+    if (red && chroma>.1) return S_RED_ASPHALT;
+    if (green && chroma>.06) return S_GREEN_LANE;
+    if (longest<40.) return S_PARKING_ASPHALT;
+    return seed<.35?S_ASPHALT_PATCHED:S_ASPHALT;
+  }
   if (kind==1) {
     if (cabin) return S_VINYL_FLOOR;
     if (layer>3.5 && layer<4.5) return S_BALLAST;
-    if (under) return l>.55?(seed<.5?S_PORCELAIN_TILES:S_TERRAZZO):S_EPOXY_FLOOR;
-    if (warm && chroma>.07) return S_BRICK_PAVERS;
-    return tint.g>tint.r+.008?S_SIDEWALK_PAVERS:S_CONCRETE_SLAB;
+    // Tops of barriers and low blocks are concrete, not floor finishes.
+    if (size.y>.3 && longest<6.) return S_CONCRETE_WEATHERED;
+    // The three walk-in apartments: wood, carpet and tatami rooms.
+    if (!under && size.y<.05 && longest>8. && middle>4.) return warm && chroma>.15?S_WOOD_FLOORING:green || blue?S_CARPET_TILE:S_TATAMI;
+    if (under) {
+      if (longest>60. && middle<4.5) return S_BALLAST;
+      if (shape==2) return S_RUBBER_STUD_FLOOR;
+      if (l>.55) return longest<12. && size.y<.2 && middle>1.5?S_CHECKER_TILE:seed<.34?S_PORCELAIN_TILES:seed<.67?S_TERRAZZO:S_MARBLE;
+      return seed<.4?S_EPOXY_FLOOR:seed<.7?S_POLISHED_CONCRETE:S_GARAGE_CONCRETE;
+    }
+    if (warm && chroma>.07) return seed<.75?S_BRICK_PAVERS:S_GRANITE_SETTS;
+    if (tint.g>tint.r+.008) return seed<.35?S_MOSSY_PAVERS:S_SIDEWALK_PAVERS;
+    return seed<.18?S_EXPOSED_AGGREGATE:seed<.3?S_GRANITE_SETTS:S_CONCRETE_SLAB;
   }
   if (kind==27) return S_CONCRETE_SLAB;
   if (kind==15) return under?S_EPOXY_FLOOR:S_CONCRETE_WEATHERED;
   if (kind==2 || kind==19) {
     if (ceiling && (under || cabin)) return S_CEILING_PANEL;
     if (cabin) return S_HARD_PLASTIC;
-    if (kind==19) return S_PLASTER;
-    if (under) return level?S_CONCRETE_WEATHERED:l>.6?S_SUBWAY_TILES:S_CONCRETE_FORMWORK;
-    if (level) return S_CONCRETE_WEATHERED;
-    if (red && chroma>.12) return S_TERRACOTTA;
-    if (chroma>.12 && longest>2.) return S_CORRUGATED_METAL;
-    if (size.y<2.4) return seed<.5?S_CONCRETE_BLOCK:S_CONCRETE_WEATHERED;
-    return seed<.25?S_CONCRETE_FORMWORK:seed<.5?S_CONCRETE_WEATHERED:seed<.75?S_PLASTER:S_ALC_PANEL;
+    if (kind==19) return seed<.7?S_PLASTER:S_SHIKKUI;
+    if (under) {
+      if (level) return S_CONCRETE_WEATHERED;
+      if (warm && size.y<3. && longest<9.) return S_PEGBOARD;
+      if (l>.6) return seed<.55?S_SUBWAY_TILES:seed<.8?S_GLASS_MOSAIC:S_MOSAIC_TILE_WALL;
+      return S_CONCRETE_FORMWORK;
+    }
+    if (level) return above>3.?roofFor(seed):above>.75 && above<1.25 && longest<3.?S_LAMINATE_COUNTER:S_CONCRETE_WEATHERED;
+    // Apartment interiors: papered walls the height of one storey.
+    if (l>.7 && size.y>2.9 && size.y<3.3 && longest>20.) return S_VINYL_WALLPAPER;
+    // Shop awnings: thin pitched strips above the doors.
+    if (size.y<.1 && longest>.6 && longest<1.2 && above>2.2) return S_AWNING_CANVAS;
+    // Red: containers stay weathering steel; only tall facades get louvres.
+    if (red && chroma>.12) return longest>4.?(size.y>3.2 && house>.5?S_TERRACOTTA_LOUVER:S_CORTEN_STEEL):
+      seed<.6?S_TERRACOTTA:S_GLAZED_BRICK_TILE;
+    if (blue && chroma>.12 && size.y>2.4) return seed<.5?S_SPANDREL_GLASS:S_TITANIUM_PANEL;
+    if (green && chroma>.12 && size.y>2.4 && seed<.4) return S_COPPER_PATINA;
+    if (chroma>.12 && longest>2.) return seed<.35?S_CORRUGATED_METAL:seed<.6?S_TIN_SIDING:seed<.85?S_ALUMINUM_COMPOSITE:S_PEELING_PAINT_WALL;
+    if (l<.2 && size.y>1.) return seed<.4?S_YAKISUGI:seed<.7?S_SLATE_CLADDING:S_SHITAMI_BOARD;
+    // Garden fences of houses: thin, warm and long.
+    if (warm && size.y>.8 && size.y<2.4 && thinnest<.3 && longest>2. && seed<.45) return seed<.25?S_BAMBOO_FENCE:S_KOSHI_LATTICE;
+    if (above<1.4 && size.y<1.3 && longest>1.5 && l<.55 && chroma<.08) return S_POLISHED_GRANITE;
+    if (size.y>1.8 && size.y<3.2 && l<.45 && chroma<.06 && longest>1.5) return seed<.5?S_ROLLING_SHUTTER:S_CONCRETE_BLOCK;
+    if (warm && longest<.9 && l>.25 && l<.7) return S_CARDBOARD;
+    if (size.y<2.4) {
+      // Plinths and blocks stay masonry; free-standing walls get the
+      // garden-wall finishes (pierced blocks, ivy, namako, gabions).
+      if (thinnest>.45 || longest<1.5) return seed<.3?S_CONCRETE_BLOCK:seed<.48?S_EFFLORESCENCE_WALL:
+        seed<.72?S_CONCRETE_WEATHERED:seed<.86?S_SPLIT_FACE_BLOCK:S_STONE_RETAINING;
+      return seed<.12?S_CONCRETE_BLOCK:seed<.22?S_EFFLORESCENCE_WALL:seed<.32?S_CONCRETE_WEATHERED:
+        seed<.42?S_SPLIT_FACE_BLOCK:seed<.52?S_BREEZE_BLOCK:seed<.62?S_WALL_MOSS_DAMP:seed<.71?S_IVY_WALL:
+        seed<.79?S_STONE_RETAINING:seed<.86?S_NAMAKO_WALL:seed<.93?S_GABION_WALL:S_GRAFFITI_BUFF;
+    }
+    // Earth and stone tones: clay walls, sandstone and long facade tiles.
+    float h=house;
+    if (warm && chroma>.05 && l>.35 && h<.36) return h<.12?S_MORTAR_WASHI:h<.24?S_SANDSTONE_PANEL:S_NICHOKAKE_TILE;
+    if (l>.78 && h>.8) return h<.9?S_SHIKKUI:S_PEELING_PAINT_WALL;
+    return h<.1?S_CONCRETE_FORMWORK:h<.2?S_CONCRETE_WEATHERED:h<.27?S_RAIN_STREAKS_WALL:h<.34?S_PLASTER:
+      h<.4?S_STUCCO_CRACKED:h<.46?S_LATH_MORTAR:h<.52?S_ALC_PANEL:h<.59?S_PRECAST_PANEL:h<.65?S_SPRAY_TILE:
+      h<.71?S_CERAMIC_SIDING:h<.77?S_GRAFFITI_BUFF:h<.84?S_CAST_STONE:h<.9?S_TRAVERTINE:h<.95?S_BRONZE_PANEL:S_MIRROR_STAINLESS;
   }
-  if (kind==11) return warm?(seed<.5?S_BRICK_TAN:S_TILE_CLADDING):
-    seed<.3?S_TILE_CLADDING:seed<.55?S_PLASTER:seed<.8?S_ALC_PANEL:S_CONCRETE_WEATHERED;
+  if (kind==11) {
+    float h=house;
+    if (level) return roofFor(h);
+    if (warm) return h<.2?S_BRICK_TAN:h<.35?S_TILE_CLADDING:h<.48?S_NICHOKAKE_TILE:h<.58?S_MOSAIC_TILE_WALL:
+      h<.7?S_SPRAY_TILE:h<.8?S_CERAMIC_SIDING:h<.9?S_SANDSTONE_PANEL:S_TRAVERTINE;
+    return h<.14?S_TILE_CLADDING:h<.25?S_PLASTER:h<.35?S_ALC_PANEL:h<.45?S_CONCRETE_WEATHERED:
+      h<.53?S_RAIN_STREAKS_WALL:h<.66?S_PRECAST_PANEL:h<.76?S_ALUMINUM_COMPOSITE:h<.84?S_CAST_STONE:
+      h<.9?S_TITANIUM_PANEL:h<.95?S_STUCCO_CRACKED:S_BRONZE_PANEL;
+  }
   if (kind==13) {
     if (shape==0) return S_BARK;
-    if (level && size.y<.1 && l<.5) return seed<.5?S_SOIL:S_MULCH;
-    return red?S_BRICK_RED:S_BRICK_TAN;
+    if (level && size.y<.1 && l<.5) return seed<.4?S_SOIL:seed<.75?S_MULCH:S_FALLEN_LEAVES;
+    if (chroma<.06 && size.y>3.5 && size.y<6.) return S_TUNNEL_LINING;
+    if (l>.7) return S_BRICK_PAINTED;
+    if (seed>.88 && size.y>1.5) return S_IVY_WALL;
+    return red?S_BRICK_RED:seed<.8?S_BRICK_TAN:S_GLAZED_BRICK_TILE;
   }
-  if (kind==29) return seed<.34?S_WOOD_PLANKS:seed<.67?S_PLYWOOD:S_WOOD_WEATHERED;
-  if (kind==14) return shape==0?S_LEAVES:S_HEDGE;
+  if (kind==29) return level && longest>2.?S_ROOFTOP_DECK:
+    seed<.2?S_WOOD_PLANKS:seed<.4?S_PLYWOOD:seed<.6?S_WOOD_WEATHERED:seed<.8?S_PAINTED_WOOD:S_SHITAMI_BOARD;
+  // Hedge tops; their tall sides read as dense planted walls.
+  if (kind==14) return shape==0?S_LEAVES:!level && size.y>1.2?S_GREEN_WALL:S_HEDGE;
   if (kind==4) {
     if (cabin || under) return chroma<.05?S_STAINLESS:S_STEEL_PAINTED_GREY;
-    if (level) return above<.35?S_DRAIN_GRATE:S_DIAMOND_PLATE;
+    if (sloped && above>3.) return blue?S_SOLAR_PANEL:red?(seed<.5?S_KAWARA_TILE:S_STANDING_SEAM_ROOF):
+      seed<.55?S_STANDING_SEAM_ROOF:seed<.85?S_ZINC_SHINGLE:S_COPPER_PATINA;
+    if (longest<.26 && l<.3) return S_KNURLED_GRIP;
+    if (longest<.8 && chroma>.12) return S_ANODIZED_ALUMINUM;
+    if (level && above<.35) return shape==0?S_CAST_IRON:S_DRAIN_GRATE;
+    if (level && above>.7 && above<1.25 && longest<3.) return S_LAMINATE_COUNTER;
+    if (level) return S_DIAMOND_PLATE;
+    if (longest<.9 && l<.36 && chroma<.08) return S_CERAKOTE;
+    if (red && chroma>.15 && l<.5) return S_CORTEN_STEEL;
     if (longest>4.5) return S_STEEL_GIRDER;
-    if (thinnest<.05 && longest>.5) return S_PERFORATED_METAL;
+    if (thinnest<.05 && longest>.5) return seed<.35?S_PERFORATED_METAL:seed<.7?S_EXPANDED_METAL:S_WOVEN_MESH;
+    if (above>3. && thinnest>.4 && longest<2.2) return S_METAL_LOUVER;
+    if (warm && l<.4 && chroma<.15 && longest>1.) return S_BRONZE_PANEL;
     if (chroma<.035 && l>.12) return seed<.5?S_GALVANIZED:S_BRUSHED_ALUMINUM;
     return green?S_STEEL_PAINTED_GREEN:S_STEEL_PAINTED_GREY;
   }
   if (kind==22) return tint.r>.8 && tint.b<.7?S_TACTILE_PAVING:S_ROAD_PAINT;
-  if (kind==0) return S_PAINTED_METAL;
-  if (kind==8) return S_GLASS_GRIME;
-  if (kind==23) return S_CEPHALOPOD_SKIN;
-  if (kind==18) return S_SEAT_FABRIC;
+  if (kind==0) return l>.8 && thinnest<.06 && longest<.8?S_REFLECTIVE_TAPE:
+    l<.15 && thinnest<.3 && middle>.8 && longest>1.2?S_LED_BILLBOARD_OFF:S_PAINTED_METAL;
+  if (kind==8) return l>.62?(level || ceiling?S_FROSTED_GLASS:seed<.5?S_GLASS_BLOCK:S_CHANNEL_GLASS):S_GLASS_GRIME;
+  // Shop fascia light boxes (the lamps themselves stay untextured).
+  if (kind==3) return middle>.3 && longest>1.4?S_LIGHTBOX_PANEL:-1;
+  if (kind==23) return shape==0 && thinnest<.9?S_SUCKER_SKIN:S_CEPHALOPOD_SKIN;
+  if (kind==18) return cabin?S_SEAT_FABRIC:l<.25?S_NEOPRENE:S_SPORT_MESH;
   if (kind==30) return S_RIPSTOP;
-  if (kind==31) return S_CANVAS;
-  if (kind==21) return S_RUBBER_SOLE;
-  if (kind==20) return S_HARD_PLASTIC;
+  if (kind==31) return longest>.3?S_BALLISTIC_NYLON:S_CANVAS;
+  if (kind==21) return ceiling?S_BOOT_TREAD:thinnest<.07?S_RUBBER_SOLE:l<.3 && longest<.6?S_LEATHER:S_RUBBER_SOLE;
+  if (kind==20) return l<.3?S_CARBON_FIBER:S_HARD_PLASTIC;
+  if (kind==26) return S_DRIED_INK;
   return -1;
 }
 // Lawns, flower beds and sand lots scattered over the outer district.
 int outerPatch(vec2 p,out float weight){
   float n=sfNoise(p*.031+vec2(3.1,7.7));
   weight=0.;
-  if (n<.30) {weight=1.;return S_GRASS;}
+  if (n<.27) {weight=1.;return S_GRASS;}
+  if (n<.31) {weight=smoothstep(.31,.29,n);return S_FALLEN_LEAVES;}
   if (n<.38) {weight=smoothstep(.38,.34,n);return S_SOIL;}
   if (n>.80) {weight=1.;return S_SAND;}
   if (n>.72) {weight=smoothstep(.72,.76,n);return S_MULCH;}
+  if (n>.48 && n<.56) {weight=smoothstep(.48,.51,n)*smoothstep(.56,.53,n);return S_CONCRETE_CRACKED;}
   return -1;
 }
 `;
@@ -496,7 +597,7 @@ vec4 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
 }
 
 // Window interiors: a box room traced behind the glass in local face space.
-vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth){
+vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth,float px){
   vec3 o=vec3(uv-.5,0.);
   vec3 ray=vec3(viewT.xy,max(viewT.z,.05)/depth);
   vec2 safe=sign(ray.xy+1e-5)*max(abs(ray.xy),vec2(1e-4));
@@ -512,6 +613,23 @@ vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth){
   col=mix(col,vec3(.72,.71,.66),ceilHit);
   float furniture=backHit*step(abs(hit.x+.18-seed*.3),.22)*step(hit.y,-.12);
   col=mix(col,vec3(.18,.17,.16),furniture*.85);
+  // Real floors and walls once the interior sheets are loaded: tatami, wood
+  // or carpet underfoot, wallpaper or painted board on the walls.
+  if (uSurfaceSheets>0) {
+    float texels=.5/uSurfaceEdge, metres=1.5;
+    int floorSlot=seed<.33?S_TATAMI:seed<.66?S_WOOD_FLOORING:S_CARPET_TILE;
+    int wallSlot=fract(seed*7.31)<.5?S_VINYL_WALLPAPER:S_GYPSUM_PAINTED;
+    if (floorHit>.5 && surfaceReady(floorSlot)) {
+      float lod=log2(max(px*2.5*texels/S_METERS[floorSlot],1.));
+      vec3 c=toLinear(surfaceLod(floorSlot,hit.xz*metres,lod).rgb);
+      col=c*(.9+seed*.2);
+    } else if (ceilHit<.5 && surfaceReady(wallSlot)) {
+      float lod=log2(max(px*2.*texels/S_METERS[wallSlot],1.));
+      vec2 wp=(backHit>.5?hit.xy:vec2(hit.z,hit.y))*metres;
+      vec3 c=toLinear(surfaceLod(wallSlot,wp,lod).rgb);
+      col*=c/max(toLinear(surfaceMean(wallSlot)),vec3(.02));
+    }
+  }
   float shelf=backHit*step(.18,hit.x)*step(hit.x,.42)*step(abs(fract(hit.y*3.)-.5),.06);
   col=mix(col,vec3(.30,.26,.21),shelf);
   float lamp=ceilHit*smoothstep(.16,.05,length(hit.xz-vec2(0.,.4*depth)));
@@ -667,6 +785,8 @@ void main(){
     float strength=mix(3.2,11.,zoneInterior);
     m.emit=tint*strength*core;
     m.albedo=tint*.4; m.rough=.25;
+    // Light boxes glow through milky acrylic split by a thin frame.
+    if (real) m.emit*=mix(vec3(1.),toLinear(stex.rgb)/max(toLinear(surfaceMean(slot)),vec3(.05)),.75);
   } else if (kind==1 || kind==15 || kind==27) {
     vec4 d1=det(uvW*.31);
     vec4 d2=det(uvW*1.37);
@@ -903,7 +1023,7 @@ void main(){
 #ifdef SAFE
         vec3 room=vec3(.2,.21,.2)*(.7+seed*.5);
 #else
-        vec3 room=roomBehind(fract(uv),vt,seed,on,kind==6?2.2:1.6);
+        vec3 room=roomBehind(fract(uv),vt,seed,on,kind==6?2.2:1.6,px);
 #endif
         float fres=.04+.96*pow(1.-max(dot(n,V),0.),5.);
         m.emit=room*(1.-fres)*mix(kind==6?.22:.34,.9,zoneInterior)*(1.-dirt*.3);
@@ -911,6 +1031,26 @@ void main(){
         float blind=kind==6?step(.7,seed)*smoothstep(.0,.02,fract(uv.y)-.6):0.;
         m.emit*=1.-blind*.7;
         m.albedo=mix(m.albedo,vec3(.62,.6,.55),blind);
+#ifndef SAFE
+        // Apartment windows: slatted blinds, or shoji screens glowing from inside.
+        if (kind==6 && uSurfaceSheets>0) {
+          if (blind>0. && surfaceReady(S_WINDOW_BLINDS))
+            m.albedo=mix(m.albedo,toLinear(surfaceTap(S_WINDOW_BLINDS,uvW,sdx,sdy).rgb)*.85,blind);
+          // Sudare reed blinds hung outside a few windows.
+          float reed=step(.47,seed)*step(seed,.55);
+          if (reed>0. && surfaceReady(S_SUDARE)) {
+            m.albedo=mix(m.albedo,toLinear(surfaceTap(S_SUDARE,uvW,sdx,sdy).rgb)*.8,.88);
+            m.emit*=.3;
+            m.f0=mix(m.f0,.03,.88);
+          }
+          float paper=step(.55,seed)*step(seed,.7);
+          if (paper>0. && surfaceReady(S_SHOJI_PAPER)) {
+            vec3 shoji=toLinear(surfaceTap(S_SHOJI_PAPER,uvW,sdx,sdy).rgb);
+            m.emit=shoji*mix(.16,.55,on)*(1.-fres);
+            m.albedo=mix(m.albedo,shoji*.45,.5);
+          }
+        }
+#endif
       }
     }
   } else if (kind==11) {
@@ -918,6 +1058,10 @@ void main(){
       vec4 d1=det(uvW*.4);
       m.albedo=tint*.72*(.85+d1.r*.25)*mix(1.,.8,smoothstep(.6,.8,stain));
       m.rough=.9;
+      if (real) {
+        m.albedo=realSurface(stex,slot,tint*.72,1.,.01,surfH);
+        relief=1.;
+      }
     } else {
       vec2 fsz=faceSize;
       // Each building picks a facade type from its paint: punched windows,
@@ -929,6 +1073,8 @@ void main(){
       vec2 g=(faceUV+fsz*.5)/cellSz;
       vec2 cell=fract(g), cid=floor(g);
       vec2 fw=fwidth(g);
+      // Face position from its lower corner, for the distant facade photos.
+      vec2 fp=faceUV+fsz*.5, fdx=dFdx(fp), fdy=dFdy(fp);
       vec2 lo=curtain?vec2(.035,.05):ribbon?vec2(.02,.30):vec2(.17,.24);
       vec2 hiE=curtain?vec2(.965,.95):ribbon?vec2(.98,.82):vec2(.83,.86);
       vec2 inW=smoothstep(lo-fw,lo+fw,cell)*(1.-smoothstep(hiE-fw,hiE+fw,cell));
@@ -954,7 +1100,7 @@ void main(){
 #ifdef SAFE
       vec3 room=vec3(.18,.2,.21)*(.8+seed*.4);
 #else
-      vec3 room=detailVis>.01 && !lite?roomBehind(sat(wuv),vt,seed,on,1.4):vec3(.18,.2,.21)*(.8+seed*.4);
+      vec3 room=detailVis>.01 && !lite?roomBehind(sat(wuv),vt,seed,on,1.4,px):vec3(.18,.2,.21)*(.8+seed*.4);
 #endif
       float mull=1.-smoothstep(.006,.014,abs(wuv.x-.5));
       float pane=hash12(cid+.3);
@@ -970,7 +1116,23 @@ void main(){
       m.rough=mix(m.rough,.6,reveal*win);
       m.ao=1.-reveal*win*.5;
       if (detailVis<.99) {
-        m.albedo=mix(mix(wall,vec3(.08,.1,.11),.45),m.albedo,detailVis);
+        // Far away the window grid shrinks below a pixel: show a photographed
+        // facade of the same type instead of a flat average.
+        vec3 far=mix(wall,vec3(.08,.1,.11),.45);
+        float pick=fract(facade*7.3);
+        int farSlot=curtain?(pick<.5?S_REFLECTIVE_GLASS:S_MIRROR_STAINLESS):
+          ribbon || fsz.y>26.?S_FACADE_OFFICE_FAR:
+          // Shop signs only on low buildings standing on the street, not on
+          // the stacked segments of a tower.
+          fsz.y<13. && vPos.y-fp.y<1. && pick<.6?S_FACADE_RETAIL_FAR:S_FACADE_APARTMENT_FAR;
+        if (uSurfaceSheets>0 && surfaceReady(farSlot)) {
+          float hf=0.;
+          far=realSurface(surfaceTap(farSlot,fp,fdx,fdy),farSlot,tint,1.,0.,hf);
+          float glassy=1.-smoothstep(.04,.16,lum(far));
+          m.f0=mix(m.f0,curtain?.11:.06,(1.-detailVis)*(curtain?1.:glassy));
+          m.rough=mix(m.rough,mix(.8,.08,curtain?1.:glassy),1.-detailVis);
+        }
+        m.albedo=mix(far,m.albedo,detailVis);
       }
     }
   } else if (kind==14) {
@@ -1061,6 +1223,10 @@ void main(){
   } else if (kind==26) {
     m.albedo=tint*.95; m.rough=.09; m.clear=.9;
     m.emit=tint*.05;
+    if (real) {
+      m.albedo=realSurface(stex,slot,m.albedo,.35,.002,surfH);
+      relief=.3;
+    }
   } else if (kind==7) {
     float index=vExtra.x;
     vec2 tile=vec2(mod(index,uAtlasGrid.x),floor(index/uAtlasGrid.x));

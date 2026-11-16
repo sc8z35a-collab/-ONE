@@ -1,0 +1,16 @@
+{
+  "source": "supplied",
+  "size": "1254x1254",
+  "received": "2026-11-16",
+  "cells": [
+    "titanium_panel",
+    "copper_patina",
+    "zinc_shingle",
+    "bronze_panel",
+    "spandrel_glass",
+    "reflective_glass",
+    "channel_glass",
+    "woven_mesh",
+    "mirror_stainless"
+  ]
+}

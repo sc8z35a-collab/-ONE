@@ -1,4 +1,17 @@
 {
   "version": 1,
-  "sheets": []
+  "sheets": [
+    "shopfront",
+    "infrastructure",
+    "details",
+    "paving",
+    "cladding",
+    "interior",
+    "outfit",
+    "weathered_walls",
+    "stone_cladding",
+    "metal_facade",
+    "japanese_walls",
+    "green_facade"
+  ]
 }

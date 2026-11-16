@@ -419,6 +419,14 @@ function uniforms(gl, shader, names) {
   return Object.fromEntries(names.map(name => [name,gl.getUniformLocation(shader,name)]));
 }
 
+// The per-texture table (colour and layer of every slot) is one uniform
+// buffer shared by the full and the lightweight scene shaders.
+const SURFACE_TABLE=0;
+function surfaceTable(gl,shader) {
+  const index=gl.getUniformBlockIndex(shader,'SurfaceTable');
+  if (index!==gl.INVALID_INDEX) gl.uniformBlockBinding(shader,index,SURFACE_TABLE);
+}
+
 function samplers(gl,shader,units) {
   gl.useProgram(shader);
   for (const [name,unit] of Object.entries(units)) gl.uniform1i(gl.getUniformLocation(shader,name),unit);
@@ -455,7 +463,7 @@ function labelTexture(gl,anisotropy) {
 
 const SCENE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uShape','uQuality','uHDR','uMirrorPass',
   'uShadowOn','uCascades','uShadowM0','uShadowM1','uShadowTexel','uAtlasGrid','uReflectOn','uViewport','uEnvLod','uClock',
-  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge','uSurfaceMean'];
+  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge'];
 const SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uField','uClock','uInterior','uHDR','uViewport','uExposure'];
 const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9,surface:10,sheet:11};
 // Per pass culling: LOD switch distance, how far small props draw, hard cut.
@@ -470,7 +478,7 @@ const MIRROR_DRAW={lodDist:18,smallDist:24,cull:260};
 export const LITE_LINES=400, ULTRA_LINES=300;
 const LITE_FOG=[.74,.80,.85];
 const LITE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uClock','uAtlasGrid','uUnderX','uUnderY','uCabinX',
-  'uRailCabinX','uCabinY','uInkBounds','uFog','uFogRange','uShape','uSurfaceSheets','uSurfaceEdge','uSurfaceMean'];
+  'uRailCabinX','uCabinY','uInkBounds','uFog','uFogRange','uShape','uSurfaceSheets','uSurfaceEdge'];
 const LITE_SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uFog','uField','uInterior'];
 const ENV_SIZE=[512,256];
 
@@ -514,6 +522,7 @@ export class Renderer {
     this.u = uniforms(gl,this.scene,SCENE_UNIFORMS);
     this.s = uniforms(gl,this.sky,SKY_UNIFORMS);
     this.shadowUniform = gl.getUniformLocation(this.shadow,'uLight');
+    surfaceTable(gl,this.scene);
     samplers(gl,this.scene,{uShadow0:UNIT.shadow0,uInk:UNIT.ink,uAtlas:UNIT.atlas,uReflection:UNIT.reflection,
       uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1,uSurface:UNIT.surface});
     samplers(gl,this.sky,{uDetail:UNIT.detail});
@@ -523,6 +532,7 @@ export class Renderer {
       this.ul=uniforms(gl,this.sceneLite,LITE_UNIFORMS);
       this.sl=uniforms(gl,this.skyLite,LITE_SKY_UNIFORMS);
       samplers(gl,this.sceneLite,{uInk:UNIT.ink,uAtlas:UNIT.atlas,uSurface:UNIT.surface});
+      surfaceTable(gl,this.sceneLite);
     } catch (error) {
       // The full shader still renders the lightweight modes, only slower.
       console.warn('Lightweight shader unavailable',error);
@@ -535,7 +545,14 @@ export class Renderer {
     this.surfaceTexture=null;
     this.surfaceSheets=0;
     this.surfaceSize=0;
-    this.surfaceMeans=new Float32Array(SURFACE_COUNT*3).fill(.5);
+    // Per slot: average colour and texture layer (-1 until its sheet loads).
+    this.surfaceMeans=new Float32Array(SURFACE_COUNT*4).fill(.5);
+    for (let slot=3;slot<this.surfaceMeans.length;slot+=4) this.surfaceMeans[slot]=-1;
+    this.surfaceBuffer=gl.createBuffer();
+    gl.bindBuffer(gl.UNIFORM_BUFFER,this.surfaceBuffer);
+    gl.bufferData(gl.UNIFORM_BUFFER,this.surfaceMeans,gl.DYNAMIC_DRAW);
+    gl.bindBufferBase(gl.UNIFORM_BUFFER,SURFACE_TABLE,this.surfaceBuffer);
+    this.surfaceMeansDirty=false;
     this.inkTexture = gl.createTexture();
     this.inkSource=paint;
     gl.activeTexture(gl.TEXTURE0+UNIT.ink);
@@ -689,7 +706,11 @@ export class Renderer {
     gl.bindSampler(UNIT.surface,this.lite?this.liteSampler:null);
     gl.uniform1i(u.uSurfaceSheets,this.surfaceTexture?sheets:0);
     gl.uniform1f(u.uSurfaceEdge,.5/Math.max(1,this.surfaceSize));
-    gl.uniform3fv(u.uSurfaceMean,this.surfaceMeans);
+    if (this.surfaceMeansDirty) {
+      gl.bindBuffer(gl.UNIFORM_BUFFER,this.surfaceBuffer);
+      gl.bufferSubData(gl.UNIFORM_BUFFER,0,this.surfaceMeans);
+      this.surfaceMeansDirty=false;
+    }
   }
 
   // 'high', 'lite' (400p, no shadows or reflections, short draw distance) or

@@ -1,0 +1,16 @@
+{
+  "source": "supplied",
+  "size": "1254x1254",
+  "received": "2026-11-16",
+  "cells": [
+    "red_asphalt",
+    "green_lane",
+    "exposed_aggregate",
+    "concrete_cracked",
+    "asphalt_patched",
+    "granite_setts",
+    "mossy_pavers",
+    "wet_asphalt",
+    "garage_concrete"
+  ]
+}

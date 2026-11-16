@@ -1,0 +1,16 @@
+{
+  "source": "supplied",
+  "size": "1254x1254",
+  "received": "2026-11-16",
+  "cells": [
+    "aluminum_composite",
+    "metal_louver",
+    "spray_tile",
+    "polished_granite",
+    "yakisugi",
+    "precast_panel",
+    "expanded_metal",
+    "corten_steel",
+    "standing_seam_roof"
+  ]
+}
