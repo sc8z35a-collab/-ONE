@@ -10,7 +10,7 @@ export function cityExit(from,to,margin=0) {
   const a=dx*dx+dz*dz, b=x*dx+z*dz;
   return Math.max(0,Math.min(1,(-b+Math.sqrt(Math.max(0,b*b-a*c)))/a));
 }
-export const SCENE_VERSION=14;
+export const SCENE_VERSION=15;
 export const SCENE_FILE=`scene-07-v${SCENE_VERSION}.json`;
 export const UNDER_BOUNDS=[64,46];
 export const CABIN_BOUNDS=[9.24,1.47];
