@@ -119,7 +119,7 @@ export async function loadSurfaceSheets(renderer,{size=512,units,base=''}={}) {
       if (response.ok) listed=(await response.json()).sheets ?? [];
     } catch { return 0; }
     const wanted=SURFACE_SHEETS.map((sheet,index)=>({sheet,index})).filter(({sheet})=>listed.includes(sheet.id))
-      .map((entry,order)=>({...entry,base:order*9}));
+      .map((entry,order)=>({...entry,first:order*9}));
     if (!wanted.length) return 0;
     if (!renderer.surfaceTexture || renderer.surfaceSize!==size || renderer.surfaceLayers!==wanted.length*9) {
       if (renderer.surfaceTexture) gl.deleteTexture(renderer.surfaceTexture);
@@ -129,13 +129,13 @@ export async function loadSurfaceSheets(renderer,{size=512,units,base=''}={}) {
       renderer.surfaceSheets=0;
       for (let slot=3;slot<renderer.surfaceMeans.length;slot+=4) renderer.surfaceMeans[slot]=-1;
     }
-    for (const {sheet,index,base} of wanted) {
+    for (const {sheet,index,first} of wanted) {
       try {
         const response=await fetch(base+'textures/'+sheet.id+'.webp?v='+TEXTURE_VERSION);
         if (!response.ok) continue;
         const image=await createImageBitmap(await response.blob(),{premultiplyAlpha:'none',colorSpaceConversion:'none'});
         if (gl.isContextLost()) return renderer.surfaceSheets;
-        cutSheet(renderer,image,index,base,units);
+        cutSheet(renderer,image,index,first,units);
         image.close?.();
         renderer.surfaceSheets|=1<<index;
       } catch (error) {
