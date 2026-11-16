@@ -75,12 +75,14 @@ int surfaceFor(int kind,vec3 tint,vec3 ng,float seed,vec3 size,int shape,bool un
   if (kind==1) {
     if (cabin) return S_VINYL_FLOOR;
     if (layer>3.5 && layer<4.5) return S_BALLAST;
+    // Tops of barriers and low blocks are concrete, not floor finishes.
+    if (size.y>.3 && longest<6.) return S_CONCRETE_WEATHERED;
     // The three walk-in apartments: wood, carpet and tatami rooms.
     if (!under && size.y<.05 && longest>8. && middle>4.) return warm && chroma>.15?S_WOOD_FLOORING:green || blue?S_CARPET_TILE:S_TATAMI;
     if (under) {
       if (longest>60. && middle<4.5) return S_BALLAST;
       if (shape==2) return S_RUBBER_STUD_FLOOR;
-      if (l>.55) return longest<12.?S_CHECKER_TILE:seed<.34?S_PORCELAIN_TILES:seed<.67?S_TERRAZZO:S_MARBLE;
+      if (l>.55) return longest<12. && size.y<.2 && middle>1.5?S_CHECKER_TILE:seed<.34?S_PORCELAIN_TILES:seed<.67?S_TERRAZZO:S_MARBLE;
       return seed<.4?S_EPOXY_FLOOR:seed<.7?S_POLISHED_CONCRETE:S_GARAGE_CONCRETE;
     }
     if (warm && chroma>.07) return seed<.75?S_BRICK_PAVERS:S_GRANITE_SETTS;
