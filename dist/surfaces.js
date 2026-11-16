@@ -1,7 +1,8 @@
-// The realistic surface textures. Six sheets of nine: each sheet is one
-// generated 3×3 image (gpt-image-2.5-sunburst, see the texture-sheets skill),
-// cut into nine texture layers when the game loads. A texture's place in this
-// list is its layer index in the renderer and its slot in the shaders.
+// The realistic surface textures. Thirteen sheets of nine: each sheet is one
+// 3×3 image (generated with gpt-image-2.5-sunburst, see the texture-sheets
+// skill, or supplied as a finished image), cut into nine texture layers when
+// the game loads. A texture's place in this list is its slot in the shaders;
+// only sheets that are actually shipped take up GPU memory.
 //
 // meters:  real-world size of one texture repeat.
 // pattern: a regular grid (tiles, bricks, planks). These repeat by mirroring
@@ -9,8 +10,11 @@
 //          tile when they are loaded instead.
 // take:    0 keeps the object's own paint colour and only adds the texture's
 //          detail; 1 uses the texture's real colours at the object's brightness.
+// crop:    optional [left, top, right, bottom] window inside the cell (0–1), for
+//          cells whose image shows edges, objects or perspective around the
+//          usable flat surface.
 
-export const TEXTURE_VERSION=1;
+export const TEXTURE_VERSION=2;
 // Cells are cut a little inside their borders, in case the image has thin gaps.
 export const CELL_INSET=.035;
 
@@ -80,6 +84,83 @@ export const SURFACE_SHEETS=[
     {id:'cephalopod_skin',meters:1.2,take:.3,prompt:'giant squid skin close-up, glossy purple-pink skin covered with tiny chromatophore dots and soft mottling'},
     {id:'road_paint',meters:1,take:.4,prompt:'worn white thermoplastic road marking paint on asphalt, cracked and partly abraded'},
     {id:'glass_grime',meters:1.4,take:.2,prompt:'dirty window glass seen against a dark background, dust, rain spots and smudges'}
+  ]},
+  {id:'shopfront',title:'Shops and homes',cells:[
+    {id:'rolling_shutter',meters:2,take:.45,pattern:true,prompt:'closed steel roller shutter of a Japanese shop, horizontal ribbed slats, worn grey paint with small rust patches'},
+    {id:'awning_canvas',meters:1,take:.15,pattern:true,crop:[0,0,1,.86],prompt:'faded red and cream striped awning canvas, vertical stripes, light grime, flat and filling the frame'},
+    {id:'ceramic_siding',meters:1.8,take:.55,pattern:true,prompt:'Japanese fibre-cement siding with a stacked stone pattern, beige and grey stones'},
+    {id:'frosted_glass',meters:1.2,take:.3,prompt:'frosted balcony glass panel seen straight on, misty translucent surface with rain streaks and droplets'},
+    {id:'wood_flooring',meters:1.6,take:.7,pattern:true,prompt:'light oak hardwood floorboards in a staggered pattern, natural grain and fine joints'},
+    {id:'window_blinds',meters:1,take:.35,pattern:true,prompt:'closed white horizontal venetian blind slats with thin cords, seen from the front'},
+    {id:'carbon_fiber',meters:.2,take:.3,pattern:true,prompt:'black twill-weave carbon fibre composite, glossy diagonal weave'},
+    {id:'knurled_grip',meters:.08,take:.25,pattern:true,prompt:'dark metal diamond knurling of a handle grip, fine raised diamond pattern'},
+    {id:'cardboard',meters:.6,take:.8,prompt:'brown corrugated cardboard box surface with clear packing tape, creases and dents'}
+  ]},
+  {id:'infrastructure',title:'Roofs, overpass and track',cells:[
+    {id:'roof_membrane',meters:3,take:.5,prompt:'grey bituminous roof waterproofing membrane with overlapping seams, patches and a dark water stain'},
+    {id:'roof_gravel',meters:1,take:.85,prompt:'rounded protective roof gravel, grey and beige pebbles seen from above'},
+    {id:'concrete_soffit',meters:3.2,take:.55,crop:[.08,0,.9,.66],prompt:'underside of a concrete highway deck seen straight on, formwork seams, white efflorescence drips and dark water stains'},
+    {id:'granite_curb',meters:.8,take:.7,crop:[.3,.32,1,.84],prompt:'rough grey and white speckled granite kerbstone face'},
+    {id:'stone_retaining',meters:2,take:.7,pattern:true,prompt:'old cut stone retaining wall, rectangular grey granite blocks with moss in the joints'},
+    {id:'rail_steel',meters:.9,take:.6,pattern:true,crop:[0,.2,1,.58],prompt:'worn steel rail head, polished running band along the rail with rusty brown sides'},
+    {id:'concrete_sleeper',meters:.9,take:.6,crop:[.15,.3,.85,.68],prompt:'weathered precast concrete railway sleeper surface with chipped edges and grime'},
+    {id:'tunnel_lining',meters:4,take:.6,crop:[.32,.05,1,.88],prompt:'sooty concrete tunnel lining panels with dark seepage streaks and white mineral stains'},
+    {id:'parking_asphalt',meters:4,take:.8,prompt:'parking lot asphalt with dark oil stains and faint tyre marks'}
+  ]},
+  {id:'details',title:'Street details and Japanese rooms',cells:[
+    {id:'cast_iron',meters:.5,take:.7,crop:[.2,.2,.8,.8],prompt:'rusty cast iron manhole cover with a raised anti-slip bar pattern'},
+    {id:'kawara_tile',meters:1.2,take:.75,pattern:true,prompt:'grey Japanese kawara roof tiles in overlapping wavy rows'},
+    {id:'tatami',meters:.9,take:.8,pattern:true,prompt:'tatami mat surface, woven rush straw in fine parallel rows, pale green-beige'},
+    {id:'shoji_paper',meters:1,take:.8,pattern:true,prompt:'Japanese shoji screen, white washi paper panels in a thin wooden lattice'},
+    {id:'carpet_tile',meters:1,take:.6,pattern:true,prompt:'dark grey office carpet tiles with alternating ribbed directions'},
+    {id:'glass_block',meters:.6,take:.5,pattern:true,prompt:'clear wavy glass blocks in a grid with light mortar joints'},
+    {id:'fallen_leaves',meters:1.2,take:.9,prompt:'fallen autumn leaves on wet pavement, red, yellow and brown leaves'},
+    {id:'painted_wood',meters:1,take:.75,pattern:true,prompt:'vertical wooden fence boards with peeling pale blue paint and nail heads'},
+    {id:'leather',meters:.4,take:.4,prompt:'black synthetic leather with fine grain and faint scuffs'}
+  ]},
+  {id:'paving',title:'Paving and road surfaces',cells:[
+    {id:'red_asphalt',meters:1.2,take:.8,prompt:'red coloured asphalt of a bus lane, fine red aggregate'},
+    {id:'green_lane',meters:1.2,take:.8,prompt:'green coloured asphalt of a cycle lane, fine green aggregate'},
+    {id:'exposed_aggregate',meters:.8,take:.75,prompt:'exposed aggregate concrete with rounded multicoloured pebbles'},
+    {id:'concrete_cracked',meters:2.4,take:.6,prompt:'old grey concrete slab with a dense network of cracks and stains'},
+    {id:'asphalt_patched',meters:3,take:.8,prompt:'dark asphalt road with many rectangular patch repairs in different shades'},
+    {id:'granite_setts',meters:1.2,take:.7,pattern:true,prompt:'small grey granite setts laid in rows with dark joints'},
+    {id:'mossy_pavers',meters:1.4,take:.7,pattern:true,prompt:'grey concrete pavers in running bond with green moss and weeds in the joints'},
+    {id:'wet_asphalt',meters:1.4,take:.85,prompt:'wet dark asphalt after rain, glossy aggregate'},
+    {id:'garage_concrete',meters:3,take:.6,prompt:'grey garage concrete floor with oil stains and tyre marks'}
+  ]},
+  {id:'cladding',title:'Building cladding',cells:[
+    {id:'aluminum_composite',meters:2.4,take:.4,pattern:true,prompt:'silver aluminium composite facade panels with thin recessed joints'},
+    {id:'metal_louver',meters:1,take:.4,pattern:true,prompt:'horizontal aluminium louvres with deep shadow gaps'},
+    {id:'spray_tile',meters:1.4,take:.35,pattern:true,prompt:'textured spray-coated exterior wall with an embossed square grid, off-white'},
+    {id:'polished_granite',meters:1.2,take:.75,prompt:'polished black and grey speckled granite cladding'},
+    {id:'yakisugi',meters:1.4,take:.85,pattern:true,prompt:'yakisugi charred cedar boards, vertical, black alligator-cracked char'},
+    {id:'precast_panel',meters:3,take:.45,pattern:true,prompt:'smooth grey precast concrete panels with joints and round tie holes'},
+    {id:'expanded_metal',meters:.5,take:.45,pattern:true,prompt:'expanded metal mesh with diamond openings, silver over a dark background'},
+    {id:'corten_steel',meters:2,take:.85,prompt:'weathering steel plate with an even orange-brown rust patina'},
+    {id:'standing_seam_roof',meters:2.4,take:.4,pattern:true,prompt:'dark slate-blue standing seam metal roof with vertical seams'}
+  ]},
+  {id:'interior',title:'Shop and station interiors',cells:[
+    {id:'marble',meters:1.6,take:.7,prompt:'white Carrara marble with grey veins, polished'},
+    {id:'checker_tile',meters:1.2,take:.9,pattern:true,prompt:'black and white checkerboard floor tiles'},
+    {id:'glass_mosaic',meters:.5,take:.85,pattern:true,prompt:'turquoise and blue glass mosaic tiles in a square grid'},
+    {id:'rubber_stud_floor',meters:.9,take:.6,pattern:true,prompt:'black rubber flooring with raised round studs in a grid'},
+    {id:'polished_concrete',meters:2.4,take:.5,prompt:'polished grey concrete floor with fine aggregate specks'},
+    {id:'vinyl_wallpaper',meters:.8,take:.25,prompt:'off-white vinyl wallpaper with a fine woven linen texture'},
+    {id:'laminate_counter',meters:1.2,take:.5,prompt:'light grey speckled laminate counter top with stone chips'},
+    {id:'pegboard',meters:1,take:.7,pattern:true,prompt:'brown hardboard pegboard with evenly spaced round holes'},
+    {id:'gypsum_painted',meters:1.6,take:.2,prompt:'white painted plasterboard wall with a very fine matte texture'}
+  ]},
+  {id:'outfit',title:'Crew gear and creatures',cells:[
+    {id:'neoprene',meters:.3,take:.15,prompt:'black neoprene wetsuit fabric with a fine jersey knit'},
+    {id:'sport_mesh',meters:.12,take:.2,pattern:true,prompt:'black athletic air mesh fabric with oval openings'},
+    {id:'ballistic_nylon',meters:.15,take:.2,pattern:true,prompt:'black ballistic nylon with a heavy basket weave'},
+    {id:'anodized_aluminum',meters:.4,take:.2,prompt:'blue anodised brushed aluminium with fine horizontal brushing'},
+    {id:'cerakote',meters:.4,take:.15,prompt:'olive drab matte ceramic gun coating, smooth and slightly mottled'},
+    {id:'reflective_tape',meters:.2,take:.3,pattern:true,prompt:'silver retroreflective safety tape with a hexagonal prism pattern'},
+    {id:'boot_tread',meters:.25,take:.3,pattern:true,prompt:'black rubber boot sole tread with chevron lugs'},
+    {id:'sucker_skin',meters:.5,take:.4,pattern:true,prompt:'octopus tentacle skin covered in pink round suckers'},
+    {id:'dried_ink',meters:1,take:.1,prompt:'dried dark ink film with a network of cracks, slight sheen'}
   ]}
 ];
 

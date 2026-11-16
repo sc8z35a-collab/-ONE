@@ -185,10 +185,14 @@ test('a finishing ink hit is marked for the larger splat effect',()=>{
   assert.equal(b.inkImpacts.at(-1).kind,2);
 });
 
-test('54 generated textures in six 3×3 sheets, every one of them used by the city shader',()=>{
-  assert.equal(SURFACE_SHEETS.length,6);
+test('117 textures in thirteen 3×3 sheets, every one of them used by the city shader',()=>{
+  assert.equal(SURFACE_SHEETS.length,13);
   assert(SURFACE_SHEETS.every(sheet=>sheet.cells.length===9));
-  assert.equal(new Set(SURFACES.map(surface=>surface.id)).size,54);
+  assert.equal(new Set(SURFACES.map(surface=>surface.id)).size,117);
+  for (const surface of SURFACES) if (surface.crop) {
+    const [left,top,right,bottom]=surface.crop;
+    assert(left>=0 && top>=0 && right<=1 && bottom<=1 && right-left>.3 && bottom-top>.3,surface.id+' crop');
+  }
   for (const surface of SURFACES) {
     const name='S_'+surface.id.toUpperCase();
     assert(SCENE_FRAGMENT.split(name).length>2,surface.id+' is never picked');

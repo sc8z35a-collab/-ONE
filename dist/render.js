@@ -535,7 +535,9 @@ export class Renderer {
     this.surfaceTexture=null;
     this.surfaceSheets=0;
     this.surfaceSize=0;
-    this.surfaceMeans=new Float32Array(SURFACE_COUNT*3).fill(.5);
+    // Per slot: average colour and texture layer (-1 until its sheet loads).
+    this.surfaceMeans=new Float32Array(SURFACE_COUNT*4).fill(.5);
+    for (let slot=3;slot<this.surfaceMeans.length;slot+=4) this.surfaceMeans[slot]=-1;
     this.inkTexture = gl.createTexture();
     this.inkSource=paint;
     gl.activeTexture(gl.TEXTURE0+UNIT.ink);
@@ -689,7 +691,7 @@ export class Renderer {
     gl.bindSampler(UNIT.surface,this.lite?this.liteSampler:null);
     gl.uniform1i(u.uSurfaceSheets,this.surfaceTexture?sheets:0);
     gl.uniform1f(u.uSurfaceEdge,.5/Math.max(1,this.surfaceSize));
-    gl.uniform3fv(u.uSurfaceMean,this.surfaceMeans);
+    gl.uniform4fv(u.uSurfaceMean,this.surfaceMeans);
   }
 
   // 'high', 'lite' (400p, no shadows or reflections, short draw distance) or

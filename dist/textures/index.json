@@ -1,4 +1,12 @@
 {
   "version": 1,
-  "sheets": []
+  "sheets": [
+    "shopfront",
+    "infrastructure",
+    "details",
+    "paving",
+    "cladding",
+    "interior",
+    "outfit"
+  ]
 }

@@ -54,11 +54,12 @@ async function request(prompt,size) {
   return {bytes:Buffer.from(body.data[0].b64_json,'base64'),usage:body.usage ?? null};
 }
 
-// The full-size original is kept in textures/source; the game ships a
-// 1536×1536 copy (its texture layers are at most 512 px).
+// The full-size original is kept in textures/source; the game ships a copy
+// of at most 1536×1536 (its texture layers are at most 512 px). Smaller
+// originals, such as supplied sheets, are never upscaled.
 function ship(source,target) {
   try {
-    execFileSync('ffmpeg',['-v','error','-y','-i',source,'-vf',`scale=${SHIPPED}:${SHIPPED}:flags=lanczos`,'-c:v','libwebp','-quality','88',target]);
+    execFileSync('ffmpeg',['-v','error','-y','-i',source,'-vf',`scale='min(iw,${SHIPPED})':'min(ih,${SHIPPED})':flags=lanczos`,'-c:v','libwebp','-quality','88',target]);
   } catch {
     copyFileSync(source,target);
     console.warn('  ffmpeg with libwebp not found: shipped the full-size image');
