@@ -1172,11 +1172,13 @@ test('ink from a KO lands on the occupied prop without awarding ground turf belo
 test('a tentacle hit cannot knock a crew member into a closed train',()=>{
   const b=new RoomEngine(options).battle, target=b.actors[4], rail=b.transit,line=rail.line;
   b.raiders.spawn();
-  const a=b.raiders.members[0], z=line.z-2.3;
+  // Struck from the platform side, towards the train (the alleys behind the
+  // track are sealed, so nobody can stand on the far side any more).
+  const a=b.raiders.members[0], z=line.z+2.3;
   Object.assign(target,{x:line.center+rail.train.x,y:line.y+.95,z,shield:0});
-  Object.assign(a,{x:target.x,y:target.y,z:z-2.4});
-  assert(!rail.blocksActor(target) && rail.blocksActor({...target,z:z+.65}));
-  b.raiders.resolve(a,{giant:false,yaw:Math.PI});
+  Object.assign(a,{x:target.x,y:target.y,z:z+2.4});
+  assert(!rail.blocksActor(target) && rail.blocksActor({...target,z:z-.65}));
+  b.raiders.resolve(a,{giant:false,yaw:0});
   assert(target.hp<100);
   assert.equal(target.z,z);
   assert(!rail.blocksActor(target));

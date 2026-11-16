@@ -69,6 +69,7 @@ export class World {
       this.build();
       buildRail(this);
       buildStairs(this,0);
+      this.sealAlleys();
       renderer.zone=1;
       buildUnderground(this);
       buildMetro(this);
@@ -100,6 +101,49 @@ export class World {
       renderer.seal();
     } else new World(renderer);
     this.r=renderer;
+  }
+
+  // Neighbouring buildings with a narrow gap between them get an infill wall,
+  // so nobody (squid form included) can slip into an alley the camera cannot
+  // follow. Wider passages stay open.
+  sealAlleys(maxGap=2.6,inset=.12) {
+    const ground=this.solids.filter(b=>zoneOf(b.min[0])===0);
+    // A building's full height: the tallest solid stacked over its footprint.
+    const height=b=>{
+      const x=(b.min[0]+b.max[0])/2, z=(b.min[2]+b.max[2])/2;
+      let top=b.max[1];
+      for (const c of ground) if (x>c.min[0] && x<c.max[0] && z>c.min[2] && z<c.max[2] && c.min[1]<=top+.3) top=Math.max(top,c.max[1]);
+      return top;
+    };
+    const buildings=ground.filter(b=>b.min[1]<.5 && b.max[1]>2.4 && b.max[0]-b.min[0]>1.2 && b.max[2]-b.min[2]>1.2)
+      .map(b=>Object.assign(Object.create(null),{min:b.min,max:[b.max[0],height(b),b.max[2]]}));
+    const fills=[];
+    for (let i=0;i<buildings.length;i++) for (let j=i+1;j<buildings.length;j++) {
+      const a=buildings[i], b=buildings[j];
+      for (const k of [0,2]) {
+        const o=2-k, [first,second]=a.max[k]<=b.min[k]?[a,b]:[b,a];
+        const from=first.max[k], to=second.min[k];
+        if (to-from<=.05 || to-from>=maxGap) continue;
+        const lo=Math.max(a.min[o],b.min[o])+inset, hi=Math.min(a.max[o],b.max[o])-inset;
+        if (hi-lo<.6) continue;
+        fills.push({k,from,to,lo,hi,top:Math.min(a.max[1],b.max[1])});
+      }
+    }
+    // Several solids of one building can face the same gap: merge their fills.
+    const merged=[];
+    for (const fill of fills.sort((p,q)=>p.k-q.k || p.from-q.from || p.lo-q.lo)) {
+      const last=merged.find(m=>m.k===fill.k && Math.abs(m.from-fill.from)<.02 && Math.abs(m.to-fill.to)<.02 && fill.lo<=m.hi+.01);
+      if (last) {
+        last.hi=Math.max(last.hi,fill.hi);
+        last.top=Math.max(last.top,fill.top);
+      } else merged.push({...fill});
+    }
+    for (const {k,from,to,lo,hi,top} of merged) {
+      const across=(from+to)/2, along=(lo+hi)/2, span=to-from, length=hi-lo;
+      if (k===0) this.solid(across,top/2,along,span,top,length,0xb1b0a4,2);
+      else this.solid(along,top/2,across,length,top,span,0xb1b0a4,2);
+    }
+    return merged.length;
   }
 
   obstacle(x,y,z,w,h,d,ray = true,paintLayer=undefined) {
