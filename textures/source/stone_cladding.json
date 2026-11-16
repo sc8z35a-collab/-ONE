@@ -1,0 +1,16 @@
+{
+  "source": "supplied",
+  "size": "1254x1254",
+  "received": "2026-11-16",
+  "cells": [
+    "travertine",
+    "sandstone_panel",
+    "slate_cladding",
+    "nichokake_tile",
+    "glazed_brick_tile",
+    "terracotta_louver",
+    "gabion_wall",
+    "split_face_block",
+    "cast_stone"
+  ]
+}

@@ -7,6 +7,11 @@
     "paving",
     "cladding",
     "interior",
-    "outfit"
+    "outfit",
+    "weathered_walls",
+    "stone_cladding",
+    "metal_facade",
+    "japanese_walls",
+    "green_facade"
   ]
 }

@@ -88,7 +88,7 @@ function cutSheet(renderer,image,index,base,units) {
     const cell=SURFACE_SHEETS[index].cells[i], [left,top,right,bottom]=cell.crop ?? [0,0,1,1];
     gl.framebufferTextureLayer(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,renderer.surfaceTexture,0,base+i);
     gl.uniform4f(kit.cell,(i%3)/3+inset+left*span,Math.floor(i/3)/3+inset+top*span,(right-left)*span,(bottom-top)*span);
-    gl.uniform1i(kit.seamless,cell.pattern?0:1);
+    gl.uniform1i(kit.seamless,cell.pattern || cell.repeat?0:1);
     gl.drawArrays(gl.TRIANGLES,0,3);
   }
   gl.bindVertexArray(null);
@@ -104,6 +104,7 @@ function cutSheet(renderer,image,index,base,units) {
     gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);
     renderer.surfaceMeans.set([pixel[0]/255,pixel[1]/255,pixel[2]/255,base+i],(index*9+i)*4);
   }
+  renderer.surfaceMeansDirty=true;
   gl.bindFramebuffer(gl.FRAMEBUFFER,null);
 }
 
@@ -128,6 +129,7 @@ export async function loadSurfaceSheets(renderer,{size=512,units,base=''}={}) {
       renderer.surfaceLayers=wanted.length*9;
       renderer.surfaceSheets=0;
       for (let slot=3;slot<renderer.surfaceMeans.length;slot+=4) renderer.surfaceMeans[slot]=-1;
+      renderer.surfaceMeansDirty=true;
     }
     for (const {sheet,index,first} of wanted) {
       try {

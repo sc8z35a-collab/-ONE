@@ -185,10 +185,12 @@ test('a finishing ink hit is marked for the larger splat effect',()=>{
   assert.equal(b.inkImpacts.at(-1).kind,2);
 });
 
-test('117 textures in thirteen 3×3 sheets, every one of them used by the city shader',()=>{
-  assert.equal(SURFACE_SHEETS.length,13);
+test('162 textures in eighteen 3×3 sheets, every one of them used by the city shader',()=>{
+  assert.equal(SURFACE_SHEETS.length,18);
   assert(SURFACE_SHEETS.every(sheet=>sheet.cells.length===9));
-  assert.equal(new Set(SURFACES.map(surface=>surface.id)).size,117);
+  assert.equal(new Set(SURFACES.map(surface=>surface.id)).size,162);
+  // Exact-period crops tile as they are, so they must be patterns with a crop.
+  for (const surface of SURFACES) if (surface.repeat) assert(surface.pattern && surface.crop,surface.id+' repeat');
   for (const surface of SURFACES) if (surface.crop) {
     const [left,top,right,bottom]=surface.crop;
     assert(left>=0 && top>=0 && right<=1 && bottom<=1 && right-left>.3 && bottom-top>.3,surface.id+' crop');

@@ -5,8 +5,8 @@ description: Generate realistic surface textures for INK//SHIFT with OpenAI's gp
 
 # Texture sheets
 
-The game's realistic surfaces come from thirteen images ("sheets"). Each
-sheet is a 3×3 grid of nine textures, so thirteen sheets give the 117 textures
+The game's realistic surfaces come from eighteen images ("sheets"). Each
+sheet is a 3×3 grid of nine textures, so eighteen sheets give the 162 textures
 the game uses. A sheet is either generated with this skill or supplied as a
 finished image (see "Supplied sheets"). When the game loads, it cuts every sheet into its nine textures,
 blends the irregular ones (asphalt, concrete, grass…) into seamless tiles,
@@ -14,7 +14,7 @@ and mirrors the regular patterns (bricks, tiles, planks…) as they repeat.
 
 | File | Role |
 | --- | --- |
-| `dist/surfaces.js` | The 117 textures: id, prompt, real-world size (`meters`), `pattern`, `take`, optional `crop`. Their order is their slot in the shaders. |
+| `dist/surfaces.js` | The 162 textures: id, prompt, real-world size (`meters`), `pattern`, `take`, optional `crop` and `repeat`. Their order is their slot in the shaders. |
 | `.claude/skills/texture-sheets/scripts/generate.mjs` | Calls the API, keeps the original in `textures/source/`, ships a 1536×1536 copy to `dist/textures/`, updates `dist/textures/index.json`. |
 | `dist/surface-textures.js` | Loads the listed sheets and cuts them into a texture array. |
 | `dist/render-shaders.js` (`surfaceFor`) | Picks a texture for every surface from its material, colour, shape and place. |
@@ -61,7 +61,7 @@ Edit the cell in `dist/surfaces.js` (prompt, `meters`, `pattern`, `take`),
 bump `TEXTURE_VERSION`, regenerate that sheet with `--force`, and — for a new
 material — return its slot from `surfaceFor` in `dist/render-shaders.js`.
 Every texture must be used by some surface; the test suite checks that each
-of the 117 slots is referenced by the full shader.
+of the 162 slots is referenced by the full shader.
 
 ## Supplied sheets
 
@@ -72,3 +72,6 @@ supplied, so the script never regenerates it) and at
 `dist/textures/index.json`. Cells whose image shows edges, objects or
 perspective around the usable surface get a `crop: [left, top, right, bottom]`
 window (fractions of the cell). Only listed sheets take GPU memory.
+Building fronts and scale shingles mirror badly (every other storey would
+turn upside down), so their crop spans an exact number of periods, measured
+on the image, and they carry `repeat: true` to tile without mirroring.

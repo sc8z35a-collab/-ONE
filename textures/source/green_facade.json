@@ -1,0 +1,16 @@
+{
+  "source": "supplied",
+  "size": "1254x1254",
+  "received": "2026-11-16",
+  "cells": [
+    "green_wall",
+    "ivy_wall",
+    "solar_panel",
+    "led_billboard_off",
+    "lightbox_panel",
+    "rooftop_deck",
+    "facade_office_far",
+    "facade_apartment_far",
+    "facade_retail_far"
+  ]
+}
