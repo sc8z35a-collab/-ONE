@@ -4,7 +4,7 @@
 // surface texture stays filtered at every distance.
 import {FILM_HEIGHT_ORIGIN,FILM_HEIGHT_STEP,FILM_HEIGHT_TOLERANCE} from './ink-fluid.js';
 import {CABIN_Y,CITY_RADIUS,UNDER_X,UNDER_Y} from './layout.js';
-import {SURFACES} from './surfaces.js';
+import {SURFACES,smallSurface} from './surfaces.js';
 
 const f=n=>Number(n).toFixed(4);
 const floats=(name,values)=>`const float ${name}[${values.length}]=float[${values.length}](${values.map(f).join(',')});`;
@@ -17,9 +17,12 @@ ${SURFACES.map((surface,i)=>`const int S_${surface.id.toUpperCase()}=${i};`).joi
 ${floats('S_METERS',SURFACES.map(surface=>surface.meters))}
 ${floats('S_MIRROR',SURFACES.map(surface=>surface.pattern && !surface.repeat?1:0))}
 ${floats('S_TAKE',SURFACES.map(surface=>surface.take))}
+${floats('S_SMALL',SURFACES.map(surface=>smallSurface(surface)?1:0))}
+// Large surfaces and small parts live in two arrays of different sizes.
 uniform highp sampler2DArray uSurface;
+uniform highp sampler2DArray uSurfaceSmall;
 uniform int uSurfaceSheets;
-uniform float uSurfaceEdge;
+uniform vec2 uSurfaceEdge;
 // Per slot: average colour (rgb) and texture-array layer (a, -1 = not loaded).
 // A uniform block, so the table can grow without eating into the plain
 // uniform space that small mobile GPUs keep tight (224 vectors at minimum).
@@ -30,14 +33,22 @@ bool surfaceReady(int slot){return slot>=0 && uSurfaceMean[slot].a>-.5;}
 vec4 surfaceTap(int slot,vec2 p,vec2 dx,vec2 dy){
   float s=1./S_METERS[slot];
   vec2 uv=p*s;
-  if (S_MIRROR[slot]>.5) uv=clamp(1.-abs(1.-mod(uv,2.)),uSurfaceEdge,1.-uSurfaceEdge);
-  return textureGrad(uSurface,vec3(uv,uSurfaceMean[slot].a),dx*s,dy*s);
+  bool small=S_SMALL[slot]>.5;
+  float edge=small?uSurfaceEdge.y:uSurfaceEdge.x;
+  if (S_MIRROR[slot]>.5) uv=clamp(1.-abs(1.-mod(uv,2.)),edge,1.-edge);
+  vec3 at=vec3(uv,uSurfaceMean[slot].a);
+  if (small) return textureGrad(uSurfaceSmall,at,dx*s,dy*s);
+  return textureGrad(uSurface,at,dx*s,dy*s);
 }
 // For places without usable derivatives (rooms traced behind windows).
 vec4 surfaceLod(int slot,vec2 p,float lod){
   vec2 uv=p/S_METERS[slot];
-  if (S_MIRROR[slot]>.5) uv=clamp(1.-abs(1.-mod(uv,2.)),uSurfaceEdge,1.-uSurfaceEdge);
-  return textureLod(uSurface,vec3(uv,uSurfaceMean[slot].a),lod);
+  bool small=S_SMALL[slot]>.5;
+  float edge=small?uSurfaceEdge.y:uSurfaceEdge.x;
+  if (S_MIRROR[slot]>.5) uv=clamp(1.-abs(1.-mod(uv,2.)),edge,1.-edge);
+  vec3 at=vec3(uv,uSurfaceMean[slot].a);
+  if (small) return textureLod(uSurfaceSmall,at,lod);
+  return textureLod(uSurface,at,lod);
 }
 vec3 surfaceMean(int slot){return uSurfaceMean[slot].rgb;}
 float sfLum(vec3 c){return dot(c,vec3(.2126,.7152,.0722));}
@@ -50,6 +61,14 @@ float sfNoise(vec2 p){
 }
 // tint: the instance colour as stored (sRGB). Returns -1 for surfaces that
 // keep their procedural look (lights, glass panes with rooms, ink, labels).
+// Apartment blocks (kind 10): the front wears its style (residential.js
+// APARTMENT_STYLES), the back the access corridors, the ends a gable wall.
+int apartmentSlot(int style,int face){
+  if (face==1) return S_APT_CORRIDOR;
+  if (face==2) return S_APT_ENDWALL;
+  return style==0?S_APT_BALCONY:style==1?S_APT_LOGGIA:style==2?S_APT_RIBBON:style==3?S_APT_FINS:
+    style==4?S_APT_SCREEN:style==5?S_APT_BRICK:S_APT_GLASS;
+}
 // Flat roofs: membrane, gravel, timber decks and a few solar arrays.
 int roofFor(float seed){return seed<.45?S_ROOF_MEMBRANE:seed<.7?S_ROOF_GRAVEL:seed<.87?S_ROOFTOP_DECK:S_SOLAR_PANEL;}
 int surfaceFor(int kind,vec3 tint,vec3 ng,float seed,vec3 size,int shape,bool under,bool cabin,float layer,float above){
@@ -536,6 +555,7 @@ uniform vec2 uInkTexel;
 uniform vec2 uInkBounds;
 uniform float uExposure;
 uniform float uTrainShift;
+uniform float uDrawFar;
 out vec4 frag;
 
 ${SURFACE_HIGH}
@@ -616,7 +636,7 @@ vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth,float px
   // Real floors and walls once the interior sheets are loaded: tatami, wood
   // or carpet underfoot, wallpaper or painted board on the walls.
   if (uSurfaceSheets>0) {
-    float texels=.5/uSurfaceEdge, metres=1.5;
+    float texels=.5/uSurfaceEdge.x, metres=1.5;
     int floorSlot=seed<.33?S_TATAMI:seed<.66?S_WOOD_FLOORING:S_CARPET_TILE;
     int wallSlot=fract(seed*7.31)<.5?S_VINYL_WALLPAPER:S_GYPSUM_PAINTED;
     if (floorHit>.5 && surfaceReady(floorSlot)) {
@@ -1135,6 +1155,41 @@ void main(){
         m.albedo=mix(far,m.albedo,detailVis);
       }
     }
+  } else if (kind==10) {
+    // Apartment blocks are single boxes: the drawn facade sheet supplies the
+    // balconies, windows, corridors and gable walls. Each face fits a whole
+    // number of dwelling units across, two storeys per repeat.
+    vec2 fsz=faceSize, fp=faceUV+fsz*.5, fdx=dFdx(fp), fdy=dFdy(fp);
+    if (an.y>.55) {
+      m.albedo=tint*.66;
+      m.rough=.9;
+      if (uSurfaceSheets>0 && surfaceReady(S_ROOF_MEMBRANE)) {
+        m.albedo=realSurface(surfaceTap(S_ROOF_MEMBRANE,uvW,sdx,sdy),S_ROOF_MEMBRANE,tint*.66,1.,.01,surfH);
+        relief=1.;
+      }
+    } else {
+      int face=faceMask.z>.5?(nObj.z>0.?0:1):2;
+      int aslot=apartmentSlot(int(vExtra.x+.5),face);
+      vec2 rs=vec2(max(1.,floor(fsz.x/6.+.5))/fsz.x,1./5.84);
+      float parapet=step(fsz.y-1.05,fp.y);
+      float cell=hash12(floor(fp*rs*vec2(1.,2.))+vSeed*13.);
+      if (uSurfaceSheets>0 && surfaceReady(aslot)) {
+        vec4 t=surfaceTap(aslot,fp*rs,fdx*rs,fdy*rs);
+        vec3 c=realSurface(t,aslot,tint,1.,.0,surfH)*(.96+cell*.08);
+        // Glazing reads as glass: dark, bluish, smooth and reflective.
+        float glass=smoothstep(.02,.07,t.b-t.r)*smoothstep(.62,.3,t.b)*(1.-parapet);
+        m.albedo=mix(c,tint*.86,parapet);
+        m.rough=mix(.82,.1,glass);
+        m.f0=mix(.04,.06,glass);
+      } else {
+        // Before the sheet loads: storey bands and dark window strips.
+        float storey=fract(fp.y/2.92);
+        float win=step(.25,storey)*step(storey,.8)*step(.12,fract(fp.x*rs.x*2.))*step(fract(fp.x*rs.x*2.),.88);
+        m.albedo=mix(tint*.92,vec3(.05,.06,.07),win*(1.-parapet));
+        m.rough=mix(.85,.12,win);
+      }
+      m.albedo=mix(m.albedo,m.albedo*vec3(.72,.70,.64),wallBase*.5);
+    }
   } else if (kind==14) {
     vec3 tw=pow(abs(ng),vec3(3.));
     tw/=tw.x+tw.y+tw.z;
@@ -1463,6 +1518,9 @@ void main(){
     float integral=abs(dy)>.01?(exp(-fall*h0)-exp(-fall*vPos.y))/(fall*dy):exp(-fall*h0);
     float density=.0021;
     fogAmt=1.-exp(-density*dist*max(integral,0.));
+    // A shortened draw distance (settings) fades the city into the haze
+    // before the chunks stop drawing.
+    if (uDrawFar>0.) fogAmt=max(fogAmt,smoothstep(uDrawFar*.6,uDrawFar*.97,dist));
     vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
     vec3 fogCol=envAt(fdir,4.5);
     fogCol+=uSunColor*.06*pow(sat(dot(dir,uSun)),8.);
@@ -1791,6 +1849,16 @@ void main(){
       float win=step(.17,c.x)*step(c.x,.83)*step(.24,c.y)*step(c.y,.86);
       float lit=step(.72,hash(floor(g)));
       col=mix(real?liteSurface(stex.rgb,slot,tint*.9):tint*.9,mix(vec3(.13,.19,.23),vec3(.78,.66,.42),lit*.55),win*(1.-smoothstep(36.,70.,dist)*.6));
+    }
+  }
+  else if (kind==10) {
+    if (an.y>.55) col=tint*.66;
+    else {
+      // Fronts face the street, toward the middle of the city.
+      int face=dot(ng.xz,-vPos.xz)>0.?0:1;
+      int aslot=apartmentSlot(int(vExtra.x+.5),face);
+      vec2 ap=vec2((an.x>an.z?vPos.z:vPos.x)/6.,vPos.y/5.84);
+      col=uSurfaceSheets>0 && surfaceReady(aslot)?liteSurface(surfaceTap(aslot,ap,dFdx(ap),dFdy(ap)).rgb,aslot,tint):tint*.9;
     }
   }
   else if (kind==8 || kind==6) col=mix(vec3(.10,.16,.20),tint,.35)+.10*sat(ng.y);

@@ -14,12 +14,13 @@ import {dirname,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 const root=join(dirname(fileURLToPath(import.meta.url)),'../../../..');
-const {SURFACE_SHEETS,sheetPrompt}=await import(join(root,'dist/surfaces.js'));
+const {SHEET_PIXELS,SURFACE_SHEETS,sheetPrompt}=await import(join(root,'dist/surfaces.js'));
 
 const MODEL='gpt-image-2.5-sunburst';
 // Square sizes from the largest the API allows for 1:1 down to the standard one.
 const SIZES=['2880x2880','2048x2048','1024x1024'];
-const SHIPPED=1536;
+// The game's texture layers are at most 296 px, so a 960 px sheet covers them.
+const SHIPPED=SHEET_PIXELS;
 
 const args=process.argv.slice(2), option=(name,fallback)=>{
   const at=args.indexOf('--'+name);
@@ -55,11 +56,11 @@ async function request(prompt,size) {
 }
 
 // The full-size original is kept in textures/source; the game ships a copy
-// of at most 1536×1536 (its texture layers are at most 512 px). Smaller
+// of at most 960×960 (its texture layers are at most 296 px). Smaller
 // originals, such as supplied sheets, are never upscaled.
 function ship(source,target) {
   try {
-    execFileSync('ffmpeg',['-v','error','-y','-i',source,'-vf',`scale='min(iw,${SHIPPED})':'min(ih,${SHIPPED})':flags=lanczos`,'-c:v','libwebp','-quality','88',target]);
+    execFileSync('ffmpeg',['-v','error','-y','-i',source,'-vf',`scale='min(iw,${SHIPPED})':'min(ih,${SHIPPED})':flags=lanczos`,'-c:v','libwebp','-quality','56','-compression_level','6',target]);
   } catch {
     copyFileSync(source,target);
     console.warn('  ffmpeg with libwebp not found: shipped the full-size image');

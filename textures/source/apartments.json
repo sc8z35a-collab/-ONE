@@ -1,0 +1,16 @@
+{
+  "source": "drawn",
+  "script": ".claude/skills/texture-sheets/scripts/draw-apartments.py",
+  "size": "2880x2880",
+  "cells": [
+    "apt_balcony",
+    "apt_loggia",
+    "apt_ribbon",
+    "apt_fins",
+    "apt_screen",
+    "apt_brick",
+    "apt_glass",
+    "apt_corridor",
+    "apt_endwall"
+  ]
+}

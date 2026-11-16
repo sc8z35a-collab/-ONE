@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {RoomEngine} from './room-engine.js';
 import {frameOf} from './frame.js';
 import {BOSS_ATTACK_TIMING,drawBossAttack} from '../dist/boss-effects.js';
-import {drawBossModel} from '../dist/boss-model.js';
+import {BOSS_TENTACLES,drawBossModel} from '../dist/boss-model.js';
+import {BOSS_SPEED,TENTACLE_REACH} from '../dist/boss.js';
 
 const config={mode:'play',teamSize:4,weapon:'jet',sub:'throw'};
 const engine=(stored=new Map())=>new RoomEngine(config,stored);
@@ -134,4 +135,33 @@ test('attack meshes animate from warning through impact, and the boss coils and 
   const coiled=body();
   assert(coiled.some(p=>p[8]===25));
   assert.notEqual(idle[0][2],coiled[0][2]);
+});
+
+test('the boss lashes five tentacles up to 10 m out, one per nearby crew member, and roams fast',()=>{
+  const {battle:b}=engine(), boss=b.boss, p=b.player, foe=opponent(b);
+  boss.spawn();
+  assert.equal(BOSS_TENTACLES,5);
+  assert.equal(TENTACLE_REACH,10);
+  assert(BOSS_SPEED[0]>6 && BOSS_SPEED.every((v,i)=>!i || v>BOSS_SPEED[i-1]));
+  Object.assign(boss,{x:0,y:0,z:0,volley:2});
+  Object.assign(p,{x:6,y:0,z:0,vx:0,vz:0});
+  Object.assign(foe,{x:-4,y:0,z:5,vx:0,vz:0});
+  boss.plan(p,6,[p,foe]);
+  const lash=boss.attacks.filter(a=>a.kind==='lash');
+  assert.equal(lash.length,5);
+  assert(lash.every(a=>Math.hypot(a.x-boss.x,a.z-boss.z)<=TENTACLE_REACH+1e-9));
+  assert(lash.some(a=>Math.hypot(a.x-p.x,a.z-p.z)<.01) && lash.some(a=>Math.hypot(a.x-foe.x,a.z-foe.z)<.01));
+  assert.equal(boss.cast.kind,'lash');
+  assert.equal(boss.cast.points.length,5);
+  const sweep=(boss.volley=0,boss.plan(p,6,[p,foe]),boss.attacks.at(-1));
+  assert.equal(sweep.kind,'sweep');
+  assert.equal(sweep.radius,TENTACLE_REACH);
+  // The tentacles reach their strike points when the lash lands.
+  const at=boss.attacks.find(a=>a.kind==='lash');
+  boss.cast={kind:'lash',start:0,at:1,end:1.6,points:lash.map(a=>[a.x,a.z])};
+  const parts=[];
+  drawBossModel({lite:false,add:(...q)=>parts.push(q)},boss,1.18);
+  const tips=parts.filter(q=>q[0]==='orb' || q[0]==='taper');
+  assert(tips.some(q=>Math.hypot(q[1]-at.x,q[3]-at.z)<2.5));
+  assert.equal(frameOf(b,0,0,[]).boss.cast.points.length,5);
 });

@@ -287,7 +287,7 @@ function softBox(lowDetail) {
 
 // Tapered capsule for limbs: domed ends and a slight muscle swell.
 function limbMesh(lowDetail) {
-  const mesh=makeMesh(), sides=lowDetail?12:16, rows=lowDetail?11:18, cap=.22;
+  const mesh=makeMesh(), sides=lowDetail?10:16, rows=lowDetail?8:18, cap=.22;
   const profile=t=>{
     const base=.5*mix(1,.8,t)*(1+.07*Math.sin(Math.PI*t));
     const e=t<cap?(cap-t)/cap:t>1-cap?(t-1+cap)/cap:0;
@@ -324,10 +324,18 @@ export function meshes(lowDetail = false) {
 }
 
 // Render-only tessellation. Collision keeps meshes() so hit tests never move.
+// Kept as low as the silhouettes allow: the surface textures and smooth
+// normals carry the detail, and the rounded-edge shading does the bevels.
 function renderMeshes() {
   const high=meshes();
-  high.orb=radial(true,22,14);
-  high.cylinder=radial(false,18);
+  high.bevel=beveledBlock(true);
+  high.orb=radial(true,14,9);
+  high.cylinder=radial(false,12);
+  high.taper=radial(false,12,1,.67);
+  high.cone=radial(false,12,1,.025);
+  high.ring=ringMesh(true);
+  high.mantle=mantleMesh(true);
+  high.hazard=hazardDisk(true);
   high.soft=softBox(true);
   high.limb=limbMesh(true);
   return high;
@@ -338,7 +346,12 @@ function renderMeshes() {
 function lodMeshes() {
   const low=meshes(true);
   low.bevel=block();
-  low.soft=beveledBlock(true);
+  low.soft=block();
+  low.orb=radial(true,6,4);
+  low.cylinder=radial(false,6);
+  low.taper=radial(false,6,1,.67);
+  low.cone=radial(false,6,1,.025);
+  low.limb=radial(false,6,1,.8);
   return low;
 }
 
@@ -463,11 +476,13 @@ function labelTexture(gl,anisotropy) {
 
 const SCENE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uShape','uQuality','uHDR','uMirrorPass',
   'uShadowOn','uCascades','uShadowM0','uShadowM1','uShadowTexel','uAtlasGrid','uReflectOn','uViewport','uEnvLod','uClock',
-  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge'];
+  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge','uDrawFar'];
 const SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uField','uClock','uInterior','uHDR','uViewport','uExposure'];
-const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9,surface:10,sheet:11};
+const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9,surface:10,sheet:11,small:12};
 // Per pass culling: LOD switch distance, how far small props draw, hard cut.
-const HIGH_DRAW={lodDist:58,smallDist:150,cull:Infinity};
+const HIGH_DRAW={lodDist:46,smallDist:120,cull:Infinity};
+// Fixed render resolutions offered in the settings (pixels of the frame).
+const RESOLUTION_PIXELS={fhd:1920*1080,'2k':2560*1440};
 // The lightweight modes only draw the street around the fight: far enough to
 // see every opponent a weapon can reach, with fog covering the cut.
 const LITE_DRAW={lodDist:15,smallDist:34,cull:92};
@@ -494,6 +509,9 @@ export class Renderer {
     this.adaptive=true;
     // Display refresh interval in ms; the frame budget follows it up to 120 fps.
     this.refreshInterval=1000/60;
+    // Player graphics settings (main.js): render resolution, reflections and
+    // how far the city chunks draw.
+    this.options={resolution:'auto',reflections:true,drawDistance:Infinity};
     this.fixedSize=null;
     const gl = canvas.getContext('webgl2', {alpha:false,antialias:true,stencil:false,powerPreference:'high-performance'});
     if (!gl) {
@@ -524,14 +542,14 @@ export class Renderer {
     this.shadowUniform = gl.getUniformLocation(this.shadow,'uLight');
     surfaceTable(gl,this.scene);
     samplers(gl,this.scene,{uShadow0:UNIT.shadow0,uInk:UNIT.ink,uAtlas:UNIT.atlas,uReflection:UNIT.reflection,
-      uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1,uSurface:UNIT.surface});
+      uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small});
     samplers(gl,this.sky,{uDetail:UNIT.detail});
     try {
       this.sceneLite=program(gl,SCENE_VERTEX,LITE_FRAGMENT);
       this.skyLite=program(gl,FULLSCREEN_VERTEX,LITE_SKY_FRAGMENT);
       this.ul=uniforms(gl,this.sceneLite,LITE_UNIFORMS);
       this.sl=uniforms(gl,this.skyLite,LITE_SKY_UNIFORMS);
-      samplers(gl,this.sceneLite,{uInk:UNIT.ink,uAtlas:UNIT.atlas,uSurface:UNIT.surface});
+      samplers(gl,this.sceneLite,{uInk:UNIT.ink,uAtlas:UNIT.atlas,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small});
       surfaceTable(gl,this.sceneLite);
     } catch (error) {
       // The full shader still renders the lightweight modes, only slower.
@@ -542,9 +560,9 @@ export class Renderer {
     // Real surface textures arrive later (loadSurfaces); until then a blank
     // one-pixel array keeps the sampler valid and the shaders procedural.
     this.surfacePlaceholder=surfaceArray(gl,1,UNIT.surface,null);
-    this.surfaceTexture=null;
+    this.surfaceSmallPlaceholder=surfaceArray(gl,1,UNIT.small,null);
+    this.surfaceArrays=null;
     this.surfaceSheets=0;
-    this.surfaceSize=0;
     // Per slot: average colour and texture layer (-1 until its sheet loads).
     this.surfaceMeans=new Float32Array(SURFACE_COUNT*4).fill(.5);
     for (let slot=3;slot<this.surfaceMeans.length;slot+=4) this.surfaceMeans[slot]=-1;
@@ -687,14 +705,17 @@ export class Renderer {
 
   // Loads the generated texture sheets in the background; surfaces switch
   // from their procedural look as each sheet arrives.
-  loadSurfaces({size=512}={}) {
-    return loadSurfaceSheets(this,{size,units:{surface:UNIT.surface,sheet:UNIT.sheet}});
+  // size: texels per layer for large surfaces; small: for small parts.
+  loadSurfaces({size,small}={}) {
+    return loadSurfaceSheets(this,{size,small,units:{surface:UNIT.surface,small:UNIT.small,sheet:UNIT.sheet}});
   }
 
   bindSurfaces(u,sheets) {
-    const gl=this.gl;
+    const gl=this.gl, arrays=this.surfaceArrays;
     gl.activeTexture(gl.TEXTURE0+UNIT.surface);
-    gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.surfaceTexture ?? this.surfacePlaceholder);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY,arrays?.large.texture ?? this.surfacePlaceholder);
+    gl.activeTexture(gl.TEXTURE0+UNIT.small);
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY,arrays?.small.texture ?? this.surfaceSmallPlaceholder);
     // The lightweight modes read the textures with plain trilinear filtering.
     if (this.lite && !this.liteSampler) {
       this.liteSampler=gl.createSampler();
@@ -703,9 +724,9 @@ export class Renderer {
       gl.samplerParameteri(this.liteSampler,gl.TEXTURE_WRAP_S,gl.REPEAT);
       gl.samplerParameteri(this.liteSampler,gl.TEXTURE_WRAP_T,gl.REPEAT);
     }
-    gl.bindSampler(UNIT.surface,this.lite?this.liteSampler:null);
-    gl.uniform1i(u.uSurfaceSheets,this.surfaceTexture?sheets:0);
-    gl.uniform1f(u.uSurfaceEdge,.5/Math.max(1,this.surfaceSize));
+    for (const unit of [UNIT.surface,UNIT.small]) gl.bindSampler(unit,this.lite?this.liteSampler:null);
+    gl.uniform1i(u.uSurfaceSheets,arrays?sheets:0);
+    gl.uniform2f(u.uSurfaceEdge,.5/(arrays?.large.size ?? 1),.5/(arrays?.small.size ?? 1));
     if (this.surfaceMeansDirty) {
       gl.bindBuffer(gl.UNIFORM_BUFFER,this.surfaceBuffer);
       gl.bufferSubData(gl.UNIFORM_BUFFER,0,this.surfaceMeans);
@@ -1047,7 +1068,7 @@ export class Renderer {
     this.frameAverage=this.frameAverage?this.frameAverage*.94+dt*.06:dt;
     if (!this.adaptive || this.lite || this.fixedSize || now-(this.adaptedAt??0)<1200) return;
     this.adaptedAt=now;
-    const budget=Math.max(1000/120,this.refreshInterval||1000/60);
+    const budget=Math.max(1000/(this.options?.fps||120),this.refreshInterval||1000/60);
     if (this.frameAverage>budget*1.3 && this.scale>.5) this.scale=Math.max(.5,this.scale-.1);
     else if (this.frameAverage<budget*1.07 && this.scale<1) this.scale=Math.min(1,this.scale+.05);
   }
@@ -1212,7 +1233,7 @@ export class Renderer {
       gl.clear(gl.DEPTH_BUFFER_BIT);
       gl.uniformMatrix4fv(this.shadowUniform,false,cascade.matrix);
       const planes=frustum(cascade.matrix);
-      const settings=i?{noSmall:true,lodDist:0,smallDist:0,cull:Infinity}:{lodDist:26,smallDist:40,cull:Infinity};
+      const settings=i?{noSmall:true,lodDist:0,smallDist:0,cull:Infinity}:{lodDist:12,smallDist:34,cull:Infinity};
       for (const [type,pair] of Object.entries(this.batches)) {
         if (TRANSPARENT_MESHES.has(type) || DECAL_MESHES.has(type)) continue;
         this.drawStatic(type,pair.static,planes,camera.eye,0,settings);
@@ -1231,7 +1252,9 @@ export class Renderer {
     const limit=this.renderLimit || 4096;
     // Offline video uses its exact frame size; the lightweight modes a fixed
     // 400p / 300p; high quality the display's own pixels within a budget.
+    const pixels=RESOLUTION_PIXELS[this.options?.resolution];
     const ratio=this.fixedSize?1:this.lite?Math.min(dpr,(this.ultra?ULTRA_LINES:LITE_LINES)/Math.min(cw,ch),limit/cw,limit/ch):
+      pixels?Math.min(Math.sqrt(pixels/(cw*ch)),limit/cw,limit/ch):
       Math.min(dpr,2,Math.sqrt(2.9e6/(cw*ch)),limit/cw,limit/ch)*(this.scale||1);
     this.viewZone=zoneOf(camera.eye[0]);
     this.mergeStairs=!!camera.stair && this.viewZone<2;
@@ -1247,7 +1270,7 @@ export class Renderer {
     // No shadow maps and no mirror pass at all in the lightweight modes.
     this.effects=outdoor && !this.lite && this.prepareEffects();
     const mirrorW=Math.max(1,Math.round(w*.5)), mirrorH=Math.max(1,Math.round(h*.5));
-    this.reflections=this.effects && !this.lite && this.prepareMirror(mirrorW,mirrorH);
+    this.reflections=this.effects && !this.lite && this.options?.reflections!==false && this.prepareMirror(mirrorW,mirrorH);
     this.hdr=!this.lite && this.preparePost(w,h);
     for (const pair of Object.values(this.batches)) {
       this.upload(pair.dynamic);
@@ -1324,6 +1347,8 @@ export class Renderer {
     gl.uniform1i(u.uHDR,hdr?1:0);
     gl.uniform1i(u.uMirrorPass,mirror?1:0);
     gl.uniform1f(u.uExposure,this.exposure());
+    const far=this.options?.drawDistance ?? Infinity;
+    gl.uniform1f(u.uDrawFar,mirror || this.overview || !Number.isFinite(far)?0:far);
     gl.uniform2f(u.uViewport,w,h);
     gl.uniform1f(u.uClock,clock);
     gl.uniform1f(u.uEnvLod,9);
@@ -1431,12 +1456,20 @@ export class Renderer {
   }
 
   drawSettings(mirror) {
-    return mirror?MIRROR_DRAW:!this.lite?HIGH_DRAW:this.overview?OVERVIEW_DRAW:this.ultra?ULTRA_DRAW:LITE_DRAW;
+    const preset=mirror?MIRROR_DRAW:!this.lite?HIGH_DRAW:this.overview?OVERVIEW_DRAW:this.ultra?ULTRA_DRAW:LITE_DRAW;
+    const far=this.options?.drawDistance ?? Infinity;
+    if (mirror || this.overview || !Number.isFinite(far)) return preset;
+    // The draw-distance setting replaces the mode's own cut, near or far.
+    const cached=this.cullCache;
+    if (cached?.preset===preset && cached.far===far) return cached.settings;
+    const settings={...preset,cull:far,lodDist:Math.min(preset.lodDist,far*.5),smallDist:Math.min(preset.smallDist,far*.7)};
+    this.cullCache={preset,far,settings};
+    return settings;
   }
 
   // How far the current mode draws moving things, for callers that cull them.
   get reach() {
-    return this.lite && !this.overview?this.drawSettings(false).cull:Infinity;
+    return this.overview?Infinity:this.drawSettings(false).cull;
   }
 
   drawScene(eye,planes,mirror,alpha) {

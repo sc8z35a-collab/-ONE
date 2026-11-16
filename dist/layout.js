@@ -10,7 +10,7 @@ export function cityExit(from,to,margin=0) {
   const a=dx*dx+dz*dz, b=x*dx+z*dz;
   return Math.max(0,Math.min(1,(-b+Math.sqrt(Math.max(0,b*b-a*c)))/a));
 }
-export const SCENE_VERSION=16;
+export const SCENE_VERSION=17;
 export const SCENE_FILE=`scene-07-v${SCENE_VERSION}.json`;
 export const UNDER_BOUNDS=[64,46];
 export const CABIN_BOUNDS=[9.24,1.47];
@@ -32,10 +32,38 @@ export const ZONES=[
   {x:CABIN_X,y:CABIN_Y,bounds:CABIN_BOUNDS,layer:CABIN_LAYER,name:'地下鉄車内',inkMask:32},
   {x:RAIL_CABIN_X,y:CABIN_Y,bounds:CABIN_BOUNDS,layer:RAIL_CABIN_LAYER,name:'高架列車車内',inkMask:64}
 ];
+// The elevated line is a closed loop: the north straight through both
+// stations (x = -half … half at RAIL.z), a half circle at each end, and a
+// return straight along the south side of the street (z = south).
+export const RAIL_LOOP={half:55,south:42};
 export const RAIL={
   name:'高架線',cabinX:RAIL_CABIN_X,cabinLayer:RAIL_CABIN_LAYER,center:0,x:41,z:-28.65,platformZ:-24.45,platformY:6.23,y:5.25,
-  edge:54.5,halfWidth:1.81,gauge:.93,dwell:7.5,doorSide:1,layer:TRACK_LAYER
+  edge:54.5,halfWidth:1.81,gauge:.93,dwell:7.5,doorSide:1,layer:TRACK_LAYER,loop:RAIL_LOOP
 };
+const LOOP_RADIUS=(RAIL_LOOP.south-RAIL.z)/2, LOOP_MIDDLE=(RAIL_LOOP.south+RAIL.z)/2;
+// Length of one lap, and the distance along the track (s) of a point: s = x
+// on the north straight, growing eastward, round the east end, west along
+// the south side and back round the west end.
+export const LOOP_LENGTH=RAIL_LOOP.half*4+2*Math.PI*LOOP_RADIUS;
+export const loopWrap=s=>((s+RAIL_LOOP.half)%LOOP_LENGTH+LOOP_LENGTH)%LOOP_LENGTH-RAIL_LOOP.half;
+// Distance from a to b travelling forward round the loop.
+export const loopAhead=(a,b)=>((b-a)%LOOP_LENGTH+LOOP_LENGTH)%LOOP_LENGTH;
+// Track centre and heading at s. The heading is a yaw in the train's own
+// convention: travel direction (cos yaw, 0, -sin yaw).
+export function railPath(s) {
+  const {half,south}=RAIL_LOOP, R=LOOP_RADIUS, arc=Math.PI*R;
+  let d=loopWrap(s)+half;
+  if (d<=2*half) return {x:d-half,z:RAIL.z,yaw:0};
+  d-=2*half;
+  if (d<=arc) {
+    const t=d/R;
+    return {x:half+R*Math.sin(t),z:LOOP_MIDDLE-R*Math.cos(t),yaw:-t};
+  }
+  d-=arc;
+  if (d<=2*half) return {x:half-d,z:south,yaw:Math.PI};
+  const t=(d-2*half)/R;
+  return {x:-half-R*Math.sin(t),z:LOOP_MIDDLE+R*Math.cos(t),yaw:Math.PI-t};
+}
 export const METRO={
   name:'B1 地下鉄',cabinX:CABIN_X,cabinLayer:CABIN_LAYER,center:UNDER_X,x:46,z:41.73,platformZ:37.55,platformY:UNDER_Y+1.09,y:UNDER_Y+.105,
   edge:64,halfWidth:1.81,gauge:.93,dwell:12,doorSide:-1,layer:2,integrity:720

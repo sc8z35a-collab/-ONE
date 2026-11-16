@@ -12,7 +12,7 @@ import {NpcMotion,resetGait,limbJoint} from './npc-motion.js';
 import {NpcPerception} from './npc-perception.js';
 import {stairCrossing,stairEnd,stairLane,stairNeighborShift,stairRay} from './stairs.js';
 import {actorInRay,collectShapes,traceShapes} from './collision.js';
-import {EBOT,INK_EPSILON,OM_HOMING,PAINT_RADIUS_FACTOR,SUPERS,WEAPONS,shotTravel,weaponById} from './weapons.js';
+import {AUTO_AIM_LOCK,EBOT,INK_EPSILON,OM_HOMING,PAINT_RADIUS_FACTOR,SUPERS,WEAPONS,shotTravel,weaponById} from './weapons.js';
 import {SUBWEAPONS,Subweapons,subweaponById} from './subweapons.js';
 import {StageObjects} from './stage-objects.js';
 import {surfacePaintRadius} from './ink.js';
@@ -24,6 +24,9 @@ export const DAMAGE_SCALE=1/3;
 export const RESPAWN_SECONDS=12;
 export const BOSS_RESPAWN_SECONDS=15;
 export const EXP_PER_KILL=30;
+// Input-driven crews (the player, and every human player in a server match)
+// run this fast; NPCs keep their own route pace.
+export const PLAYER_PACE={forward:7.4,back:6.4};
 const MAX_TEAM_INDEX=16;
 export const chargeGain=actor=>1-(actor.inkPenalty??0)*.064;
 function decalBasis(n,phase) {
@@ -54,7 +57,7 @@ function decalShape(geometry,decal) {
   decalShapes.set(decal,shape);
   return shape;
 }
-export const INK_HIT_DURATION=.62;
+export const INK_HIT_DURATION=.8;
 const distance = (a,b) => Math.hypot(a.x-b.x,a.z-b.z);
 
 function drawInkImpact(renderer,{p,team,at,normal:surface,kind=0},eye,time) {
@@ -64,8 +67,8 @@ function drawInkImpact(renderer,{p,team,at,normal:surface,kind=0},eye,time) {
   const normal=surface??scale(toward,1/range), [right,up]=decalBasis(normal,0);
   // A body hit reads from across the street: it is drawn far larger than a
   // surface splash and keeps a minimum on-screen size at long range.
-  const body=!surface, boost=body?(kind===2?2.75:2.05):1;
-  const center=add(p,scale(normal,.10)), size=(surface?.69:1)*clamp(range/8,.72,body?2.6:1.48)*boost;
+  const body=!surface, other=kind===3, boost=body?(kind===2?3.4:other?1.45:2.6):1;
+  const center=add(p,scale(normal,.10)), size=(surface?.69:1)*clamp(range/8,.72,body?(other?1.7:2.9):1.48)*boost;
   const fade=1-age, radius=(.37+.71*(1-fade*fade))*size;
   const tint=TEAM_INK[team] ?? RAIDER_INK;
   const plane=[right,normal,scale(up,-1)], sheen=add(center,scale(normal,.014));
@@ -75,6 +78,10 @@ function drawInkImpact(renderer,{p,team,at,normal:surface,kind=0},eye,time) {
     // Second shock ring, a hot core and a cross of light for the hit itself.
     const late=clamp(age*1.5-.12,0,1);
     renderer.add('ripple',...sheen,radius*2.75*late,.03,radius*2.75*late,kind===2?0xfff2c2:tint,12,{dynamic:true,basis:plane,label:Math.min(1,.18+late*.85)});
+    // A halo the size of the body around the hit, so it reads even when the
+    // splash itself is hidden behind the target.
+    const halo=(.95+1.25*(1-fade*fade))*(other?.75:1)*clamp(range/12,1,2.4);
+    renderer.add('ripple',...center,halo*2,.03,halo*2,0xffffff,12,{dynamic:true,basis:plane,label:Math.min(1,.32+age*.8)});
     if (age<.34) {
       const core=(.52+.3*fade)*size*(1-age*2.9);
       renderer.add('orb',...sheen,core,core,core,0xffffff,3,{dynamic:true});
@@ -868,7 +875,7 @@ export class Battle {
   walk(a,input,dt) {
     const [sx,,sz]=forward(input.yaw), nx=-sz, nz=sx;
     const m=Math.max(1,Math.hypot(input.x,input.z));
-    const pace=(input.z<0?5.28:6.08)*(a.beaming?.63:a.weapon.roller && input.fire && a.rollHold>.19?.78:1);
+    const pace=(input.z<0?PLAYER_PACE.back:PLAYER_PACE.forward)*(a.beaming?.63:a.weapon.roller && input.fire && a.rollHold>.19?.78:1);
     this.drive(a,(nx*input.x+sx*input.z)*pace/m,(nz*input.x+sz*input.z)*pace/m,dt,
       input.swim && !input.fire && !input.press && !input.sub,input.jump);
   }
@@ -886,6 +893,8 @@ export class Battle {
       this.playerAim=this.aim(view.eye,dir,Math.hypot(...floorBounds(view.eye[0]))*2+12);
     }
     if (input.sub) this.subweapons.use(a,input.yaw,input.pitch);
+    // SW OUT II: CO mode trades fire rate for twice the tracking.
+    if (input.co && a.weapon.coMode) a.coMode=!a.coMode;
     const weapon=a.weapon;
     if (a.giant || a.beaming) return;
     if (weapon.roller) {
@@ -1051,6 +1060,11 @@ export class Battle {
     const central=[delta[0]/travel,(delta[1]+.5*weapon.gravity*travel*travel)/travel,delta[2]/travel];
     const lateral=unit(cross(central,[0,1,0]));
     const force=Math.hypot(...central);
+    // SW OUT pistols: a shot at a locked-on enemy follows it. The guidance
+    // costs extra ink on SW OUT; without enough ink the shot flies plain.
+    const co=!!(weapon.coMode && actor.coMode);
+    let locked=weapon.autoAim?this.lockedEnemy(actor,start,target,weapon.autoAim.reach):null;
+    if (locked && actor.tank+INK_EPSILON<weapon.cost*weapon.autoAim.ink) locked=null;
     // OM Bomb: every round tracks. OM BOMB II fires each round twice at half power.
     const special=actor.superUntil>this.clock?actor.activeSpecial:null;
     const tracking=special==='om' || special==='om2', twin=special==='om2';
@@ -1068,6 +1082,10 @@ export class Battle {
       const bend=weapon.swirl?scale(lateral,(this.rng()>.5?1:-1)*weapon.swirl):null;
       const launch=launches[i%launches.length], shot={pos:launch.position.slice(),vel:v,actor,weapon,power,age:0,bend};
       if (tracking) shot.homing={...OM_HOMING};
+      if (locked) {
+        const {turn,cone,reach}=weapon.autoAim;
+        shot.homing={turn:turn*(co?weapon.coMode.turn:1),cone,reach,target:locked};
+      }
       if (strength!==1) shot.dmg=strength;
       if (paint!==1) shot.paint=paint;
       if (!this.impactShot(shot,launch.origin,launch.tip,launch.hit)) {
@@ -1075,8 +1093,10 @@ export class Battle {
         this.shots.push(shot);
       }
     }
-    actor.tank=Math.max(0,actor.tank-weapon.cost);
-    actor.fire=actor.isPlayer?weapon.delay:Math.max(.18,weapon.delay)+(weapon.charge?.30:.0)+this.rng()*.085;
+    actor.tank=Math.max(0,actor.tank-weapon.cost*(locked?weapon.autoAim.ink:1));
+    actor.autoAimAt=locked?this.clock:actor.autoAimAt;
+    const delay=weapon.delay*(co?weapon.coMode.delay:1);
+    actor.fire=actor.isPlayer?delay:Math.max(.18,delay)+(weapon.charge?.30:.0)+this.rng()*.085;
     actor.heat=.51;
     actor.recoil=1;
     actor.muzzleBlocked=launches.every(launch=>!!launch.hit);
@@ -1208,14 +1228,18 @@ export class Battle {
     return lost;
   }
 
+  // Every body hit leaves a flash: the player's own hits (kind 1, 2 for a
+  // splat) large and from any range, everyone else's (kind 3) smaller.
   inkHit(target,damage,source,point) {
     const lost=this.damage(target,damage,source,point);
     const team=source.team;
-    if (lost>0 && (source.isPlayer || source.cloneOf?.isPlayer || this.mode==='watch')) {
+    if (lost>0) {
+      const mine=source.isPlayer || source.cloneOf?.isPlayer || this.mode==='watch';
       const finished=target.isBoss || target.isRaider?!target.active:target.down>0;
+      const kind=mine?finished?2:1:3;
       const prior=this.inkImpacts.find(hit=>hit.at===this.clock && hit.target===target && hit.team===team);
-      if (prior) prior.kind=Math.max(prior.kind??1,finished?2:1);
-      else this.addInkImpact({p:point,team,target,kind:finished?2:1});
+      if (prior) prior.kind=prior.kind===3 || kind===3?Math.min(prior.kind,kind):Math.max(prior.kind??1,kind);
+      else this.addInkImpact({p:point,team,target,kind});
     }
     return lost;
   }
@@ -1241,13 +1265,33 @@ export class Battle {
     return true;
   }
 
-  // Turns a tracking round toward the best opponent inside its seeker cone.
+  // The enemy a shot is locked on to: the one standing on the line from the
+  // muzzle to the aim point, within its own body width, inside reach.
+  lockedEnemy(actor,start,target,reach) {
+    const aim=sub(target,start), length=Math.hypot(...aim);
+    if (length<.01) return null;
+    let best=null, bestAngle=Infinity;
+    for (const enemy of this.abilities.enemies(actor,start[0])) {
+      if (enemy.down>0 || enemy.shield>0) continue;
+      const chest=[enemy.x-start[0],enemy.y+(enemy.isBoss?2.2:enemy.swimming?.36:.9)-start[1],enemy.z-start[2]];
+      const gap=Math.hypot(...chest);
+      if (gap>reach || gap<.3) continue;
+      const angle=Math.acos(clamp(dot(chest,aim)/(gap*length),-1,1));
+      const width=(enemy.isBoss?4.8:enemy.giant?2.2:AUTO_AIM_LOCK.body)/gap+AUTO_AIM_LOCK.slack;
+      if (angle<width && angle<bestAngle) {best=enemy;bestAngle=angle;}
+    }
+    return best;
+  }
+
+  // Turns a tracking round toward the best opponent inside its seeker cone,
+  // or toward the enemy it was locked on to.
   guideShot(shot,dt) {
-    const {turn,cone,reach}=shot.homing, [vx,vy,vz]=shot.vel, speed=Math.hypot(vx,vy,vz);
+    const {turn,cone,reach,target}=shot.homing, [vx,vy,vz]=shot.vel, speed=Math.hypot(vx,vy,vz);
     if (speed<1) return;
     const [px,py,pz]=shot.pos, limit=Math.cos(cone);
     let best=-Infinity, wx=0, wy=0, wz=0;
-    for (const enemy of this.abilities.enemies(shot.actor,px)) {
+    for (const enemy of target?[target]:this.abilities.enemies(shot.actor,px)) {
+      if (target && (enemy.down>0 || !sameLevel(enemy.x,px))) break;
       if (enemy.shield>0) continue;
       const dx=enemy.x-px, dy=enemy.y+(enemy.isBoss?2.2:enemy.swimming?.36:.9)-py, dz=enemy.z-pz, gap=Math.hypot(dx,dy,dz);
       if (gap>reach || gap<.25) continue;
@@ -1633,6 +1677,12 @@ export function drawCrew(r,a,time,showEffects=true) {
     }
     r.add('ripple',a.x,a.y+.05,a.z,1.7+.2*Math.sin(time*9),.03,1.7+.2*Math.sin(time*9),0xfff4ce,12,{dynamic:true,label:.35});
   }
+  // On screen the crew is a plain figure (helmet, suit, tank, limbs, gun) that
+  // the suit textures dress; hit detection keeps the detailed shapes below.
+  if (r.seal) {
+    drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor,hit,tint,bright,yaw,aimYaw,showEffects});
+    return;
+  }
   const accent=[0xe0c88f,0xb5d7cb,0x9eb8d0,0xe2a47d][(a.index??0)%4];
   const visor=a.team===0?0x4c8c99:0x825650;
   part(soft,0,.99,-.025,.66,.62,.44,armor,2,.13);
@@ -1843,6 +1893,72 @@ export function drawCrew(r,a,time,showEffects=true) {
   if (showEffects && (a.recoil>.65 && !a.muzzleBlocked || a.charge>.12)) {
     const flash=a.charge>.12?.071+.095*a.charge:cannon?.46:quad?.27:.14;
     for (const side of dual?[-1,1]:[0]) gunPart('orb',-.415+side*.13,1.30,dual?1.063:.785+barrel*.85,flash,flash,flash*1.7,bright,3);
+  }
+}
+
+// The crew as drawn on screen: about twenty plain parts instead of a hundred.
+function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor,hit,tint,bright,yaw,aimYaw,showEffects}) {
+  const {cy,sy,loc,pace,fore,lateral,airborne,rising,crouch,swing,transfer,rise,sway,lean}=pose;
+  const visor=a.team===0?0x4c8c99:0x825650;
+  part(soft,0,1.07,0,.64,.72,.44,tint,20,.10);
+  part(soft,0,.80,.02,.57,.17,.41,GRAPHITE,21);
+  part('orb',0,1.72,-.01,.66,.6,.62,armor,20,.10);
+  part(soft,0,1.715,.27,.54,.2,.13,visor,8,.068);
+  part(soft,0,1.43,.02,.36,.18,.32,GRAPHITE,21);
+  const capacity=a.tankMax ?? BASE_TANK, tankHeight=capacity>BASE_TANK?1.11:.79;
+  const fill=tankHeight*.70*clamp(a.tank/capacity,0,1);
+  part('bevel',0,1.13,-.40,.46,tankHeight,.29,0x5d6f73,4);
+  if (fill>.003) part('box',0,1.13+(fill-tankHeight*.70)*.5,-.553,.32,fill,.03,bright,3);
+  for (const sign of [-1,1]) {
+    const step=swing*sign*pace;
+    const forwardStep=airborne?sign*(rising?.20:.12):fore*step*.39;
+    const sideStep=airborne?sign*.055:lateral*step*.31;
+    const lift=airborne?(rising?.27:.12)+sign*.045:Math.max(0,transfer*sign)*pace*.17;
+    const planted=a.feet && !airborne && !a.isPlayer, base=sign<0?0:4;
+    const hip=loc(sign*.175+sway*.24,.753+rise*(planted?.61:.43),lean*.25);
+    let ankle, foot, bootYaw=yaw, bootPitch=0;
+    if (planted) {
+      bootYaw=Math.PI-a.feet[base+3];
+      const fx=Math.sin(bootYaw), fz=Math.cos(bootYaw);
+      foot=[a.feet[base],a.feet[base+1]+.06,a.feet[base+2]];
+      ankle=[foot[0]-fx*.064,foot[1]+.111,foot[2]-fz*.064];
+    } else {
+      const local=[sign*.185+sideStep,.112+lift,.10+forwardStep];
+      foot=loc(...local);
+      ankle=loc(local[0],local[1]+.112,local[2]-.065);
+      bootPitch=airborne?(rising?-.32:.16):transfer*sign*pace*.14;
+    }
+    const knee=limbJoint(hip,ankle,.383,.370,[Math.sin(bootYaw),.09,Math.cos(bootYaw)]);
+    r.beam(hip,knee,.26,.27,GRAPHITE,31,{dynamic:true,shape:limbShape});
+    r.beam(knee,ankle,.22,.23,hit,30,{dynamic:true,shape:limbShape});
+    r.add(soft,...foot,.30,.19,.47,BOOT,21,{dynamic:true,yaw:bootYaw,pitch:bootPitch});
+    const armSwing=sign>0?-step*.14:0, armLift=airborne?.07:armSwing*.28-crouch*.035;
+    const shoulder=torso(sign*.331,1.241,.023);
+    part(soft,sign*.34,1.245,.02,.28,.26,.31,tint,20);
+    const hand=weapon.roller?loc(sign*.25,1.13,.40):gun.at(...(sign<0?[-.416,1.22,.44]:[-.285,1.18,.66]));
+    const elbow=planted || a.brace>0?limbJoint(shoulder,hand,.371,.415,[sign*cy,-.58,-sign*sy]):
+      loc(sign*.386,1.06+armLift,.22+armSwing);
+    r.beam(shoulder,elbow,.19,.21,tint,30,{dynamic:true,shape:limbShape});
+    r.beam(elbow,hand,.165,.18,hit,30,{dynamic:true,shape:limbShape});
+    r.add('orb',...hand,.20,.19,.22,BOOT,21,{dynamic:true,yaw});
+  }
+  if (weapon.roller) {
+    const {y:headY,z:headZ}=rollerPosition(a);
+    const axis=[cy,0,-sy], up=[0,1,0];
+    r.add('cylinder',...loc(0,headY,headZ),.62,1.76,.62,bright,9,{dynamic:true,basis:[up,axis,cross(up,axis)]});
+    r.beam(loc(0,headY+.2,headZ-.1),loc(0,1.13,.40),.075,.075,GRAPHITE,4,{dynamic:true});
+    return;
+  }
+  const big=['lob','rd2','td'].includes(weapon.id), barrel=gun.barrel, width=big?.34:weapon.id==='fan'?.30:.235;
+  const gunPart=(type,x,y,z,w,h,d,color,mat=4,pitch=0)=>r.add(type,...gun.at(x,y,z),w,h,d,color,mat,
+    {dynamic:true,yaw:aimYaw,pitch:pitch+gun.pitch});
+  gunPart('bevel',-.415,1.30,.474,weapon.id==='dual'?.35:width,big?.29:.222,.565,GRAPHITE);
+  gunPart('box',-.415,1.343,.49,width+.02,.12,.41,tint,20);
+  gunPart('cylinder',-.415,1.30,.69+barrel*.30,big?.25:.14,barrel,big?.25:.14,TRIM,4,Math.PI/2);
+  gunPart('box',-.415,1.205,.359,.125,.207,.17,BOOT,21,-.20);
+  if (showEffects && (a.recoil>.65 && !a.muzzleBlocked || a.charge>.12)) {
+    const flash=a.charge>.12?.071+.095*a.charge:weapon.id==='td'?.46:weapon.id==='rd2'?.27:.14;
+    gunPart('orb',-.415,1.30,.785+barrel*.85,flash,flash,flash*1.7,bright,3);
   }
 }
 

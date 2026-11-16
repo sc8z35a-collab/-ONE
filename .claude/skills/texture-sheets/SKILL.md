@@ -15,7 +15,7 @@ and mirrors the regular patterns (bricks, tiles, planks…) as they repeat.
 | File | Role |
 | --- | --- |
 | `dist/surfaces.js` | The 162 textures: id, prompt, real-world size (`meters`), `pattern`, `take`, optional `crop` and `repeat`. Their order is their slot in the shaders. |
-| `.claude/skills/texture-sheets/scripts/generate.mjs` | Calls the API, keeps the original in `textures/source/`, ships a 1536×1536 copy to `dist/textures/`, updates `dist/textures/index.json`. |
+| `.claude/skills/texture-sheets/scripts/generate.mjs` | Calls the API, keeps the original in `textures/source/`, ships a 960×960 copy to `dist/textures/`, updates `dist/textures/index.json`. |
 | `dist/surface-textures.js` | Loads the listed sheets and cuts them into a texture array. |
 | `dist/render-shaders.js` (`surfaceFor`) | Picks a texture for every surface from its material, colour, shape and place. |
 

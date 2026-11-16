@@ -24,9 +24,10 @@ export function crewView(battle,actor,{yaw=actor.yaw,pitch=actor.pitch,height=ac
   const low=[x,height+.39,z];
   const ceiling=battle.traceShot(low,pivot,true,false);
   if (ceiling?.normal[1]<-.35) pivot[1]=Math.max(low[1],ceiling.position[1]-CAMERA_CLEARANCE-.04);
-  const back=mix(watch?4.49:3.74,2.18,enclosed);
-  const offset=mix(watch?.76:.65,.42,enclosed);
-  const up=mix(watch?1.42:1.08,.57,enclosed);
+  // A slightly wider view than over-the-shoulder: more of the fight in frame.
+  const back=mix(watch?5.1:4.45,2.18,enclosed);
+  const offset=mix(watch?.8:.7,.42,enclosed);
+  const up=mix(watch?1.6:1.3,.57,enclosed);
   const boom=add(scale(direction,-back),add(scale(side,offset),[0,up,0]));
   const length=Math.hypot(...boom);
   const hit=battle.traceShot(pivot,add(pivot,boom),true,false,CAMERA_CLEARANCE);
@@ -65,4 +66,4 @@ export const AVATAR_FIELDS=['team','index','name','isPlayer','weapon','drone','r
   'steps','tank','tankMax','hp','maxHp','down','shield','recoil','damageAge','guard','giant','swimming','charge','superCharge',
   'superUntil','droneReady','rangeFactor','kills','downs','painted','cabinVisits','active','attack','inkSwimming','climbing','inkPenalty','intent','climbNormal','airborne','landing','rolling','subId','subReady','doorReady','muzzleBlocked',
   'slam','beaming','lastDamageAt','activeSpecial','bodyYaw','poseBank','feet','brace','peek','readyPose','flare',
-  'dealt','supers','subs','revealUntil','revealTeam','downBy','clone','apartmentVisits'];
+  'dealt','supers','subs','revealUntil','revealTeam','downBy','clone','apartmentVisits','coMode'];

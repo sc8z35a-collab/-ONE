@@ -1,4 +1,4 @@
-import {METRO,RAIL,TRACK_LAYER,UNDER_BOUNDS,UNDER_X,UNDER_Y,railEnd,stationAt} from './layout.js';
+import {LOOP_LENGTH,METRO,RAIL,RAIL_LOOP,TRACK_LAYER,UNDER_BOUNDS,UNDER_X,UNDER_Y,railEnd,railPath,stationAt} from './layout.js';
 
 import {cutStairOpenings} from './stairs.js';
 import {floorWeathering,wallWeathering} from './weathering.js';
@@ -14,14 +14,14 @@ export function buildRail(world) {
   world.ramp(-32,-15,lo+.18,hi-.18,y,0,'x',0xc0c3b0);
   world.ramp(15,32,lo+.18,hi-.18,0,y,'x',0xc0c3b0);
 
-  const width=edge*2;
+  const width=RAIL_LOOP.half*2;
   r.add('box',0,railY-.45,z,width,.56,halfWidth*2,0x64736e,4);
   r.add('box',0,railY-.138,z,width+.04,.107,halfWidth*2-.06,0x83877a,1,{layer:TRACK_LAYER});
   world.obstacle(0,railY-.23,z,width,.46,halfWidth*2,true,TRACK_LAYER);
   for (const rz of [z-gauge,z+gauge]) {
     r.add('box',0,railY-.092,rz,width,.046,.18,0x65665c,4);
     r.add('box',0,railY-.054,rz,width,.063,.065,0x5d6057,4);
-    r.add('box',0,railY-.023,rz,railEnd(RAIL)*2,.042,.108,0x9caaa5,1,{layer:TRACK_LAYER});
+    r.add('box',0,railY-.023,rz,width,.042,.108,0x9caaa5,1,{layer:TRACK_LAYER});
   }
   for (let bx=-edge+.65;bx<edge;bx+=.78) {
     r.add('box',bx,railY-.124,z,.23,.105,2.61,0x8b897a,1,{layer:TRACK_LAYER});
@@ -35,7 +35,7 @@ export function buildRail(world) {
     for (const dz of [-1,1]) r.beam([bx,railY-2.0,z],[bx,railY-.71,z+dz*1.55],.19,.23,0x7b8d85,4);
     r.add('box',bx,railY-.77,z,1.81,.26,3.38,0x687973,4);
   }
-  buildRailConnection(world,RAIL);
+  buildRailLoop(world);
   for (const side of [-1,1]) {
     const bx=side*x;
     r.add('box',bx,y+2.62,platformZ,17.85,.20,4.60,0xb3c7be,8);
@@ -54,6 +54,48 @@ export function buildRail(world) {
     }
     for (const dx of [-3.7,3.7]) r.add('box',bx+dx,y+2.48,platformZ,.85,.042,.18,0xf1e8c9,3);
   }
+}
+
+// The rest of the loop beyond the station straight: deck, rails and sleepers
+// in short straight pieces round the curves and along the south side, on
+// piers every ten metres.
+const LOOP_STEP=2.4;
+export function buildRailLoop(world) {
+  const r=world.r, {y:railY,halfWidth,gauge}=RAIL, start=RAIL_LOOP.half, end=LOOP_LENGTH-RAIL_LOOP.half;
+  const pieces=Math.ceil((end-start)/LOOP_STEP), step=(end-start)/pieces;
+  for (let i=0;i<pieces;i++) {
+    const s=start+(i+.5)*step, {x,z,yaw}=railPath(s), along=[Math.cos(yaw),0,-Math.sin(yaw)], side=[Math.sin(yaw),0,Math.cos(yaw)];
+    const piece=(dx,dz)=>[x+along[0]*dx+side[0]*dz,z+along[2]*dx+side[2]*dz];
+    r.add('box',x,railY-.45,z,step+.08,.56,halfWidth*2,0x64736e,4,{yaw});
+    r.add('box',x,railY-.138,z,step+.1,.107,halfWidth*2-.06,0x83877a,1,{yaw});
+    // A box around the rotated piece, so feet find the deck on the curves.
+    const spanX=Math.abs(along[0])*step+Math.abs(side[0])*halfWidth*2, spanZ=Math.abs(along[2])*step+Math.abs(side[2])*halfWidth*2;
+    world.obstacle(x,railY-.23,z,spanX,.46,spanZ,false);
+    for (const dz of [-gauge,gauge]) {
+      const [rx,rz]=piece(0,dz);
+      r.add('box',rx,railY-.092,rz,step+.08,.046,.18,0x65665c,4,{yaw});
+      r.add('box',rx,railY-.023,rz,step+.08,.042,.108,0x9caaa5,1,{yaw});
+    }
+    for (const dx of [-step*.25,step*.25]) {
+      const [sx,sz]=piece(dx,0);
+      r.add('box',sx,railY-.124,sz,.23,.105,2.61,0x8b897a,1,{yaw});
+    }
+    if (i%4===0) {
+      world.solid(x,2.25,z,1.01,4.5,.98,0x89958b,2);
+      r.add('box',x,railY-.77,z,1.81,.26,3.38,0x687973,4,{yaw});
+    }
+  }
+}
+
+// Ground the towers must keep clear of: the loop's curves and south side.
+export function railLoopSites() {
+  // The strips stop where the street's own parcels begin (the elevated road
+  // approach and the apartment rows, from z = 42).
+  const {half,south}=RAIL_LOOP, top=RAIL.z-2.4, bottom=south;
+  return [
+    {x:0,z:(south-2.4+bottom)/2,halfW:half,halfD:1.2},
+    ...[-1,1].map(side=>({x:side*(half+19),z:(top+bottom)/2,halfW:19,halfD:(bottom-top)/2}))
+  ];
 }
 
 export function buildRailConnection(world,line) {

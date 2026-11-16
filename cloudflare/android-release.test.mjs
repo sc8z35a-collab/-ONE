@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {RoomEngine} from './room-engine.js';
 import {frameOf} from './frame.js';
-import {drawBossModel,BOSS_BODY_HEIGHT} from '../dist/boss-model.js';
+import {BOSS_TENTACLES,drawBossModel,BOSS_BODY_HEIGHT} from '../dist/boss-model.js';
 import {Paint} from '../dist/ink.js';
 import {INK_SIZE,applyInkPacket,resetVisualInk} from '../dist/ink-wire.js';
 import {UNDER_X,ZONES} from '../dist/layout.js';
@@ -31,7 +31,7 @@ test('a legal 80-unit shot continues past three seconds, paints at its destinati
 });
 
 test('the new weapon costs and splatter radius are applied without multiplying damage',()=>{
-  const originalCosts=[2.45,4.5,7,9,6,3.15,4.35,3.75,4.5,2.695,24,15];
+  const originalCosts=[2.45,4.5,7,9,6,3.15,4.35,3.75,4.5,2.695,24,15,2.9,2.9*.6];
   assert.deepEqual(WEAPONS.map(w=>w.cost),originalCosts.map(cost=>cost/2));
   assert.deepEqual(SUBWEAPONS.map(w=>w.cost),[14.5,20.5,13,16.5,18,12]);
   const {battle:b}=new RoomEngine(options), p=b.player, w=weaponById('jet');
@@ -79,7 +79,7 @@ test('surface and underground ink, scores and action continue to update on one l
   assert.equal(replica.get(13,-16,0),1);
 });
 
-test('boss carapace has a dedicated tessellated mesh, detailed phase materials and a hittable main body',()=>{
+test('the boss is a plain, texture-ready body with five tentacles, phase colours and a hittable main body',()=>{
   const {battle:b}=new RoomEngine(options), boss=b.boss;
   Object.assign(boss,{x:10,y:0,z:-16,yaw:Math.PI,active:true});
   const emit=(phase,lite)=>{
@@ -90,8 +90,10 @@ test('boss carapace has a dedicated tessellated mesh, detailed phase materials a
   };
   const high=emit(1,false), mobile=emit(1,true), finalPhase=emit(3,false);
   assert(high.some(part=>part[0]==='mantle' && part[8]===23));
-  assert(high.filter(part=>part[0]==='ring').length>80);
-  assert(mobile.length>90 && mobile.length<high.length);
+  // A few big shapes: the squid-skin textures carry the detail.
+  assert(high.length<60 && mobile.length===high.length);
+  assert.equal(high.filter(part=>part[0]==='taper').length,BOSS_TENTACLES*5);
+  assert(!high.some(part=>part[0]==='ring' || part[0]==='bevel'));
   assert.notEqual(high[0][7],finalPhase[0][7]);
   assert(meshes().mantle.indices.length>meshes(true).mantle.indices.length*5);
   assert(b.bodyHit([boss.x,5.1,boss.z-7],[boss.x,5.1,boss.z+7],boss)!==null);

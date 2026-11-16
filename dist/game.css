@@ -340,7 +340,7 @@ h1 i { color: var(--orange); font-style: normal; }
 .boss-track i { display:block; height:100%; background:#d297e9; transform-origin:left; }
 #boss-alert { position:absolute; top:133px; left:50%; transform:translateX(-50%); padding:6px 13px; color:#fff0f7;
   background:#59376eea; border:1px solid #d4a7e3; font-weight:800; letter-spacing:.05em; font-size:14px; white-space:nowrap; }
-#combat-tools { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); width:min(411px,45vw); gap:5px; }
+#combat-tools { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); width:min(411px,45vw); gap:5px; }
 #combat-tools .skill-action { display:grid; grid-template-columns:14px minmax(0,1fr) auto; gap:2px 4px;
   grid-template-areas:"icon label key" ". state key"; justify-content:stretch; min-width:0; min-height:43px; text-align:left; }
 #combat-tools .skill-action span { grid-area:icon; }
@@ -571,16 +571,16 @@ h1 i { color: var(--orange); font-style: normal; }
 #reticle.enemy i { background:#ffe5a4; box-shadow:0 0 5px #ffae5c; }
 /* A large cross snaps open around the reticle whenever a shot connects. */
 #hit-marker { position:absolute; left:50%; top:50%; width:0; height:0; pointer-events:none; opacity:0; }
-#hit-marker i { position:absolute; left:-1.5px; top:-1.5px; width:3px; height:20px; background:#fff; box-shadow:0 0 8px #ffd58a,0 0 2px #2a1a10; transform-origin:1.5px 1.5px; }
-#hit-marker i:nth-child(1) { transform:rotate(45deg) translateY(13px); }
-#hit-marker i:nth-child(2) { transform:rotate(135deg) translateY(13px); }
-#hit-marker i:nth-child(3) { transform:rotate(225deg) translateY(13px); }
-#hit-marker i:nth-child(4) { transform:rotate(315deg) translateY(13px); }
-#hit-marker b { position:absolute; left:-26px; top:-26px; width:52px; height:52px; border:2px solid #fff3d0; border-radius:50%; opacity:.0; }
-#hit-marker.hit { animation:hit-pop .30s cubic-bezier(.2,.9,.25,1); }
-#hit-marker.hit b { animation:hit-ring .30s ease-out; }
+#hit-marker i { position:absolute; left:-2px; top:-2px; width:4px; height:28px; background:#fff; box-shadow:0 0 12px #ffd58a,0 0 3px #2a1a10; transform-origin:2px 2px; }
+#hit-marker i:nth-child(1) { transform:rotate(45deg) translateY(15px); }
+#hit-marker i:nth-child(2) { transform:rotate(135deg) translateY(15px); }
+#hit-marker i:nth-child(3) { transform:rotate(225deg) translateY(15px); }
+#hit-marker i:nth-child(4) { transform:rotate(315deg) translateY(15px); }
+#hit-marker b { position:absolute; left:-36px; top:-36px; width:72px; height:72px; border:3px solid #fff3d0; border-radius:50%; opacity:.0; box-shadow:0 0 14px #ffd58a; }
+#hit-marker.hit { animation:hit-pop .42s cubic-bezier(.2,.9,.25,1); }
+#hit-marker.hit b { animation:hit-ring .42s ease-out; }
 #hit-marker.kill { animation:hit-pop .56s cubic-bezier(.2,.9,.25,1); }
-#hit-marker.kill i { background:#ff5a3c; height:30px; box-shadow:0 0 12px #ff8a5a,0 0 2px #2a1a10; }
+#hit-marker.kill i { background:#ff5a3c; height:38px; box-shadow:0 0 12px #ff8a5a,0 0 2px #2a1a10; }
 #hit-marker.kill b { border-color:#ff8a5a; animation:hit-ring .56s ease-out; }
 @keyframes hit-pop { 0% { opacity:1; scale:2.1; } 35% { opacity:1; scale:1; } 100% { opacity:0; scale:1.25; } }
 @keyframes hit-ring { 0% { opacity:.9; scale:.4; } 100% { opacity:0; scale:1.9; } }

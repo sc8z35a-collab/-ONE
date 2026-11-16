@@ -1,7 +1,7 @@
 import {TAU,add,clamp,scale,sub,mix} from './render.js';
 
 import {BOUNDS,METRO,RAIL,UNDER_Y,ZONES,cityExit,floorBounds,inCity,isUnder,localX,railEnd,sameLevel,zoneOf} from './layout.js';
-import {buildRail,buildUnderground} from './levels.js';
+import {buildRail,buildUnderground,railLoopSites} from './levels.js';
 import {buildMetro,buildCabin} from './metro-stage.js';
 import {buildStairs,cutStairOpenings,stairAt,stairCrossing,stairFloor} from './stairs.js';
 import {Geometry} from './collision.js';
@@ -522,6 +522,9 @@ export class World {
     r.add('box',x,-lot.foundationDepthBelowGrade/2,z,lot.foundationWidth,lot.foundationDepthBelowGrade,lot.foundationDepth,0x858985,2);
     r.add('bevel',x,lot.podium/2,z,lot.foundationWidth,lot.podium,lot.foundationDepth,0xc8c3b3,2);
     r.add('box',x,(h+3.15)/2-.2,z,w,h-3.15,d,tint,11);
+    // The tower is solid, lobby included: nobody walks into it. Shots keep
+    // hitting its drawn shape, so this box only stops bodies.
+    this.obstacle(x,h/2,z,w+.2,h+.2,d+.2,false);
     r.add('box',x,1.39,z,w-.68,2.78,d-.68,0x7f928d,8);
     for (const sx of [-1,1]) for (const sz of [-1,1])
       r.add('box',x+sx*(w*.5-.17),1.43,z+sz*(d*.5-.17),.34,2.86,.34,tint,2);
@@ -863,6 +866,8 @@ export class World {
     wallWeathering(r,43,0,.80,4.742,0,5.4,.56,0x54776b);
     floorWeathering(r,44,35,.102,7.77,4.2,.39,0xd7d3bf);
     floorWeathering(r,45,-14,0,12.7,4.7,1.9,0xb9b7ab);
+    // Towers keep clear of the elevated loop (layout.js RAIL_LOOP).
+    this.towerSites.push(...railLoopSites());
     for (const sign of [-1,1]) {
       for (let i=0;i<12;i++) {
         const x=-59+i*11.2+R()*3, z=sign*(43.5+R()*13);
@@ -872,7 +877,8 @@ export class World {
       }
     }
     for (const side of [-1,1]) {
-      for (let i=0;i<7;i++) this.tower(side*(62+R()*19),-36+i*12,7+R()*7,6+R()*7,9+R()*27,panelColors[(i+2)%panelColors.length]);
+      // Beyond the loop's curves: east of it, and west past the apartment blocks.
+      for (let i=0;i<7;i++) this.tower(side>0?96+R()*14:-(152+R()*10),-36+i*12,7+R()*7,6+R()*7,9+R()*27,panelColors[(i+2)%panelColors.length]);
       for (const sign of [-1,1]) {
         r.add('box',side*55.1,.64,sign*15.23,.43,1.28,14.6,0xa6a99d,1);
         this.rail([side*55.1,1.27,sign*8.0],[side*55.1,1.27,sign*22.3],0x879592,8);

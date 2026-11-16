@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="mark-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <link rel="stylesheet" href="game.css?v=22">
+  <link rel="stylesheet" href="game.css?v=23">
 </head>
 <body>
   <main id="game" aria-label="INK//SHIFT">
@@ -98,6 +98,9 @@
           </button>
           <button id="sub-action" class="skill-action" type="button" aria-label="選択したサブウェポンを使う">
             <span aria-hidden="true">◈</span><b id="sub-name">投げボム</b><small id="sub-state">準備OK</small><kbd>G</kbd>
+          </button>
+          <button id="co-action" class="skill-action" type="button" aria-label="SW OUT II のCOモードを切り替え" hidden>
+            <span aria-hidden="true">⌖</span><b>COモード</b><small id="co-state">OFF</small><kbd>C</kbd>
           </button>
           <button id="drone-action" class="skill-action" type="button" aria-label="塗りドローンを召喚">
             <span aria-hidden="true">◇</span><b>ドローン</b><small id="drone-state">準備OK</small><kbd>E</kbd>
@@ -195,6 +198,6 @@
     <div id="loading" role="status"><span class="live-dot"></span><span id="loading-caption">第07高架街区を読み込み中</span></div>
     <noscript>プレイするにはJavaScriptを有効にしてください。</noscript>
   </main>
-  <script type="module" src="main.js?v=27"></script>
+  <script type="module" src="main.js?v=28"></script>
 </body>
 </html>
