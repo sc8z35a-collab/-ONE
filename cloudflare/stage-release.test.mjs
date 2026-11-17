@@ -131,15 +131,15 @@ test('removed missiles are absent from play, and a legacy room can activate the 
 test('a shot reaches ground outside the old boundary, leaves unscored ink, and restores that exact coat',()=>{
   const e=new RoomEngine({...options,weapon:'lob'}), b=e.battle, p=b.player;
   for (const a of b.actors) if (a!==p) a.down=99;
-  Object.assign(p,{x:-47,y:0,z:12,yaw:-Math.PI/2,fire:0});
+  Object.assign(p,{x:-40,y:0,z:26,yaw:-Math.PI/2,fire:0});
   const generator=b.rng;
   b.rng=()=>.5;
   b.paint.reset();
-  // Open ground past the old edge, inside the elevated loop's west curve.
-  assert(b.shoot(p,[-75,-.065,12]));
+  // Open ground past the old edge, just inside the west wall of fronts.
+  assert(b.shoot(p,[-58,-.065,26]));
   for (let i=0;i<460 && b.shots.length;i++) {b.clock+=1/60;b.updateShots(1/60);}
   const mark=b.decals.at(-1);
-  assert(mark && Math.abs(mark.p[0]+75)<.15 && mark.normal[1]>.98);
+  assert(mark && Math.abs(mark.p[0]+58)<.15 && mark.normal[1]>.98);
   assert.equal(b.paint.count[0],0);
   b.rng=generator;
   const restored=new RoomEngine(options,checkpoint(e)).battle;

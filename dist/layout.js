@@ -1,8 +1,9 @@
 export const BOUNDS=[53.5,35];
-// The city ends at a ring of facade-only buildings round the street: one
-// thin wall of building fronts with nothing at all beyond it. A narrow walled
-// lane leads south out of the ring and carries the elevated road's approach.
-export const ENCLOSURE=[{x0:-97,x1:97,z0:-47,z1:49},{x0:5.6,x1:16.2,z0:48,z1:97}];
+// The city ends at a ring of facade-only buildings drawn tight round the
+// street (just behind both shop rows, a few metres past each end): one thin
+// wall of building fronts with nothing at all beyond it. A narrow walled lane
+// leads south out of the ring and carries the elevated road's approach.
+export const ENCLOSURE=[{x0:-60,x1:60,z0:-41,z1:44.6},{x0:5.6,x1:16.2,z0:43,z1:97}];
 // Far enough to reach past every corner of the ring.
 export const CITY_RADIUS=140;
 export const inCity=(x,z,margin=0)=>ENCLOSURE.some(b=>x>=b.x0+margin && x<=b.x1-margin && z>=b.z0+margin && z<=b.z1-margin);
@@ -19,7 +20,7 @@ export function cityExit(from,to,margin=0) {
   }
   return lo;
 }
-export const SCENE_VERSION=18;
+export const SCENE_VERSION=19;
 export const SCENE_FILE=`scene-07-v${SCENE_VERSION}.json`;
 export const UNDER_BOUNDS=[64,46];
 export const CABIN_BOUNDS=[9.24,1.47];

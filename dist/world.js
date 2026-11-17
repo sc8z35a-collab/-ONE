@@ -533,15 +533,17 @@ export class World {
   highway() {
     const r=this.r;
     const x=10.9,w=8.4,y=12.24;
-    this.solid(x,y,-.4,w,.86,89,0xa0a5a0,1);
+    // The deck runs from the north wall of fronts to the approach ramp.
+    const north=-40.75, south=44.05, mid=(north+south)/2, run=south-north;
+    this.solid(x,y,mid,w,.86,run,0xa0a5a0,1);
     for (const side of [-1,1]) {
-      this.solid(x+side*w/2,y+.68,-.4,.52,.74,89.12,0xc7c5b8,1);
-      r.add('box',x+side*(w/2-.2),y-.42,-.4,.56,.47,89.14,0x86918d,4);
-      r.add('box',x+side*3.08,y-.49,-.4,.28,.38,88.8,0x697874,4);
-      for (let z=-43;z<43;z+=2.65) r.add('box',x+side*(w/2+.023),y+.77,z,.61,.24,.21,0xbfc6bd,2);
+      this.solid(x+side*w/2,y+.68,mid,.52,.74,run+.12,0xc7c5b8,1);
+      r.add('box',x+side*(w/2-.2),y-.42,mid,.56,.47,run+.14,0x86918d,4);
+      r.add('box',x+side*3.08,y-.49,mid,.28,.38,run-.2,0x697874,4);
+      for (let z=north+1.6;z<43;z+=2.65) r.add('box',x+side*(w/2+.023),y+.77,z,.61,.24,.21,0xbfc6bd,2);
     }
-    this.solid(x,y+.68,-44.81,w,.74,.26,0xc7c5b8,1);
-    for (let z=-42;z<43;z+=3.4) r.add('box',x,y-.50,z,w-.29,.29,.21,0x74817b,4);
+    this.solid(x,y+.68,north+.13,w,.74,.26,0xc7c5b8,1);
+    for (let z=north+1.6;z<43;z+=3.4) r.add('box',x,y-.50,z,w-.29,.29,.21,0x74817b,4);
     for (const z of [-33.3,-14.4,13.85,31.25]) {
       this.solid(x,5.87,z,1.62,11.74,1.67,0xa7aaa0,1);
       r.add('box',x,.26,z,2.21,.52,2.09,0xb4b5a8,1);

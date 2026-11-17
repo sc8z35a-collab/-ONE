@@ -66,8 +66,9 @@ test('a thin ring of building fronts is the edge of the city: solid to bodies an
   assert(fronts.length>25 && fronts.every(f=>f.height>=16 && f.width>=5));
   // Every piece of the street stands inside the ring (or is the ring itself).
   const reach=FACADE_DEPTH+.6;
-  for (const [zone,type,x,,z,w,,d] of scene.parts) {
-    if (zone!==0 || type==='label') continue;
+  for (const [zone,type,x,,z,w,,d,,,opts] of scene.parts) {
+    // The short tunnels behind the loop's openings belong to the ring.
+    if (zone!==0 || type==='label' || opts?.portal) continue;
     assert(inCity(x,z,-reach-Math.max(w,d)*.5),`part at ${x},${z} lies outside the ring`);
   }
   // The ground ends with the ring: beyond it is empty space.
@@ -75,18 +76,18 @@ test('a thin ring of building fronts is the edge of the city: solid to bodies an
   assert.equal(world.geometry.trace([0,.3,70],[0,-.2,70]),null);
   assert.equal(world.geometry.trace([130,30,0],[130,-5,0]),null);
   // Bodies stop at the ring, even high up a climbed front.
-  const runner={x:96.2,z:0,y:30};
+  const edge=ENCLOSURE[0].x1, runner={x:edge-.8,z:0,y:30};
   world.step(runner,5,0);
-  near(runner.x,96.2);
+  near(runner.x,edge-.8);
   world.step(runner,-.5,0);
-  near(runner.x,95.7);
-  assert(world.blocked(ENCLOSURE[0].x1+.2,.05,0) && !world.blocked(70,.05,0));
+  near(runner.x,edge-1.3);
+  assert(world.blocked(edge+.2,.05,0) && !world.blocked(edge-2,.05,0));
   // Rays end at the ring: on a front, or at the boundary above the lower ones.
   const ray=world.traceExact([0,60,0],[300,60,0]);
   near(ray.position[0],ENCLOSURE[0].x1,.6);
-  assert.equal(cityExit([96,0,0],[90,0,0]),null);
+  assert.equal(cityExit([edge-1,0,0],[edge-6,0,0]),null);
   // A front is a wall: paint marks it but never scores as floor.
-  const wall=world.traceExact([90,1.5,3],[99,1.5,3]);
+  const wall=world.traceExact([edge-8,1.5,3],[edge+6,1.5,3]);
   assert(wall?.shape && wall.normal[0]<-.9);
   const before=b.paint.count[0];
   b.splat(wall,{actor:b.player,weapon:b.player.weapon});
