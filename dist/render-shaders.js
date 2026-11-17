@@ -61,8 +61,9 @@ float sfNoise(vec2 p){
 }
 // tint: the instance colour as stored (sRGB). Returns -1 for surfaces that
 // keep their procedural look (lights, glass panes with rooms, ink, labels).
-// Apartment blocks (kind 10): the front wears its style (residential.js
-// APARTMENT_STYLES), the back the access corridors, the ends a gable wall.
+// Apartment fronts (kind 10, the ring of fronts in enclosure.js): the street
+// side wears its style (label 0 balcony, 1 loggia, 2 ribbon, 3 fins, 4 screen,
+// 5 brick, 6 glass), the back the access corridors, the ends a gable wall.
 int apartmentSlot(int style,int face){
   if (face==1) return S_APT_CORRIDOR;
   if (face==2) return S_APT_ENDWALL;
@@ -278,7 +279,7 @@ vec3 envDecode(vec4 c){return c.rgb/max(vec3(1.)-c.rgb,vec3(.004));}
 vec3 envEncode(vec3 c){c=max(c,vec3(0.));return c/(1.+c);}
 `;
 
-// Sky radiance, clouds and a distant skyline. Shared by the background, the
+// Sky radiance and clouds (nothing stands beyond the ring of fronts). Shared by the background, the
 // reflection probe and the fog colour so geometry fades into the same sky.
 export const SKY=`
 uniform sampler2D uDetail;
@@ -323,25 +324,9 @@ vec4 skyClouds(vec3 d){
   col=mix(skyAtmos(d),col,mix(.30,1.,smoothstep(.015,.32,d.y)));
   return vec4(col,dens*smoothstep(.004,.14,d.y));
 }
-float skylineHeight(vec3 d){
-  float az=atan(d.x,-d.z)*36.;
-  float cell=floor(az);
-  float h=.003+pow(hash12(vec2(cell,1.7)),2.2)*.026+step(.9,hash12(vec2(cell,9.1)))*.030;
-  return h*(.55+.45*hash12(vec2(floor(az*.17),4.)));
-}
 vec3 skyFull(vec3 d,bool clouds,bool disk){
   vec3 col=skyAtmos(d);
   if (clouds && d.y>0.) {vec4 c=skyClouds(d);col=mix(col,c.rgb,c.a);}
-  float top=skylineHeight(d);
-  if (d.y<top && d.y>-.04) {
-    float az=atan(d.x,-d.z)*36.;
-    float id=hash12(vec2(floor(az),2.3));
-    float side=step(.5,fract(az))*.5+.5;
-    vec3 tower=mix(vec3(.25,.31,.37),vec3(.37,.42,.47),id)*mix(.82,1.08,side*sat(uSun.y+.3));
-    float rows=step(.55,fract(d.y*640.))*step(.45,fract(az*7.))*.035;
-    vec3 building=(tower+rows)*1.15;
-    col=mix(building,col,.42+.38*sat(1.-(top-d.y)*40.));
-  }
   if (disk) {
     float s=dot(d,uSun);
     col+=vec3(1.,.93,.80)*smoothstep(.99988,.99995,s)*70.;
@@ -1156,7 +1141,7 @@ void main(){
       }
     }
   } else if (kind==10) {
-    // Apartment blocks are single boxes: the drawn facade sheet supplies the
+    // Apartment fronts are single slabs: the drawn facade sheet supplies the
     // balconies, windows, corridors and gable walls. Each face fits a whole
     // number of dwelling units across, two storeys per repeat.
     vec2 fsz=faceSize, fp=faceUV+fsz*.5, fdx=dFdx(fp), fdy=dFdy(fp);

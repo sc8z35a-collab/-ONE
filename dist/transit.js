@@ -2,7 +2,7 @@ import {resetGait} from './npc-motion.js';
 import {surfacePaintRadius} from './ink.js';
 import {add,clamp,cross,dot,mix,scale,splatRadius,sub,unit} from './render.js';
 import {collectShapes,surfaceRim,traceShapes} from './collision.js';
-import {CABIN_Y,LOOP_LENGTH,METRO,RAIL,STATIONS,giantHeight,isCabin,localX,loopAhead,loopWrap,railEnd,railPath,sameLevel,stationAt} from './layout.js';
+import {CABIN_Y,LOOP_LENGTH,METRO,RAIL,STATIONS,giantHeight,inCity,isCabin,localX,loopAhead,loopWrap,railEnd,railPath,sameLevel,stationAt} from './layout.js';
 import {drawTrain,TRAIN_AXLES,TRAIN_DOORS,TRAIN_HULLS,trainPose} from './train-model.js';
 import {rayBox} from './world.js';
 import {STAIRS,stairPoint} from './stairs.js';
@@ -564,6 +564,12 @@ export class Transit {
   }
 
   draw(r) {
+    // Beyond the ring of fronts nothing is drawn: past its tunnel mouth the
+    // looped train is out of sight until it comes back in.
+    if (this.line.loop) {
+      const [x,,z]=trainPose(this.train,this.line).at(0,0,0);
+      if (!inCity(x,z,-10.5)) return;
+    }
     drawTrain(r,this.train,this.time,this.line);
   }
 }

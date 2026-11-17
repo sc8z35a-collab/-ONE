@@ -229,7 +229,7 @@ export const SURFACE_SHEETS=[
   ]},
   // Drawn by .claude/skills/texture-sheets/scripts/draw-apartments.py: one
   // dwelling unit wide and two storeys tall, tiled exactly over the single-box
-  // apartment blocks (the shader fits whole units to each face).
+  // apartment fronts of the city's edge (the shader fits whole units to each face).
   {id:'apartments',title:'Apartment block facades',cells:[
     {id:'apt_balcony',meters:1,take:.75,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'apartment front, beige tiles, full-width balconies with frosted glass rails and air-conditioner units'},
     {id:'apt_loggia',meters:1,take:.75,pattern:true,repeat:true,crop:[0,0,1,1],prompt:'apartment front, white concrete with recessed loggias behind solid parapets and slim handrails'},

@@ -4,7 +4,7 @@ import {readFileSync} from 'node:fs';
 import {frameOf} from './frame.js';
 import {RoomEngine} from './room-engine.js';
 import {SCENE_FILE,SCENE_VERSION} from '../dist/layout.js';
-import {RESIDENTIAL_TYPES,residentialLot} from '../dist/residential.js';
+import {FACADE_DEPTH,enclosureFronts,enclosureRuns} from '../dist/enclosure.js';
 import {STREET_FACILITIES} from '../dist/street-facilities.js';
 import {WEATHERING} from '../dist/weathering.js';
 import {SUPERS,WEAPONS,weaponById} from '../dist/weapons.js';
@@ -15,17 +15,25 @@ const engine=()=>new RoomEngine(options);
 const checkpoint=e=>new Map(Object.entries(structuredClone(e.checkpoint())));
 const baked=JSON.parse(readFileSync(new URL(`../dist/${SCENE_FILE}`,import.meta.url)));
 const receiver={zone:0,add(){},label(){},seal(){}};
+const near=(a,b,error=1e-6)=>assert(Math.abs(a-b)<error,`${a} vs ${b}`);
 
-test('all 30 residence designs fit without crossing parcel lines, and taller footprints get more land and foundation',()=>{
-  const w=engine().battle.world;
-  assert.equal(RESIDENTIAL_TYPES.length,30);
-  assert.equal(new Set(RESIDENTIAL_TYPES.map(r=>[r.form,r.width,r.depth,r.height,r.facade,r.roof].join())).size,30);
-  assert.equal(w.towerSites.filter(site=>site.type).length,30);
-  for (const [i,a] of w.towerSites.entries()) for (const b of w.towerSites.slice(i+1)) {
-    assert(Math.abs(a.x-b.x)>=a.halfW+b.halfW || Math.abs(a.z-b.z)>=a.halfD+b.halfD);
+test('the ring of fronts closes every side, the approach lane included, and every front faces the street',()=>{
+  const w=engine().battle.world, runs=enclosureRuns(), fronts=enclosureFronts();
+  let total=0;
+  for (const run of runs) total+=Math.hypot(run.b[0]-run.a[0],run.b[1]-run.a[1]);
+  near(fronts.reduce((sum,f)=>sum+f.width,0),total,1e-6);
+  for (const f of fronts) {
+    // Local +z, the facade side, points along the run's inward normal.
+    near(Math.sin(f.yaw),f.normal[0],1e-9);
+    near(Math.cos(f.yaw),f.normal[1],1e-9);
   }
-  const tall=residentialLot(16,12,64), short=residentialLot(16,12,12);
-  for (const key of Object.keys(short)) assert(tall[key]>short[key],key);
+  for (const run of runs) {
+    const length=Math.hypot(run.b[0]-run.a[0],run.b[1]-run.a[1]);
+    for (let t=.5;t<length-.5;t+=1) {
+      const x=run.a[0]+(run.b[0]-run.a[0])*t/length, z=run.a[1]+(run.b[1]-run.a[1])*t/length;
+      assert(w.blocked(x-run.n[0]*FACADE_DEPTH,.05,z-run.n[1]*FACADE_DEPTH,.4),`gap at ${x},${z}`);
+    }
+  }
 });
 
 test('the baked city contains all fifty weathering designs and ten labelled facilities with clear entrances',()=>{
@@ -123,15 +131,15 @@ test('removed missiles are absent from play, and a legacy room can activate the 
 test('a shot reaches ground outside the old boundary, leaves unscored ink, and restores that exact coat',()=>{
   const e=new RoomEngine({...options,weapon:'lob'}), b=e.battle, p=b.player;
   for (const a of b.actors) if (a!==p) a.down=99;
-  Object.assign(p,{x:-47,y:0,z:12,yaw:-Math.PI/2,fire:0});
+  Object.assign(p,{x:-40,y:0,z:26,yaw:-Math.PI/2,fire:0});
   const generator=b.rng;
   b.rng=()=>.5;
   b.paint.reset();
-  // Open street past the old edge (the apartment blocks start at x≈-104).
-  assert(b.shoot(p,[-100,-.065,12]));
+  // Open ground past the old edge, just inside the west wall of fronts.
+  assert(b.shoot(p,[-58,-.065,26]));
   for (let i=0;i<460 && b.shots.length;i++) {b.clock+=1/60;b.updateShots(1/60);}
   const mark=b.decals.at(-1);
-  assert(mark && Math.abs(mark.p[0]+100)<.15 && mark.normal[1]>.98);
+  assert(mark && Math.abs(mark.p[0]+58)<.15 && mark.normal[1]>.98);
   assert.equal(b.paint.count[0],0);
   b.rng=generator;
   const restored=new RoomEngine(options,checkpoint(e)).battle;

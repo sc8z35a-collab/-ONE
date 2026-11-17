@@ -1,4 +1,4 @@
-import {LOOP_LENGTH,METRO,RAIL,RAIL_LOOP,TRACK_LAYER,UNDER_BOUNDS,UNDER_X,UNDER_Y,railEnd,railPath,stationAt} from './layout.js';
+import {LOOP_LENGTH,METRO,RAIL,RAIL_LOOP,TRACK_LAYER,UNDER_BOUNDS,UNDER_X,UNDER_Y,inCity,railEnd,railPath,stationAt} from './layout.js';
 
 import {cutStairOpenings} from './stairs.js';
 import {floorWeathering,wallWeathering} from './weathering.js';
@@ -57,14 +57,16 @@ export function buildRail(world) {
 }
 
 // The rest of the loop beyond the station straight: deck, rails and sleepers
-// in short straight pieces round the curves and along the south side, on
-// piers every ten metres.
+// in short straight pieces along the south side, on piers every ten metres.
+// The curves lie beyond the ring of fronts, where nothing is built: the train
+// leaves through tunnel mouths in the wall (enclosure.js) and comes back.
 const LOOP_STEP=2.4;
 export function buildRailLoop(world) {
   const r=world.r, {y:railY,halfWidth,gauge}=RAIL, start=RAIL_LOOP.half, end=LOOP_LENGTH-RAIL_LOOP.half;
   const pieces=Math.ceil((end-start)/LOOP_STEP), step=(end-start)/pieces;
   for (let i=0;i<pieces;i++) {
     const s=start+(i+.5)*step, {x,z,yaw}=railPath(s), along=[Math.cos(yaw),0,-Math.sin(yaw)], side=[Math.sin(yaw),0,Math.cos(yaw)];
+    if (!inCity(x,z)) continue;
     const piece=(dx,dz)=>[x+along[0]*dx+side[0]*dz,z+along[2]*dx+side[2]*dz];
     r.add('box',x,railY-.45,z,step+.08,.56,halfWidth*2,0x64736e,4,{yaw});
     r.add('box',x,railY-.138,z,step+.1,.107,halfWidth*2-.06,0x83877a,1,{yaw});
@@ -85,17 +87,6 @@ export function buildRailLoop(world) {
       r.add('box',x,railY-.77,z,1.81,.26,3.38,0x687973,4,{yaw});
     }
   }
-}
-
-// Ground the towers must keep clear of: the loop's curves and south side.
-export function railLoopSites() {
-  // The strips stop where the street's own parcels begin (the elevated road
-  // approach and the apartment rows, from z = 42).
-  const {half,south}=RAIL_LOOP, top=RAIL.z-2.4, bottom=south;
-  return [
-    {x:0,z:(south-2.4+bottom)/2,halfW:half,halfD:1.2},
-    ...[-1,1].map(side=>({x:side*(half+19),z:(top+bottom)/2,halfW:19,halfD:(bottom-top)/2}))
-  ];
 }
 
 export function buildRailConnection(world,line) {

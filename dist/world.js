@@ -1,16 +1,16 @@
 import {TAU,add,clamp,scale,sub,mix} from './render.js';
 
-import {BOUNDS,METRO,RAIL,UNDER_Y,ZONES,cityExit,floorBounds,inCity,isUnder,localX,railEnd,sameLevel,zoneOf} from './layout.js';
-import {buildRail,buildUnderground,railLoopSites} from './levels.js';
+import {BOUNDS,ENCLOSURE,METRO,RAIL,UNDER_Y,ZONES,cityExit,floorBounds,inCity,isUnder,localX,railEnd,sameLevel,zoneOf} from './layout.js';
+import {buildRail,buildUnderground} from './levels.js';
 import {buildMetro,buildCabin} from './metro-stage.js';
 import {buildStairs,cutStairOpenings,stairAt,stairCrossing,stairFloor} from './stairs.js';
 import {Geometry} from './collision.js';
-import {buildResidentialDistrict,residentialLot} from './residential.js';
+import {buildEnclosure} from './enclosure.js';
 import {buildStreetFacilities} from './street-facilities.js';
 import {floorWeathering,wallWeathering} from './weathering.js';
 import {apartmentEntry,buildApartmentEntry} from './apartment-entries.js';
 import {buildBreakableBlocks,prepareStageObjects} from './stage-objects.js';
-import {APPROACH_LOT,buildElevatedApproach,buildOuterCity} from './outer-city.js';
+import {buildElevatedApproach} from './elevated-approach.js';
 
 export {BOUNDS};
 export const SPAWN_X = 47.0;
@@ -58,7 +58,6 @@ export class World {
     this.r=this.geometry.track(renderer);
     this.solids=scene?.solids ?? [];
     this.slabs=scene?.slabs ?? [];
-    this.towerSites=[APPROACH_LOT];
     this.homes=scene?.homes ?? [];
     this.elevated=scene?.elevated ?? [];
     this.objects=scene?.objects ?? [];
@@ -504,60 +503,6 @@ export class World {
     }
   }
 
-  tower(x,z,w,d,h,tint) {
-    const r=this.r;
-    const side=Math.sign(z) || 1;
-    const lot=residentialLot(w,d,h);
-    const halfW=lot.width/2, halfD=lot.depth/2;
-    if (Math.abs(z)>40 && Math.abs(x)<57) z=side*Math.max(Math.abs(z),41+halfD);
-    const besideTunnel=Math.abs(x)+halfW>RAIL.edge && Math.abs(x)-halfW<railEnd(RAIL);
-    for (;;) {
-      if (besideTunnel && Math.abs(z-RAIL.z)<halfD+2.5) z=RAIL.z+side*(halfD+3.4);
-      const overlap=this.towerSites.find(site=>Math.abs(x-site.x)<halfW+site.halfW && Math.abs(z-site.z)<halfD+site.halfD);
-      if (!overlap) break;
-      z=overlap.z+side*(halfD+overlap.halfD+.45);
-    }
-    this.towerSites.push({x,z,halfW,halfD});
-    r.add('box',x,-.08,z,lot.width,.19,lot.depth,0xa7aba1,1);
-    r.add('box',x,-lot.foundationDepthBelowGrade/2,z,lot.foundationWidth,lot.foundationDepthBelowGrade,lot.foundationDepth,0x858985,2);
-    r.add('bevel',x,lot.podium/2,z,lot.foundationWidth,lot.podium,lot.foundationDepth,0xc8c3b3,2);
-    r.add('box',x,(h+3.15)/2-.2,z,w,h-3.15,d,tint,11);
-    // The tower is solid, lobby included: nobody walks into it. Shots keep
-    // hitting its drawn shape, so this box only stops bodies.
-    this.obstacle(x,h/2,z,w+.2,h+.2,d+.2,false);
-    r.add('box',x,1.39,z,w-.68,2.78,d-.68,0x7f928d,8);
-    for (const sx of [-1,1]) for (const sz of [-1,1])
-      r.add('box',x+sx*(w*.5-.17),1.43,z+sz*(d*.5-.17),.34,2.86,.34,tint,2);
-    r.add('box',x,2.94,z,w+.33,.28,d+.33,0xc6c9ba,2);
-    r.add('box',x,h+.11,z,w+.20,.28,d+.20,0xbec9c8,2);
-    for (let floor=0;floor<h;floor+=6.3) {
-      r.add('box',x,floor,z,w+.19,.16,d+.21,0xc8d0ca,2);
-    }
-    for (const sign of [-1,1]) {
-      r.add('box',x+sign*(w/2-.21),h/2,z,.34,h+.1,d+.22,0xc1c9c4,2);
-      r.add('box',x,h/2,z+sign*(d/2-.11),w+.27,h+.2,.21,tint,11);
-    }
-    r.add('box',x+w*.10,h+1.02,z-d*.09,w*.43,1.78,d*.43,0xc9cec4,2);
-    r.add('cylinder',x+w*.22,h+2.9,z-d*.17,.14,3.0,.14,0x848f8d,4);
-    for (const side of [-1,1]) {
-      for (let floor=0;floor<Math.min(3,Math.floor(h/3.15));floor++) {
-        const y=1.54+floor*3.15, across=Math.max(1,Math.floor((w-.7)/2.15)), step=(w-.64)/across;
-        for (let col=0;col<across;col++) {
-          const px=x-w*.5+.32+step*(col+.5), pz=z+side*(d*.5+.043);
-          r.add('bevel',px,y,pz,step-.21,1.84,.12,0x526c6b,4);
-          r.add('box',px,y,pz+side*.065,step-.36,1.66,.025,0x91afa9,8);
-          r.add('box',px,y-.94,pz+side*.10,step-.13,.11,.28,0xc4c8b6,2);
-          r.add('box',px,y,pz+side*.086,.055,1.68,.046,0xb1bbb1,4);
-        }
-      }
-    }
-    for (const sign of [-1,1]) {
-      const rx=x+sign*w*.28;
-      r.add('bevel',rx,h+.37,z+d*.20,w*.25,.58,d*.24,0x84958d,4);
-      for (let slot=0;slot<5;slot++) r.add('box',rx,h+.68,z+d*(.12+slot*.04),w*.20,.029,.045,0x4e6661,4);
-    }
-  }
-
   canopy() {
     const r=this.r;
     const tints=[0xe2e9e3,0xf2eee0,0xdbe4dd,0xd5e4e1,0xe8ded0];
@@ -588,15 +533,17 @@ export class World {
   highway() {
     const r=this.r;
     const x=10.9,w=8.4,y=12.24;
-    this.solid(x,y,-.4,w,.86,89,0xa0a5a0,1);
+    // The deck runs from the north wall of fronts to the approach ramp.
+    const north=-40.75, south=44.05, mid=(north+south)/2, run=south-north;
+    this.solid(x,y,mid,w,.86,run,0xa0a5a0,1);
     for (const side of [-1,1]) {
-      this.solid(x+side*w/2,y+.68,-.4,.52,.74,89.12,0xc7c5b8,1);
-      r.add('box',x+side*(w/2-.2),y-.42,-.4,.56,.47,89.14,0x86918d,4);
-      r.add('box',x+side*3.08,y-.49,-.4,.28,.38,88.8,0x697874,4);
-      for (let z=-43;z<43;z+=2.65) r.add('box',x+side*(w/2+.023),y+.77,z,.61,.24,.21,0xbfc6bd,2);
+      this.solid(x+side*w/2,y+.68,mid,.52,.74,run+.12,0xc7c5b8,1);
+      r.add('box',x+side*(w/2-.2),y-.42,mid,.56,.47,run+.14,0x86918d,4);
+      r.add('box',x+side*3.08,y-.49,mid,.28,.38,run-.2,0x697874,4);
+      for (let z=north+1.6;z<43;z+=2.65) r.add('box',x+side*(w/2+.023),y+.77,z,.61,.24,.21,0xbfc6bd,2);
     }
-    this.solid(x,y+.68,-44.81,w,.74,.26,0xc7c5b8,1);
-    for (let z=-42;z<43;z+=3.4) r.add('box',x,y-.50,z,w-.29,.29,.21,0x74817b,4);
+    this.solid(x,y+.68,north+.13,w,.74,.26,0xc7c5b8,1);
+    for (let z=north+1.6;z<43;z+=3.4) r.add('box',x,y-.50,z,w-.29,.29,.21,0x74817b,4);
     for (const z of [-33.3,-14.4,13.85,31.25]) {
       this.solid(x,5.87,z,1.62,11.74,1.67,0xa7aaa0,1);
       r.add('box',x,.26,z,2.21,.52,2.09,0xb4b5a8,1);
@@ -761,7 +708,10 @@ export class World {
 
   build() {
     const r=this.r, R=this.rng;
-    cutStairOpenings(r,-36,-.26,0,280,.52,384,0xb9b7ab,1);
+    // Ground only inside the ring of fronts (and under the approach lane).
+    const [ring,lane]=ENCLOSURE;
+    cutStairOpenings(r,(ring.x0+ring.x1)/2,-.26,(ring.z0+ring.z1)/2,ring.x1-ring.x0,.52,ring.z1-ring.z0,0xb9b7ab,1);
+    r.add('box',(lane.x0+lane.x1)/2,-.26,(ring.z1+lane.z1)/2,lane.x1-lane.x0,.52,lane.z1-ring.z1,0xb9b7ab,1);
     r.add('box',0,-.15,0,114,.306,15.15,0x777e7b,5);
     for (const side of [-1,1]) {
       r.add('box',0,.051,side*7.77,113.5,.1,.44,0xd7d3bf,1);
@@ -860,25 +810,14 @@ export class World {
     this.districts();
     buildStreetFacilities(this);
     buildBreakableBlocks(this);
-    buildResidentialDistrict(this);
     floorWeathering(r,41,-46,.013,25.7,3.0,1.24,0xbab19c);
     floorWeathering(r,42,42,0,-12.7,2.8,1.43,0xb9b7ab);
     wallWeathering(r,43,0,.80,4.742,0,5.4,.56,0x54776b);
     floorWeathering(r,44,35,.102,7.77,4.2,.39,0xd7d3bf);
     floorWeathering(r,45,-14,0,12.7,4.7,1.9,0xb9b7ab);
-    // Towers keep clear of the elevated loop (layout.js RAIL_LOOP).
-    this.towerSites.push(...railLoopSites());
-    for (const sign of [-1,1]) {
-      for (let i=0;i<12;i++) {
-        const x=-59+i*11.2+R()*3, z=sign*(43.5+R()*13);
-        this.tower(x,z,6.5+R()*6,6+R()*7,12.6+R()*34,panelColors[(i+3)%panelColors.length]);
-        const farX=-88+i*15.8+R()*4.5;
-        this.tower(farX,sign*(60+R()*12),8+R()*8,9+R()*8,20+R()*37,0x9aadb3);
-      }
-    }
+    // The city ends at a thin ring of building fronts; nothing stands beyond it.
+    buildEnclosure(this);
     for (const side of [-1,1]) {
-      // Beyond the loop's curves: east of it, and west past the apartment blocks.
-      for (let i=0;i<7;i++) this.tower(side>0?96+R()*14:-(152+R()*10),-36+i*12,7+R()*7,6+R()*7,9+R()*27,panelColors[(i+2)%panelColors.length]);
       for (const sign of [-1,1]) {
         r.add('box',side*55.1,.64,sign*15.23,.43,1.28,14.6,0xa6a99d,1);
         this.rail([side*55.1,1.27,sign*8.0],[side*55.1,1.27,sign*22.3],0x879592,8);
@@ -894,6 +833,5 @@ export class World {
     }
     r.add('box',-57.2,.07,1.5,4.9,.17,11.3,0x8d9b93,1);
     r.add('box',57.2,.07,1.5,4.9,.17,11.3,0x8d9b93,1);
-    buildOuterCity(this);
   }
 }
