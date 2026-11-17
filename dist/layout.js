@@ -1,16 +1,25 @@
 export const BOUNDS=[53.5,35];
-export const CITY_RADIUS=500;
-export const inCity=(x,z,margin=0)=>Math.hypot(x,z)<=CITY_RADIUS-margin;
+// The city ends at a ring of facade-only buildings round the street: one
+// thin wall of building fronts with nothing at all beyond it. A narrow walled
+// lane leads south out of the ring and carries the elevated road's approach.
+export const ENCLOSURE=[{x0:-97,x1:97,z0:-47,z1:49},{x0:5.6,x1:16.2,z0:48,z1:97}];
+// Far enough to reach past every corner of the ring.
+export const CITY_RADIUS=140;
+export const inCity=(x,z,margin=0)=>ENCLOSURE.some(b=>x>=b.x0+margin && x<=b.x1-margin && z>=b.z0+margin && z<=b.z1-margin);
+// Fraction of from→to where the path leaves the city (null if it stays in).
 export function cityExit(from,to,margin=0) {
-  const radius=CITY_RADIUS-margin;
-  const x=from[0],z=from[2],dx=to[0]-x,dz=to[2]-z;
-  const c=x*x+z*z-radius*radius;
-  if (c>0) return x*dx+z*dz<0 && inCity(to[0],to[2],margin)?null:0;
-  if (inCity(to[0],to[2],margin)) return null;
-  const a=dx*dx+dz*dz, b=x*dx+z*dz;
-  return Math.max(0,Math.min(1,(-b+Math.sqrt(Math.max(0,b*b-a*c)))/a));
+  const inside=t=>inCity(from[0]+(to[0]-from[0])*t,from[2]+(to[2]-from[2])*t,margin);
+  if (!inside(0)) return inside(1)?null:0;
+  if (inside(1) && inside(.5)) return null;
+  let lo=0, hi=inside(.5)?1:.5;
+  for (let i=0;i<24;i++) {
+    const mid=(lo+hi)/2;
+    if (inside(mid)) lo=mid;
+    else hi=mid;
+  }
+  return lo;
 }
-export const SCENE_VERSION=17;
+export const SCENE_VERSION=18;
 export const SCENE_FILE=`scene-07-v${SCENE_VERSION}.json`;
 export const UNDER_BOUNDS=[64,46];
 export const CABIN_BOUNDS=[9.24,1.47];

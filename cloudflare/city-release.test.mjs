@@ -8,8 +8,9 @@ import {Geometry,makeShape} from '../dist/collision.js';
 import {decodeFilmHeight,filmFlux} from '../dist/ink-fluid.js';
 import {INK_SIZE,applyInkPacket} from '../dist/ink-wire.js';
 import {Paint} from '../dist/ink.js';
-import {CABIN_X,CABIN_Y,CITY_RADIUS,RAIL_CABIN_X,SCENE_FILE,UNDER_X,cityExit,zoneOf} from '../dist/layout.js';
-import {ELEVATED_APPROACH,OUTER_BUILDINGS} from '../dist/outer-city.js';
+import {CABIN_X,CABIN_Y,ENCLOSURE,RAIL_CABIN_X,SCENE_FILE,UNDER_X,cityExit,inCity,zoneOf} from '../dist/layout.js';
+import {ELEVATED_APPROACH} from '../dist/elevated-approach.js';
+import {FACADE_DEPTH,enclosureFronts} from '../dist/enclosure.js';
 import {forward,unit,sub} from '../dist/render.js';
 import {WINDOW_BREAK,WINDOW_CRACK} from '../dist/train-glass.js';
 import {trainPose} from '../dist/train-model.js';
@@ -48,7 +49,7 @@ test('the approach connects ground level and the entire elevated road in the pac
   const baked=new World(renderless(),scene), {battle:b}=new RoomEngine(options);
   assert.deepEqual(scene.elevated,[ELEVATED_APPROACH]);
   const p=b.player;
-  Object.assign(p,{x:10.9,y:0,z:99,vy:0});
+  Object.assign(p,{x:10.9,y:0,z:96.4,vy:0});
   for (let i=0;i<540;i++) b.move(p,0,-5.9,1/24,false,false);
   assert(p.z<-30);
   near(p.y,12.67);
@@ -58,30 +59,35 @@ test('the approach connects ground level and the entire elevated road in the pac
   assert.equal(underneath.y,0);
 });
 
-test('the round city boundary is solid to players and rays, even above the visible fence',()=>{
+test('a thin ring of building fronts is the edge of the city: solid to bodies and rays, with nothing beyond',()=>{
   const {battle:b}=new RoomEngine(options), {world}=b;
-  assert.equal(OUTER_BUILDINGS.length,30);
-  assert.equal(new Set(OUTER_BUILDINGS.map(p=>[p.width,p.depth,p.height].join(','))).size,30);
-  for (const [x,z] of [[498,0],[-498,0],[0,-498],[0,498],[320,-350]]) {
-    assert.equal(zoneOf(x),0);
-    const ground=world.traceExact([x,.3,z],[x,-.2,z]);
-    assert(ground?.normal[1]>.99);
+  const scene=JSON.parse(readFileSync(new URL('../dist/'+SCENE_FILE,import.meta.url)));
+  const fronts=enclosureFronts();
+  assert(fronts.length>25 && fronts.every(f=>f.height>=16 && f.width>=5));
+  // Every piece of the street stands inside the ring (or is the ring itself).
+  const reach=FACADE_DEPTH+.6;
+  for (const [zone,type,x,,z,w,,d] of scene.parts) {
+    if (zone!==0 || type==='label') continue;
+    assert(inCity(x,z,-reach-Math.max(w,d)*.5),`part at ${x},${z} lies outside the ring`);
   }
-  const hit=world.traceExact([350,85,350],[360,85,360]);
-  assert(hit.boundary);
-  near(Math.hypot(hit.position[0],hit.position[2]),CITY_RADIUS);
-  assert.equal(cityExit([499,0,0],[496,0,0]),null);
-  const runner={x:499.2,z:0,y:12};
+  // The ground ends with the ring: beyond it is empty space.
+  assert(world.traceExact([0,.3,40],[0,-.2,40])?.normal[1]>.99);
+  assert.equal(world.geometry.trace([0,.3,70],[0,-.2,70]),null);
+  assert.equal(world.geometry.trace([130,30,0],[130,-5,0]),null);
+  // Bodies stop at the ring, even high up a climbed front.
+  const runner={x:96.2,z:0,y:30};
   world.step(runner,5,0);
-  near(runner.x,499.2);
-  world.step(runner,UNDER_X-runner.x,0);
-  near(runner.x,499.2);
+  near(runner.x,96.2);
   world.step(runner,-.5,0);
-  near(runner.x,498.7);
-  const angle=Math.PI/12, x=254*Math.cos(angle), z=254*Math.sin(angle);
-  assert(world.blocked(x,.05,z));
-  const wall=world.traceExact([x,1.5,z+17],[x,1.5,z]);
-  assert(wall?.shape && Math.abs(wall.normal[1])<.1);
+  near(runner.x,95.7);
+  assert(world.blocked(ENCLOSURE[0].x1+.2,.05,0) && !world.blocked(70,.05,0));
+  // Rays end at the ring: on a front, or at the boundary above the lower ones.
+  const ray=world.traceExact([0,60,0],[300,60,0]);
+  near(ray.position[0],ENCLOSURE[0].x1,.6);
+  assert.equal(cityExit([96,0,0],[90,0,0]),null);
+  // A front is a wall: paint marks it but never scores as floor.
+  const wall=world.traceExact([90,1.5,3],[99,1.5,3]);
+  assert(wall?.shape && wall.normal[0]<-.9);
   const before=b.paint.count[0];
   b.splat(wall,{actor:b.player,weapon:b.player.weapon});
   assert.equal(b.paint.count[0],before);
