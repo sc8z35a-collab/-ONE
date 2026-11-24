@@ -90,8 +90,8 @@ test('RD II QUATRO+ fires five high-damage heavy rounds rapidly with wide paint,
   assert.equal(rd.pellets,5);
   assert(Math.abs(rd.delay-.22)<1e-9);
   assert(Math.abs(rd.damage-70.4)<1e-9);
-  assert(Math.abs(rd.cost-1.5)<1e-9);
-  assert(Math.abs(rd.radius-5.04*1.5)<1e-9);
+  assert(Math.abs(rd.cost-.3)<1e-9);
+  assert(Math.abs(rd.radius-10)<1e-9);
   assert(Math.abs(rd.weight-1.52)<1e-9);
   assert(rd.damage*rd.pellets>jet.damage*12 && rd.radius>jet.radius && rd.cost<jet.cost*5);
   assert.equal(SUPERS[rd.special].name,'OM BOMB II');
