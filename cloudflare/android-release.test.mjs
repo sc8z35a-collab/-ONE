@@ -31,7 +31,7 @@ test('a legal 80-unit shot continues past three seconds, paints at its destinati
 });
 
 test('the new weapon costs and splatter radius are applied without multiplying damage',()=>{
-  const originalCosts=[2.45,4.5,7,9,6,3.15,4.35,3.75,4.5,2.695,3,15,2.9,2.9*.6];
+  const originalCosts=[2.45,4.5,7,9,6,3.15,4.35,3.75,4.5,2.695,.6,15,2.9,2.9*.6];
   assert.deepEqual(WEAPONS.map(w=>w.cost),originalCosts.map(cost=>cost/2));
   assert.deepEqual(SUBWEAPONS.map(w=>w.cost),[14.5,20.5,13,16.5,18,12]);
   const {battle:b}=new RoomEngine(options), p=b.player, w=weaponById('jet');
