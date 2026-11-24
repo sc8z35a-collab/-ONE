@@ -403,7 +403,7 @@ test('ink swimming is faster than swimming over dry ground and produces no wake 
 
 test('main weapons fire four shots with their original cost of one shot',()=>{
   const b=new RoomEngine(options).battle, p=b.player;
-  const former={jet:4.9,fan:9,charge:14,lob:18,blast:12,dual:6.3,surge:8.7,coil:7.5,prism:9,roller:5.39,rd2:24,td:30,swout:5.8,swout2:3.48};
+  const former={jet:4.9,fan:9,charge:14,lob:18,blast:12,dual:6.3,surge:8.7,coil:7.5,prism:9,roller:5.39,rd2:6,td:30,swout:5.8,swout2:3.48};
   const target=[p.x+5,p.y+1,p.z];
   for (const weapon of WEAPONS) {
     Object.assign(p,{weapon,tank:former[weapon.id],fire:0});
