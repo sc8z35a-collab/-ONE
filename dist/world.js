@@ -1,9 +1,9 @@
 import {TAU,add,clamp,scale,sub,mix} from './render.js';
 
-import {BOUNDS,METRO,RAIL,UNDER_Y,ZONES,cityExit,floorBounds,inCity,isUnder,localX,railEnd,sameLevel,zoneOf} from './layout.js';
+import {BOUNDS,METRO,RAIL,UNDER_X,UNDER_Y,ZONES,cityExit,floorBounds,inCity,isUnder,localX,railEnd,sameLevel,zoneOf} from './layout.js';
 import {buildRail,buildUnderground,railLoopSites} from './levels.js';
 import {buildMetro,buildCabin} from './metro-stage.js';
-import {buildStairs,cutStairOpenings,stairAt,stairCrossing,stairFloor} from './stairs.js';
+import {buildStairs,cutStairOpenings,stairAt,stairCrossing,stairFloor,stairFloorY} from './stairs.js';
 import {Geometry} from './collision.js';
 import {buildResidentialDistrict,residentialLot} from './residential.js';
 import {buildStreetFacilities} from './street-facilities.js';
@@ -17,8 +17,9 @@ export const SPAWN_X = 47.0;
 export const TEAM = [0x09bfa9,0xf06b2c];
 export const TEAM_INK = [0x10d8be,0xff6c33];
 const STEEL = 0x77818a, WHITE = 0xf0eee0;
-const CELL = 5;
+const CELL = 5, INV_CELL = 1/CELL, UNDER_CELL_X = Math.round(UNDER_X/CELL);
 const T = Math.PI / 2;
+const ZONE_FLOORS = ZONES.map(({y,layer})=>Object.freeze({y,layer}));
 const panelColors = [0xcebba2,0xaab6b1,0xc7c5af,0xb9c7cb,0xe1d0b7,0xd2bfaf,0xa2b4bc];
 
 export function randomGenerator(seed) {
@@ -30,26 +31,49 @@ export function randomGenerator(seed) {
   return next;
 }
 
-export function rayBox(start,delta,box) {
-  let near = 0, far = 1, axis = 1, sign = 1;
-  for (let k = 0; k < 3; k++) {
-    const lo = box.min[k], hi = box.max[k], p = start[k], v = delta[k];
-    if (Math.abs(v)<.00001) {
-      if (p<lo || p>hi) return null;
-      continue;
-    }
-    const u = (lo-p)/v, w = (hi-p)/v, enter = Math.min(u,w);
-    if (enter > near) {
-      near = enter;
-      axis = k;
-      sign = u < w ? -1 : 1;
-    }
-    far = Math.min(far,Math.max(u,w));
-    if (far < near) return null;
+const _rayBoxHit={t:0,axis:1,sign:1};
+
+function rayBoxInto(sx,sy,sz,dx,dy,dz,box,limit,out) {
+  let near=0, far=limit, axis=1, sign=1;
+  const x0=box.x0??box.min[0], x1=box.x1??box.max[0];
+  if (dx>-.00001 && dx<.00001) {
+    if (sx<x0 || sx>x1) return false;
+  } else {
+    const inv=1/dx, u=(x0-sx)*inv, w=(x1-sx)*inv;
+    const enter=u<w?u:w, leave=u<w?w:u;
+    if (enter>near) {near=enter;axis=0;sign=u<w?-1:1;}
+    if (leave<far) far=leave;
+    if (far<near) return false;
   }
+  const y0=box.y0??box.min[1], y1=box.y1??box.max[1];
+  if (dy>-.00001 && dy<.00001) {
+    if (sy<y0 || sy>y1) return false;
+  } else {
+    const inv=1/dy, u=(y0-sy)*inv, w=(y1-sy)*inv;
+    const enter=u<w?u:w, leave=u<w?w:u;
+    if (enter>near) {near=enter;axis=1;sign=u<w?-1:1;}
+    if (leave<far) far=leave;
+    if (far<near) return false;
+  }
+  const z0=box.z0??box.min[2], z1=box.z1??box.max[2];
+  if (dz>-.00001 && dz<.00001) {
+    if (sz<z0 || sz>z1) return false;
+  } else {
+    const inv=1/dz, u=(z0-sz)*inv, w=(z1-sz)*inv;
+    const enter=u<w?u:w, leave=u<w?w:u;
+    if (enter>near) {near=enter;axis=2;sign=u<w?-1:1;}
+    if (leave<far) far=leave;
+    if (far<near) return false;
+  }
+  out.t=near; out.axis=axis; out.sign=sign;
+  return true;
+}
+
+export function rayBox(start,delta,box) {
+  if (!rayBoxInto(start[0],start[1],start[2],delta[0],delta[1],delta[2],box,1,_rayBoxHit)) return null;
   const normal = [0,0,0];
-  normal[axis] = sign;
-  return {t:near,normal};
+  normal[_rayBoxHit.axis] = _rayBoxHit.sign;
+  return {t:_rayBoxHit.t,normal};
 }
 
 export class World {
@@ -87,10 +111,11 @@ export class World {
   }
 
   loadParts(renderer,parts) {
-    for (const [zone,type,...args] of parts) {
-      renderer.zone=zone;
-      if (type==='label') renderer.label(...args);
-      else renderer.add(type,...args);
+    for (let i=0;i<parts.length;i++) {
+      const p=parts[i];
+      renderer.zone=p[0];
+      if (p[1]==='label') renderer.label(p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10]);
+      else renderer.add(p[1],p[2],p[3],p[4],p[5],p[6],p[7],p[8],p[9],p[10]);
     }
     renderer.zone=0;
   }
@@ -151,16 +176,88 @@ export class World {
   }
 
   indexSolids() {
+    this.grid0=new Array(4096);
+    this.grid1=new Array(1024);
     this.collisionGrid=new Map();
-    for (const box of this.solids) {
-      for (let z=Math.floor(box.min[2]/CELL);z<=Math.floor(box.max[2]/CELL);z++) {
-        for (let x=Math.floor(box.min[0]/CELL);x<=Math.floor(box.max[0]/CELL);x++) {
+    this._traceSeq=0;
+    const grid0=this.grid0, grid1=this.grid1, grid=this.collisionGrid;
+    for (let i=0;i<this.solids.length;i++) {
+      const raw=this.solids[i];
+      const x0=raw.min[0], y0=raw.min[1], z0=raw.min[2];
+      const x1=raw.max[0], y1=raw.max[1], z1=raw.max[2];
+      const box={x0,y0,z0,x1,y1,z1,ray:raw.ray,paintLayer:raw.paintLayer,_seen:0};
+      const cx0=Math.floor(x0*INV_CELL), cx1=Math.floor(x1*INV_CELL);
+      const cz0=Math.floor(z0*INV_CELL), cz1=Math.floor(z1*INV_CELL);
+      for (let z=cz0;z<=cz1;z++) {
+        const uz0=z+32, uz1=z+16;
+        const inZ0=(uz0&~63)===0, inZ1=(uz1&~31)===0;
+        for (let x=cx0;x<=cx1;x++) {
+          const ux0=x+32;
+          if (inZ0 && (ux0&~63)===0) {
+            const idx=(uz0<<6)|ux0;
+            let b=grid0[idx];
+            if (!b) grid0[idx]=b=[];
+            b.push(box);
+            continue;
+          }
+          const ux1=x-(UNDER_CELL_X-16);
+          if (inZ1 && (ux1&~31)===0) {
+            const idx=(uz1<<5)|ux1;
+            let b=grid1[idx];
+            if (!b) grid1[idx]=b=[];
+            b.push(box);
+            continue;
+          }
           const key=z*1024+x;
-          if (!this.collisionGrid.has(key)) this.collisionGrid.set(key,[]);
-          this.collisionGrid.get(key).push(box);
+          let b=grid.get(key);
+          if (!b) {b=[];grid.set(key,b);}
+          b.push(box);
         }
       }
     }
+    // Partition slabs by zone with tight per-zone AABBs for O(1) early reject.
+    this.zoneSlabs=ZONES.map(()=>[]);
+    this.slabBounds=ZONES.map(()=>({x0:Infinity,x1:-Infinity,z0:Infinity,z1:-Infinity}));
+    this.zoneMaxFloorY=ZONES.map(z=>z.y);
+    for (let i=0;i<this.slabs.length;i++) {
+      const raw=this.slabs[i], z=zoneOf(raw.x0);
+      const isX=raw.axis==='x';
+      const invSpan=1/(isX?raw.x1-raw.x0:raw.z1-raw.z0);
+      const dy=raw.to-raw.from;
+      const s={
+        x0:raw.x0,x1:raw.x1,z0:raw.z0,z1:raw.z1,
+        from:raw.from,to:raw.to,layer:raw.layer,
+        isX,invSpan,dy,
+        flatResult:dy===0?Object.freeze({y:raw.from,layer:raw.layer}):null
+      };
+      this.zoneSlabs[z].push(s);
+      const b=this.slabBounds[z];
+      if (s.x0<b.x0) b.x0=s.x0;
+      if (s.x1>b.x1) b.x1=s.x1;
+      if (s.z0<b.z0) b.z0=s.z0;
+      if (s.z1>b.z1) b.z1=s.z1;
+      const top=s.from>s.to?s.from:s.to;
+      if (top>this.zoneMaxFloorY[z]) this.zoneMaxFloorY[z]=top;
+    }
+    this.elevX0=Infinity; this.elevX1=-Infinity; this.elevZ0=Infinity; this.elevZ1=-Infinity;
+    this.elevatedList=[];
+    for (let i=0;i<this.elevated.length;i++) {
+      const raw=this.elevated[i];
+      const r={x0:raw.x0,x1:raw.x1,z0:raw.z0,z1:raw.z1,high:raw.high,invZ:raw.high/(raw.z1-raw.z0)};
+      this.elevatedList.push(r);
+      if (r.x0<this.elevX0) this.elevX0=r.x0;
+      if (r.x1>this.elevX1) this.elevX1=r.x1;
+      if (r.z0<this.elevZ0) this.elevZ0=r.z0;
+      if (r.z1>this.elevZ1) this.elevZ1=r.z1;
+    }
+  }
+
+  cellBoxes(cx,cz) {
+    const ux0=cx+32, uz0=cz+32;
+    if (((ux0|uz0)&~63)===0) return this.grid0[(uz0<<6)|ux0];
+    const ux1=cx-(UNDER_CELL_X-16), uz1=cz+16;
+    if (((ux1|uz1)&~31)===0) return this.grid1[(uz1<<5)|ux1];
+    return this.collisionGrid.get(cz*1024+cx);
   }
 
   solid(x,y,z,w,h,d,tint,kind = 2,opts) {
@@ -188,19 +285,46 @@ export class World {
   floor(x,z) {
     const stair=stairFloor(x,z);
     if (stair) return stair;
-    for (const s of this.slabs) {
-      if (x<s.x0 || x>s.x1 || z<s.z0 || z>s.z1) continue;
-      const t = s.axis==='x' ? (x-s.x0)/(s.x1-s.x0) : (z-s.z0)/(s.z1-s.z0);
-      return {y:mix(s.from,s.to,t),layer:s.layer};
+    const zone=zoneOf(x);
+    const b=this.slabBounds[zone];
+    if (x>=b.x0 && x<=b.x1 && z>=b.z0 && z<=b.z1) {
+      const slabs=this.zoneSlabs[zone];
+      for (let i=0;i<slabs.length;i++) {
+        const s=slabs[i];
+        if (x<s.x0 || x>s.x1 || z<s.z0 || z>s.z1) continue;
+        if (s.flatResult) return s.flatResult;
+        const t=s.isX?(x-s.x0)*s.invSpan:(z-s.z0)*s.invSpan;
+        return {y:s.from+s.dy*t,layer:s.layer};
+      }
     }
-    const {y,layer}=ZONES[zoneOf(x)];
-    return {y,layer};
+    return ZONE_FLOORS[zone];
+  }
+
+  // Zero-allocation scalar floor height query for stand(), trace(), Navigation.clear().
+  floorY(x,z) {
+    const sy=stairFloorY(x,z);
+    if (sy===sy) return sy;
+    const zone=zoneOf(x);
+    const b=this.slabBounds[zone];
+    if (x>=b.x0 && x<=b.x1 && z>=b.z0 && z<=b.z1) {
+      const slabs=this.zoneSlabs[zone];
+      for (let i=0;i<slabs.length;i++) {
+        const s=slabs[i];
+        if (x<s.x0 || x>s.x1 || z<s.z0 || z>s.z1) continue;
+        if (!s.dy) return s.from;
+        return s.from+s.dy*(s.isX?(x-s.x0)*s.invSpan:(z-s.z0)*s.invSpan);
+      }
+    }
+    return ZONE_FLOORS[zone].y;
   }
 
   elevatedHeight(x,z) {
-    for (const ramp of this.elevated) {
+    if (x<this.elevX0 || x>this.elevX1 || z<this.elevZ0 || z>this.elevZ1) return -Infinity;
+    const list=this.elevatedList;
+    for (let i=0;i<list.length;i++) {
+      const ramp=list[i];
       if (x>=ramp.x0 && x<=ramp.x1 && z>=ramp.z0 && z<=ramp.z1) {
-        return ramp.high*(ramp.z1-z)/(ramp.z1-ramp.z0);
+        return ramp.invZ*(ramp.z1-z);
       }
     }
     return -Infinity;
@@ -209,30 +333,73 @@ export class World {
   support(x,y,z) {
     const base=this.floor(x,z);
     const ramp=this.elevatedHeight(x,z);
-    let top=ramp<=y+.32?Math.max(base.y,ramp):base.y;
+    let top=ramp<=y+.32?(ramp>base.y?ramp:base.y):base.y;
     if (y<base.y+.22 && top===base.y) return base;
-    const boxes=this.collisionGrid.get(Math.floor(z/CELL)*1024+Math.floor(x/CELL));
-    if (boxes) for (const {min,max} of boxes) {
-      if (max[1]<=top+.12 || max[1]>y+.095 || x<=min[0]+.05 || x>=max[0]-.05 || z<=min[2]+.05 || z>=max[2]-.05) continue;
-      top=max[1];
+    const boxes=this.cellBoxes(Math.floor(x*INV_CELL),Math.floor(z*INV_CELL));
+    if (boxes) {
+      const maxY=y+.095;
+      for (let i=0;i<boxes.length;i++) {
+        const b=boxes[i];
+        if (b.y1<=top+.12 || b.y1>maxY || x<=b.x0+.05 || x>=b.x1-.05 || z<=b.z0+.05 || z>=b.z1-.05) continue;
+        top=b.y1;
+      }
     }
     return top>base.y?{y:top,layer:base.layer,raised:true}:base;
   }
 
   blocked(x,y,z,radius = .41,height = 1.68) {
-    const bounds=floorBounds(x);
-    if (zoneOf(x)===0 ? !inCity(x,z,radius) :
-        Math.abs(localX(x))>bounds[0]-radius || Math.abs(z)>bounds[1]-radius) return true;
+    const zone=zoneOf(x);
+    if (zone===0) {
+      if (!inCity(x,z,radius)) return true;
+    } else {
+      const bounds=ZONES[zone].bounds;
+      const lx=x-ZONES[zone].x;
+      if (lx<-bounds[0]+radius || lx>bounds[0]-radius || z<-bounds[1]+radius || z>bounds[1]-radius) return true;
+    }
     const ramp=this.elevatedHeight(x,z);
     if (y<ramp-.020 && y+height>ramp-.46) return true;
-    for (let row=Math.floor((z-radius)/CELL);row<=Math.floor((z+radius)/CELL);row++) {
-      for (let col=Math.floor((x-radius)/CELL);col<=Math.floor((x+radius)/CELL);col++) {
-        const boxes=this.collisionGrid.get(row*1024+col);
+    const r2=radius*radius, yLo=y+.025, yHi=y+height-.025;
+    const col0=Math.floor((x-radius)*INV_CELL), col1=Math.floor((x+radius)*INV_CELL);
+    const row0=Math.floor((z-radius)*INV_CELL), row1=Math.floor((z+radius)*INV_CELL);
+    const grid0=this.grid0, grid1=this.grid1, grid=this.collisionGrid;
+    if (col0===col1 && row0===row1) {
+      let boxes;
+      const ux0=col0+32, uz0=row0+32;
+      if (((ux0|uz0)&~63)===0) boxes=grid0[(uz0<<6)|ux0];
+      else {
+        const ux1=col0-(UNDER_CELL_X-16), uz1=row0+16;
+        if (((ux1|uz1)&~31)===0) boxes=grid1[(uz1<<5)|ux1];
+        else boxes=grid.get(row0*1024+col0);
+      }
+      if (!boxes) return false;
+      for (let i=0;i<boxes.length;i++) {
+        const b=boxes[i];
+        if (yLo>=b.y1 || yHi<=b.y0) continue;
+        const dx=x<b.x0?x-b.x0:x>b.x1?x-b.x1:0;
+        const dz=z<b.z0?z-b.z0:z>b.z1?z-b.z1:0;
+        if (dx*dx+dz*dz<r2) return true;
+      }
+      return false;
+    }
+    for (let row=row0;row<=row1;row++) {
+      const uz0=row+32, uz1=row+16;
+      const inZ0=(uz0&~63)===0, inZ1=(uz1&~31)===0;
+      for (let col=col0;col<=col1;col++) {
+        let boxes;
+        const ux0=col+32;
+        if (inZ0 && (ux0&~63)===0) boxes=grid0[(uz0<<6)|ux0];
+        else {
+          const ux1=col-(UNDER_CELL_X-16);
+          if (inZ1 && (ux1&~31)===0) boxes=grid1[(uz1<<5)|ux1];
+          else boxes=grid.get(row*1024+col);
+        }
         if (!boxes) continue;
-        for (const {min,max} of boxes) {
-          if (y>=max[1]-.025 || y+height<=min[1]+.025) continue;
-          const dx=x-clamp(x,min[0],max[0]), dz=z-clamp(z,min[2],max[2]);
-          if (dx*dx+dz*dz<radius*radius) return true;
+        for (let i=0;i<boxes.length;i++) {
+          const b=boxes[i];
+          if (yLo>=b.y1 || yHi<=b.y0) continue;
+          const dx=x<b.x0?x-b.x0:x>b.x1?x-b.x1:0;
+          const dz=z<b.z0?z-b.z0:z>b.z1?z-b.z1:0;
+          if (dx*dx+dz*dz<r2) return true;
         }
       }
     }
@@ -240,12 +407,12 @@ export class World {
   }
 
   stand(x,z,radius=.48) {
-    return !this.blocked(x,this.floor(x,z).y+.025,z,radius);
+    return !this.blocked(x,this.floorY(x,z)+.025,z,radius);
   }
 
   step(actor,dx,dz,allow) {
-    for (const [sx,sz] of [[dx,0],[0,dz]]) {
-      const rawX=actor.x+sx,z=actor.z+sz;
+    for (let k=0;k<2;k++) {
+      const rawX=actor.x+(k===0?dx:0), z=actor.z+(k===1?dz:0);
       if (!sameLevel(actor.x,rawX)) continue;
       const x=stairCrossing(actor.x,actor.z,rawX,z,actor.y);
       const ground=this.support(x,actor.y+.13,z).y;
@@ -259,55 +426,89 @@ export class World {
   }
 
   trace(start,end) {
-    if (zoneOf(start[0])===0 && (Math.abs(start[0])>BOUNDS[0] || Math.abs(end[0])>BOUNDS[0] ||
-        Math.abs(start[2])>BOUNDS[1] || Math.abs(end[2])>BOUNDS[1])) return this.traceExact(start,end);
-    const delta=sub(end,start);
-    let best=null;
-    const minX=Math.floor(Math.min(start[0],end[0])/CELL), maxX=Math.floor(Math.max(start[0],end[0])/CELL);
-    const minZ=Math.floor(Math.min(start[2],end[2])/CELL), maxZ=Math.floor(Math.max(start[2],end[2])/CELL);
-    const seen=minX!==maxX || minZ!==maxZ ? new Set() : null;
-    for (let z=minZ;z<=maxZ;z++) for (let x=minX;x<=maxX;x++) {
-      const boxes=this.collisionGrid.get(z*1024+x);
-      if (!boxes) continue;
-      for (const box of boxes) {
-        if (!box.ray || !sameLevel(box.min[0],start[0]) || seen?.has(box)) continue;
-        seen?.add(box);
-        const hit=rayBox(start,delta,box);
-        if (hit && (!best || hit.t<best.t)) {
-          if (box.paintLayer!==undefined && hit.normal[1]>.5) hit.layer=box.paintLayer;
-          best=hit;
+    const sx=start[0], sy=start[1], sz=start[2];
+    const ex=end[0], ey=end[1], ez=end[2];
+    const zone=zoneOf(sx);
+    if (zone===0 && (sx<-BOUNDS[0] || sx>BOUNDS[0] || ex<-BOUNDS[0] || ex>BOUNDS[0] ||
+        sz<-BOUNDS[1] || sz>BOUNDS[1] || ez<-BOUNDS[1] || ez>BOUNDS[1])) return this.traceExact(start,end);
+    const dx=ex-sx, dy=ey-sy, dz=ez-sz;
+    let bestT=Infinity, bestAxis=1, bestSign=1, bestLayer=undefined, bestNormal=null;
+    const minX=Math.floor((sx<ex?sx:ex)*INV_CELL), maxX=Math.floor((sx>ex?sx:ex)*INV_CELL);
+    const minZ=Math.floor((sz<ez?sz:ez)*INV_CELL), maxZ=Math.floor((sz>ez?sz:ez)*INV_CELL);
+    const multi=minX!==maxX || minZ!==maxZ;
+    const mark=multi?++this._traceSeq:0;
+    const grid0=this.grid0, grid1=this.grid1, grid=this.collisionGrid;
+    for (let z=minZ;z<=maxZ;z++) {
+      const uz0=z+32, uz1=z+16;
+      const inZ0=(uz0&~63)===0, inZ1=(uz1&~31)===0;
+      for (let x=minX;x<=maxX;x++) {
+        let boxes;
+        const ux0=x+32;
+        if (inZ0 && (ux0&~63)===0) boxes=grid0[(uz0<<6)|ux0];
+        else {
+          const ux1=x-(UNDER_CELL_X-16);
+          if (inZ1 && (ux1&~31)===0) boxes=grid1[(uz1<<5)|ux1];
+          else boxes=grid.get(z*1024+x);
+        }
+        if (!boxes) continue;
+        for (let i=0;i<boxes.length;i++) {
+          const box=boxes[i];
+          if (!box.ray || zoneOf(box.x0)!==zone) continue;
+          if (multi) {
+            if (box._seen===mark) continue;
+            box._seen=mark;
+          }
+          const limit=bestT<1?bestT:1;
+          if (rayBoxInto(sx,sy,sz,dx,dy,dz,box,limit,_rayBoxHit) && _rayBoxHit.t<bestT) {
+            bestT=_rayBoxHit.t;
+            bestAxis=_rayBoxHit.axis;
+            bestSign=_rayBoxHit.sign;
+            bestLayer=(box.paintLayer!==undefined && bestAxis===1 && bestSign>0)?box.paintLayer:undefined;
+          }
         }
       }
     }
-    const samples=Math.ceil(Math.hypot(...delta)/.24);
-    const bounds=floorBounds(start[0]);
-    let lastT=0;
-    for (let i=1;i<=samples;i++) {
-      const t=i/samples;
-      if (best && lastT>=best.t) break;
-      const [x,y,z]=add(start,scale(delta,t));
-      if (sameLevel(x,start[0]) && Math.abs(localX(x))<bounds[0]+2 && Math.abs(z)<bounds[1]+2 && y<=this.floor(x,z).y) {
-        let low=lastT, high=t;
-        for (let j=0;j<5;j++) {
-          const mid=(low+high)/2;
-          const [mx,my,mz]=add(start,scale(delta,mid));
-          if (my<=this.floor(mx,mz).y) high=mid;
-          else low=mid;
+    const maxFloorY=this.zoneMaxFloorY[zone];
+    if (sy<=maxFloorY || ey<=maxFloorY) {
+      const samples=Math.ceil(Math.hypot(dx,dy,dz)/.24);
+      const bounds=ZONES[zone].bounds, bxLim=bounds[0]+2, bzLim=bounds[1]+2, zOrigin=ZONES[zone].x;
+      let lastT=0;
+      for (let i=1;i<=samples;i++) {
+        const t=i/samples;
+        if (lastT>=bestT) break;
+        const px=sx+dx*t, py=sy+dy*t, pz=sz+dz*t;
+        if (zoneOf(px)===zone) {
+          const lx=px-zOrigin;
+          if (lx>-bxLim && lx<bxLim && pz>-bzLim && pz<bzLim && py<=this.floorY(px,pz)) {
+            let low=lastT, high=t;
+            for (let j=0;j<5;j++) {
+              const mid=(low+high)*.5;
+              if (sy+dy*mid<=this.floorY(sx+dx*mid,sz+dz*mid)) high=mid;
+              else low=mid;
+            }
+            if (high<bestT) {
+              const hx=sx+dx*high, hz=sz+dz*high;
+              const surface=this.floor(hx,hz);
+              const dgx=this.floorY(hx+.08,hz)-this.floorY(hx-.08,hz);
+              const dgz=this.floorY(hx,hz+.08)-this.floorY(hx,hz-.08);
+              const adx=dgx<0?-dgx:dgx, adz=dgz<0?-dgz:dgz;
+              const vertical=(adx>adz?adx:adz)>.32;
+              bestT=high;
+              bestNormal=vertical?(adx>adz?[-Math.sign(dgx),0,0]:[0,0,-Math.sign(dgz)]):[0,1,0];
+              bestLayer=vertical?undefined:surface.layer;
+            }
+            break;
+          }
         }
-        if (!best || high<best.t) {
-          const px=start[0]+delta[0]*high, pz=start[2]+delta[2]*high;
-          const surface=this.floor(px,pz);
-          const prev=this.floor(px-.08,pz).y, next=this.floor(px+.08,pz).y;
-          const prevZ=this.floor(px,pz-.08).y, nextZ=this.floor(px,pz+.08).y;
-          const dx=next-prev,dz=nextZ-prevZ;
-          const vertical=Math.max(Math.abs(dx),Math.abs(dz))>.32;
-          best={t:high,normal:vertical ? (Math.abs(dx)>Math.abs(dz)?[-Math.sign(dx),0,0]:[0,0,-Math.sign(dz)]) : [0,1,0],layer:vertical?undefined:surface.layer};
-        }
-        break;
+        lastT=t;
       }
-      lastT=t;
     }
-    return best ? {...best,position:add(start,scale(delta,best.t))} : null;
+    if (bestT===Infinity) return null;
+    if (!bestNormal) {
+      bestNormal=[0,0,0];
+      bestNormal[bestAxis]=bestSign;
+    }
+    return {t:bestT,normal:bestNormal,layer:bestLayer,position:[sx+dx*bestT,sy+dy*bestT,sz+dz*bestT]};
   }
 
   traceExact(start,end,clearance=0) {
@@ -319,11 +520,11 @@ export class World {
       return {t:edge,position,normal:[-position[0]/length,0,-position[2]/length],boundary:true};
     }
     if (!hit) return null;
-    const [x,y,z]=hit.position, {shape,normal}=hit;
-    if (normal[1]>.54 && [1,5,15,22,27].includes(shape.kind)) {
+    const p=hit.position, x=p[0], y=p[1], z=p[2], shape=hit.shape, k=shape.kind;
+    if (hit.normal[1]>.54 && k>=0 && k<31 && (((1<<k)&0x08408022)!==0)) {
       const floor=this.floor(x,z);
-      if (shape.layer!==undefined && (shape.layer===4 || shape.kind===15 || Math.abs(y-floor.y)<.26)) hit.layer=shape.layer;
-      else if (Math.abs(y-floor.y)<.17 && shape.span[0]*shape.span[2]>.24) hit.layer=floor.layer;
+      if (shape.layer!==undefined && (shape.layer===4 || k===15 || Math.abs(y-floor.y)<.26)) hit.layer=shape.layer;
+      else if (Math.abs(y-floor.y)<.17 && shape.sx*shape.sz>.24) hit.layer=floor.layer;
     }
     return hit;
   }

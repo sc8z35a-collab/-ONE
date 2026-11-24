@@ -417,19 +417,37 @@ export class Transit {
     return false;
   }
 
-  blocksActor(actor) {
-    const line=this.line,t=this.train;
+  pose() {
+    const t=this.train, line=this.line, c=this._pose;
+    if (c && c.t===t && c.x===t.x && c.lat===t.lateral && c.lift===t.lift &&
+        c.yaw===t.yaw && c.roll===t.roll && c.rp===t.routePitch &&
+        c.cx===line.center && c.z===line.z && c.y===line.y) return c;
+    const p=trainPose(t,line), origin=p.at(0,0,0);
+    return this._pose={t,x:t.x,lat:t.lateral,lift:t.lift,yaw:t.yaw,roll:t.roll,rp:t.routePitch,
+      cx:line.center,z:line.z,y:line.y,pose:p,ox:origin[0],oz:origin[2]};
+  }
+
+  blocksActor(actor,radiusOverride,heightOverride) {
+    const line=this.line;
+    const h=heightOverride ?? actor.height ?? (actor.swimming?.58:1.72);
     if (!sameLevel(actor.x,line.center) || !this.visibleIn(this.section) ||
-        actor.y>line.y+5.3 || actor.y+(actor.height??1.72)<line.y+.7) return false;
-    const pose=trainPose(t,line), foot=pose.local([actor.x,actor.y,actor.z]);
+        actor.y>line.y+5.3 || actor.y+h<line.y+.7) return false;
+    const cached=this.pose();
+    const reachZ=line.loop?11.5:4.5;
+    if (Math.abs(actor.x-cached.ox)>11.5 || Math.abs(actor.z-cached.oz)>reachZ) return false;
+    const pose=cached.pose, foot=pose.local([actor.x,actor.y,actor.z]);
     if (Math.abs(foot[0])>10.4 || Math.abs(foot[2])>2.5) return false;
-    const head=pose.local([actor.x,actor.y+(actor.height??(actor.swimming?.58:1.72)),actor.z]);
-    const radius=actor.radius??(actor.swimming?.33:.4);
-    return TRAIN_HULLS.some(({min,max})=>{
-      if (Math.min(foot[1],head[1])>=max[1] || Math.max(foot[1],head[1])<=min[1]) return false;
-      const dx=foot[0]-clamp(foot[0],min[0],max[0]), dz=foot[2]-clamp(foot[2],min[2],max[2]);
-      return dx*dx+dz*dz<radius*radius;
-    });
+    const head=pose.local([actor.x,actor.y+h,actor.z]);
+    const radius=radiusOverride ?? actor.radius ?? (actor.swimming?.33:.4);
+    const r2=radius*radius, loY=foot[1]<head[1]?foot[1]:head[1], hiY=foot[1]>head[1]?foot[1]:head[1];
+    for (let i=0;i<TRAIN_HULLS.length;i++) {
+      const {min,max}=TRAIN_HULLS[i];
+      if (loY>=max[1] || hiY<=min[1]) continue;
+      const dx=foot[0]<min[0]?foot[0]-min[0]:foot[0]>max[0]?foot[0]-max[0]:0;
+      const dz=foot[2]<min[2]?foot[2]-min[2]:foot[2]>max[2]?foot[2]-max[2]:0;
+      if (dx*dx+dz*dz<r2) return true;
+    }
+    return false;
   }
 
   onCrossing(actor) {
@@ -507,13 +525,17 @@ export class Transit {
   }
 
   trace(start,end,precise=false,clearance=0) {
-    const t=this.train, line=this.line, pose=trainPose(t,line), [x,,z]=pose.at(0,0,0);
+    const line=this.line;
+    if (!sameLevel(start[0],line.center) || !this.visibleIn(this.section)) return null;
+    const sy=start[1], ey=end[1];
+    if ((sy>ey?sy:ey)<line.y-.05-clearance || (sy<ey?sy:ey)>line.y+5.3+clearance) return null;
+    const cached=this.pose(), x=cached.ox, z=cached.oz;
     // On a curve the car is turned: test against a box that holds it at any heading.
-    const reachX=line.loop?9.8:9.4, reachZ=line.loop?9.8:3.63;
-    if (!this.visibleIn(sameLevel(start[0],RAIL.center)?0:1) ||
-        !sameLevel(start[0],line.center) || Math.max(start[1],end[1])<line.y-.05-clearance || Math.min(start[1],end[1])>line.y+5.3+clearance ||
-        Math.max(start[0],end[0])<x-reachX-clearance || Math.min(start[0],end[0])>x+reachX+clearance ||
-        Math.max(start[2],end[2])<z-reachZ-clearance || Math.min(start[2],end[2])>z+reachZ+clearance) return null;
+    const reachX=(line.loop?9.8:9.4)+clearance, reachZ=(line.loop?9.8:3.63)+clearance;
+    const sx=start[0], ex=end[0], sz=start[2], ez=end[2];
+    if ((sx>ex?sx:ex)<x-reachX || (sx<ex?sx:ex)>x+reachX ||
+        (sz>ez?sz:ez)<z-reachZ || (sz<ez?sz:ez)>z+reachZ) return null;
+    const t=this.train, pose=cached.pose;
     if (precise) {
       if (!this.posedTrain || this.posedTrain.time!==this.time || this.posedTrain.train!==t || this.posedTrain.doorOpen!==t.doorOpen) {
         this.posedTrain={time:this.time,train:t,doorOpen:t.doorOpen,shapes:collectShapes(r=>this.draw(r))};
@@ -523,8 +545,8 @@ export class Transit {
     }
     const local=pose.local(start), delta=sub(pose.local(end),local);
     let best=null;
-    for (const hull of TRAIN_HULLS) {
-      const hit=rayBox(local,delta,hull);
+    for (let i=0;i<TRAIN_HULLS.length;i++) {
+      const hit=rayBox(local,delta,TRAIN_HULLS[i]);
       if (hit && (!best || hit.t<best.t)) best=hit;
     }
     if (!best) return null;

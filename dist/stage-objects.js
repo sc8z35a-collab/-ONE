@@ -1,6 +1,8 @@
-import {castShape,makeShape} from './collision.js';
+import {castShapeInto,makeShape} from './collision.js';
 import {sameLevel,UNDER_X,UNDER_Y,zoneOf} from './layout.js';
 import {add,clamp,scale,sub,TAU} from './render.js';
+
+const _stageHit={t:0,nx:0,ny:0,nz:0,shape:null};
 
 // Planked timber (rendered as wood grain, not masonry).
 const WOOD=29;
@@ -27,10 +29,10 @@ export function buildBreakableBlocks(world) {
 }
 
 export function prepareStageObjects(definitions) {
-  return definitions.map(o=>{
+  return definitions.map((o,i)=>{
     const {type,x,y,z,w,h,d,yaw}=o;
     const shape=makeShape(type==='glass'?'glass':'box',x,y,z,w,h,d,type==='glass'?17:2,{yaw});
-    return {...o,style:BLOCKS[type],shape};
+    return {...o,style:BLOCKS[type],shape,zone:zoneOf(x),_idx:i};
   });
 }
 
@@ -40,7 +42,17 @@ export class StageObjects {
   constructor(world) {
     this.homes=world.homes;
     this.parts=world.stageParts;
-    this.byId=new Map(this.parts.map(part=>[part.id,part]));
+    this.byId=new Map();
+    this.byZone=[[],[],[],[]];
+    this.broken=new Uint8Array(this.parts.length);
+    this.brokenCount=0;
+    for (let i=0;i<this.parts.length;i++) {
+      const part=this.parts[i];
+      if (part._idx===undefined) part._idx=i;
+      const z=part.zone ?? zoneOf(part.x);
+      this.byId.set(part.id,part);
+      this.byZone[z].push(part);
+    }
     this.damage=new Map();
   }
 
@@ -50,46 +62,98 @@ export class StageObjects {
 
   restore(rows=[]) {
     this.damage.clear();
+    this.broken.fill(0);
+    this.brokenCount=0;
     for (const [id,hp,at,team] of rows) {
-      if (this.byId.has(id) && Number.isFinite(hp) && hp>=0) this.damage.set(id,{hp,at,team});
+      const part=this.byId.get(id);
+      if (part && Number.isFinite(hp) && hp>=0) {
+        this.damage.set(id,{hp,at,team});
+        if (hp===0) {this.broken[part._idx]=1;this.brokenCount++;}
+      }
     }
   }
 
-  intact(o) {return this.damage.get(o.id)?.hp!==0;}
+  intact(o) {
+    if (!this.brokenCount) return true;
+    const idx=o._idx;
+    if (idx!==undefined) return this.broken[idx]===0;
+    return this.damage.get(o.id)?.hp!==0;
+  }
 
   strike(o,amount,clock,team) {
     if (!o || !this.intact(o) || !(amount>0)) return;
     const hp=Math.max(0,(this.damage.get(o.id)?.hp??o.style.hp)-amount);
     this.damage.set(o.id,{hp,at:clock,team});
+    if (hp===0 && o._idx!==undefined && !this.broken[o._idx]) {
+      this.broken[o._idx]=1;
+      this.brokenCount++;
+    }
   }
 
-  trace(start,end,clearance,limit) {
-    let nearest;
-    const delta=sub(end,start);
-    for (const o of this.parts) {
-      if (!sameLevel(o.x,start[0]) || !this.intact(o)) continue;
-      const hit=castShape(o.shape,start,delta,nearest?.t??limit,clearance);
-      if (hit) nearest={...hit,stageObject:o};
+  trace(start,end,clearance=0,limit=1) {
+    const list=this.byZone[zoneOf(start[0])];
+    if (!list.length) return undefined;
+    const sx=start[0], sy=start[1], sz=start[2];
+    const ex=end[0], ey=end[1], ez=end[2];
+    const dx=ex-sx, dy=ey-sy, dz=ez-sz;
+    const c=clearance || 0, pad=c*1.733+1e-8;
+    const rx0=(sx<ex?sx:ex)-pad, rx1=(sx>ex?sx:ex)+pad;
+    const ry0=(sy<ey?sy:ey)-pad, ry1=(sy>ey?sy:ey)+pad;
+    const rz0=(sz<ez?sz:ez)-pad, rz1=(sz>ez?sz:ez)+pad;
+    let bestT=limit ?? 1, bestObj=null, bnx=0, bny=0, bnz=0, bShape=null;
+    const hasBroken=this.brokenCount>0, broken=this.broken;
+    for (let i=0;i<list.length;i++) {
+      const o=list[i];
+      if (hasBroken && broken[o._idx]) continue;
+      const s=o.shape;
+      if (ry1<s.minY || ry0>s.maxY || rx1<s.minX || rx0>s.maxX || rz1<s.minZ || rz0>s.maxZ) continue;
+      if (castShapeInto(s,sx,sy,sz,dx,dy,dz,bestT,c,_stageHit)) {
+        bestT=_stageHit.t;
+        bnx=_stageHit.nx; bny=_stageHit.ny; bnz=_stageHit.nz;
+        bShape=_stageHit.shape;
+        bestObj=o;
+      }
     }
-    return nearest;
+    if (!bestObj) return undefined;
+    return {
+      t:bestT,
+      position:[sx+dx*bestT,sy+dy*bestT,sz+dz*bestT],
+      normal:[bnx,bny,bnz],
+      shape:bShape,
+      stageObject:bestObj
+    };
   }
 
   blocked(x,y,z,radius,height) {
-    for (const o of this.parts) {
-      const {min,max}=o.shape;
-      if (y>=max[1]-.024 || y+height<=min[1]+.023 || !this.intact(o)) continue;
-      if (Math.hypot(x-clamp(x,min[0],max[0]),z-clamp(z,min[2],max[2]))<radius) return true;
+    const list=this.byZone[zoneOf(x)];
+    const n=list.length;
+    if (!n) return false;
+    const r2=radius*radius, hasBroken=this.brokenCount>0, broken=this.broken;
+    for (let i=0;i<n;i++) {
+      const o=list[i];
+      const s=o.shape;
+      if (y>=s.maxY-.024 || y+height<=s.minY+.023) continue;
+      if (hasBroken && broken[o._idx]) continue;
+      const dx=x<s.minX?x-s.minX:x>s.maxX?x-s.maxX:0;
+      const dz=z<s.minZ?z-s.minZ:z>s.maxZ?z-s.maxZ:0;
+      if (dx*dx+dz*dz<r2) return true;
     }
     return false;
   }
 
   support(x,y,z,surface) {
+    const list=this.byZone[zoneOf(x)];
+    const n=list.length;
+    if (!n) return surface;
     let top=surface.y;
-    for (const o of this.parts) {
-      const {min,max}=o.shape;
-      if (o.type==='glass' || max[1]<=top+.12 || max[1]>y+.095 ||
-          x<=min[0]+.035 || x>=max[0]-.035 || z<=min[2]+.035 || z>=max[2]-.035 || !this.intact(o)) continue;
-      top=max[1];
+    const maxY=y+.095, hasBroken=this.brokenCount>0, broken=this.broken;
+    for (let i=0;i<n;i++) {
+      const o=list[i];
+      const s=o.shape;
+      if (o.type==='glass' || s.maxY<=top+.12 || s.maxY>maxY ||
+          x<=s.minX+.035 || x>=s.maxX-.035 || z<=s.minZ+.035 || z>=s.maxZ-.035) continue;
+      if (hasBroken && broken[o._idx]) continue;
+      top=s.maxY;
     }
     return top>surface.y?{...surface,y:top,raised:true}:surface;
   }

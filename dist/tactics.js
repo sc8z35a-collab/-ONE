@@ -52,6 +52,14 @@ export class Tactics {
     this.sectors=battle.world.tacticalSectors ??= sectors.map((list,level)=>[
       ...list.map(([x,z])=>({x:x+(level===1?UNDER_X:0),z})),...stops.filter(s=>s.level===level)
     ].map(p=>battle.navs[level].nearest(p)).filter(Boolean));
+    this.sectorMeta=battle.world.tacticalSectorMeta ??= this.sectors.map(list=>list.map(p=>{
+      const y=battle.world.floorY(p.x,p.z);
+      const pts=[[0,0],[1.8,0],[-1.8,0],[0,1.8],[0,-1.8]].map(([dx,dz])=>{
+        const sx=p.x+dx, sz=p.z+dz;
+        return [sx,sz,battle.world.floor(sx,sz).layer];
+      });
+      return {p,lx:localX(p.x),y,pts};
+    }));
   }
 
   state(actor) {
@@ -78,35 +86,45 @@ export class Tactics {
 
   pathLength(a,c) {
     const nav=this.battle.navs[a.level], d=distance(a,c);
-    if (!a.id || !c.id) return d*(d<29 && nav.clear(a,c,.53)?1:1.14)+Math.min(5.8,Math.abs(
-      this.battle.world.floor(a.x,a.z).y-this.battle.world.floor(c.x,c.z).y)*1.06);
-    const key=[a.id,c.id].sort().join('/');
-    if (this.walking.has(key)) return this.walking.get(key);
+    if (!a.id || !c.id) {
+      const world=this.battle.world;
+      return d*(d<29 && nav.clear(a,c,.53)?1:1.14)+Math.min(5.8,Math.abs(
+        world.floorY(a.x,a.z)-world.floorY(c.x,c.z))*1.06);
+    }
+    const key=a.id<c.id?a.id+'/'+c.id:c.id+'/'+a.id;
+    const cached=this.walking.get(key);
+    if (cached!==undefined) return cached;
     const path=nav.route(a,nav.nearest(c));
     let value=Infinity;
     if (path.length) {
       let previous=a;
       value=0;
-      for (const p of [...path,c]) {
-        value+=distance(previous,p);
-        previous=p;
+      for (let i=0;i<path.length;i++) {
+        value+=distance(previous,path[i]);
+        previous=path[i];
       }
+      value+=distance(previous,c);
     }
     this.walking.set(key,value);
     return value;
   }
 
-  trip(actor,goal,{trains=true,avoid=false}={}) {
+  trip(actor,goal,{trains=true,avoid=false,startCache=null}={}) {
     const b=this.battle, level=zoneOf(actor.x), targetLevel=zoneOf(goal.x);
     if (level>=2 || targetLevel>=2) return null;
     const a={x:actor.x,z:actor.z,level}, target={x:goal.x,z:goal.z,level:targetLevel};
     const nodes=[a,target,...portals], n=nodes.length;
     const costs=new Float64Array(n).fill(Infinity), elapsed=new Float64Array(n), visited=new Uint8Array(n), paths=new Array(n);
     const knowledge=[this.intelligence(actor,0),this.intelligence(actor,1)];
-    const riskOf=(from,to)=>knowledge[from.level].reduce((total,k)=>{
-      const near=segmentDistance(k,from,to);
-      return total+Math.max(0,1-near/15)*k.fresh;
-    },0);
+    const riskOf=(from,to)=>{
+      const list=knowledge[from.level];
+      let total=0;
+      for (let i=0;i<list.length;i++) {
+        const k=list[i], near=segmentDistance(k,from,to);
+        if (near<15) total+=(1-near/15)*k.fresh;
+      }
+      return total;
+    };
     costs[0]=0;
     const speed=avoid?4.78:tempo;
     for (let k=0;k<n;k++) {
@@ -114,16 +132,31 @@ export class Tactics {
       for (let i=0;i<n;i++) if (!visited[i] && costs[i]<best) {at=i;best=costs[i];}
       if (at<0 || at===1) break;
       visited[at]=1;
-      const from=nodes[at];
+      const from=nodes[at], baseCost=costs[at];
       for (let j=1;j<n;j++) {
         if (j===at || visited[j]) continue;
         const to=nodes[j];
         let walk=Infinity, penalty=0, step;
         if (from.level===to.level) {
-          walk=this.pathLength(from,to)/speed;
-          const risk=riskOf(from,to);
-          penalty=Math.min(19,risk*(avoid?6.1:3.1))*Math.min(1,walk/3);
-          step={kind:'walk',to};
+          let len;
+          if (at===0 && j>=2 && startCache) {
+            len=startCache[j];
+            if (len<0) {
+              const lb=distance(from,to)/speed;
+              if (baseCost+lb<costs[j]) len=startCache[j]=this.pathLength(from,to);
+              else len=Infinity;
+            }
+          } else if ((!from.id || !to.id) && baseCost+distance(from,to)/speed>=costs[j]) {
+            len=Infinity;
+          } else {
+            len=this.pathLength(from,to);
+          }
+          if (len<Infinity) {
+            walk=len/speed;
+            const risk=riskOf(from,to);
+            penalty=Math.min(19,risk*(avoid?6.1:3.1))*Math.min(1,walk/3);
+            step={kind:'walk',to};
+          }
         }
         if (from.kind==='stairs' && to.kind==='stairs' && from.stair===to.stair) {
           walk=STAIR_RUN/(speed*.81)+.45;
@@ -131,7 +164,8 @@ export class Tactics {
           step={kind:'stairs',stair:to.stair,to};
         }
         if (trains && from.kind==='station' && to.kind==='station') {
-          for (const rail of [b.transit,b.metro]) {
+          for (let ri=0;ri<2;ri++) {
+            const rail=ri===0?b.transit:b.metro;
             const ready=Math.max(b.elapsed,rail.time)+elapsed[at], arrive=rail.arrival(from.level,from.side,to.level,to.side,ready);
             const ride=arrive-ready, danger=rail.train.wetness*8+rail.train.risk*8+(1-rail.integrity/720)*5;
             const exposure=riskOf(from,from)*Math.min(3,ride*.21)+riskOf(to,to)*1.7+danger;
@@ -141,7 +175,7 @@ export class Tactics {
             }
           }
         }
-        const cost=costs[at]+walk+penalty;
+        const cost=baseCost+walk+penalty;
         if (cost>=costs[j]) continue;
         costs[j]=cost;
         elapsed[j]=elapsed[at]+walk;
@@ -269,35 +303,58 @@ export class Tactics {
     const signs=(actor.index+(kind==='flank'?Math.floor(actor.index/4):0))%2===0?-1:1;
     const lane=signs*(kind==='flank'?15:kind==='anchor'?7:11);
     const contacts=[this.intelligence(actor,0),this.intelligence(actor,1)];
+    const own=[];
+    for (let i=0;i<b.actors.length;i++) {
+      const a=b.actors[i];
+      if (a.team===actor.team && a!==actor && valid(a)) own.push(a);
+    }
+    const actorLx=localX(actor.x), actorZ=actor.z, myInk=actor.team+1, paint=b.paint;
+    const prevGoal=s.previous;
     const ranks=[];
-    for (const [zone,points] of this.sectors.entries()) {
-      const own=b.actors.filter(a=>a.team===actor.team && a!==actor && valid(a));
-      for (const p of points) {
-        const x=localX(p.x), f=b.world.floor(p.x,p.z), d=distance({x:localX(actor.x),z:actor.z},{x,z:p.z});
+    for (let zone=0;zone<this.sectorMeta.length;zone++) {
+      const list=this.sectorMeta[zone], zContacts=contacts[zone];
+      for (let i=0;i<list.length;i++) {
+        const meta=list[i], p=meta.p, x=meta.lx;
+        const d=Math.hypot(actorLx-x,actorZ-p.z);
         if (d<4.3 && zone===level) continue;
         let fresh=0;
-        for (const [dx,dz] of [[0,0],[1.8,0],[-1.8,0],[0,1.8],[0,-1.8]]) {
-          const at=b.world.floor(p.x+dx,p.z+dz);
-          const ink=b.paint.get(p.x+dx,p.z+dz,at.layer);
-          if (ink!==actor.team+1) fresh+=ink?.85:1.15;
+        const pts=meta.pts;
+        for (let k=0;k<5;k++) {
+          const pt=pts[k];
+          const ink=paint.get(pt[0],pt[1],pt[2]);
+          if (ink!==myInk) fresh+=ink?.85:1.15;
         }
-        const demand=contacts[zone].reduce((n,c)=>n+Math.max(0,1-distance(c,p)/15)*c.fresh,0);
-        const allies=own.filter(a=>sameLevel(a.x,p.x) && distance(a,p)<8.5).length;
-        const claimed=own.some(a=>{const goal=this.states.get(a)?.plan?.goal;return goal && sameLevel(goal.x,p.x) && distance(goal,p)<4.2;});
+        let demand=0;
+        for (let k=0;k<zContacts.length;k++) {
+          const c=zContacts[k], dc=Math.hypot(c.x-p.x,c.z-p.z);
+          if (dc<15) demand+=(1-dc/15)*c.fresh;
+        }
+        let allies=0, claimed=false;
+        for (let k=0;k<own.length;k++) {
+          const a=own[k];
+          if (sameLevel(a.x,p.x) && Math.hypot(a.x-p.x,a.z-p.z)<8.5) allies++;
+          if (!claimed) {
+            const goal=this.states.get(a)?.plan?.goal;
+            if (goal && sameLevel(goal.x,p.x) && Math.hypot(goal.x-p.x,goal.z-p.z)<4.2) claimed=true;
+          }
+        }
         const flank=kind==='flank'?(zone===1?5.15:0):zone===0?1.4:0;
-        const cover=kind==='anchor'?Math.max(0,f.y+(zone===1?8:0))*.7:0;
-        let score=fresh*1.08+flank+cover+Math.min(1,allies)*.6-Math.max(0,allies-1)*1.9-(claimed?4.1:0);
+        const cover=kind==='anchor'?Math.max(0,meta.y+(zone===1?8:0))*.7:0;
+        let score=fresh*1.08+flank+cover+(allies>1?1:allies)*.6-(allies>1?allies-1:0)*1.9-(claimed?4.1:0);
         score-=Math.abs(x+home*front)*.080+Math.abs(p.z-lane)*.095+d*.032;
         score+=kind==='support'?demand*.62:kind==='flank'?-demand*1.42:demand*.15;
         if (x*home>15 && demand>.4) score+=demand*(kind==='anchor'?3.9:2.6);
-        if (s.previous && distance(p,s.previous)<4) score-=2.5;
+        if (prevGoal && Math.hypot(p.x-prevGoal.x,p.z-prevGoal.z)<4) score-=2.5;
         ranks.push({p,score});
       }
     }
     ranks.sort((a,c)=>c.score-a.score);
     let best=null,value=-Infinity;
-    for (const {p,score} of ranks.slice(0,4)) {
-      const plan=this.trip(actor,p);
+    const startCache=new Float64Array(portals.length+2).fill(-1);
+    const limit=ranks.length<4?ranks.length:4;
+    for (let i=0;i<limit;i++) {
+      const {p,score}=ranks[i];
+      const plan=this.trip(actor,p,{startCache});
       if (!plan) continue;
       const v=score-plan.cost*.20;
       if (v>value) {value=v;best=plan;}

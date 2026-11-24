@@ -1,6 +1,9 @@
 import {CABIN_X,CABIN_Y,RAIL_CABIN_X,UNDER_X,UNDER_Y,ZONES,interiorBlend,zoneOf} from './layout.js';
-import {BLUR_FRAGMENT,COMPOSITE_FRAGMENT,DETAIL_FRAGMENT,DOWN_FRAGMENT,ENV_FRAGMENT,FULLSCREEN_VERTEX,LITE_FRAGMENT,LITE_SKY_FRAGMENT,
-  SCENE_FRAGMENT,SCENE_VERTEX,SHADOW_FRAGMENT,SHADOW_VERTEX,SKY_FRAGMENT,SSAO_FRAGMENT,UP_FRAGMENT} from './render-shaders.js';
+import {OccluderCuller} from './occlusion.js';
+import {ARCH_INTERIOR_FRAGMENT,ARCH_LITE_FRAGMENT,ARCH_OUTDOOR_FRAGMENT,ARCH_VERTEX,BLUR_FRAGMENT,COMPOSITE_FRAGMENT,DEPTH_VERTEX,DETAIL_FRAGMENT,DOWN_FRAGMENT,ENV_FRAGMENT,
+  FULLSCREEN_VERTEX,LITE_FRAGMENT,LITE_SKY_FRAGMENT,LITE_VERTEX,MIRROR_FRAGMENT,MIRROR_SKY_FRAGMENT,SCENE_FRAGMENT,SCENE_VERTEX,SHADOW_FRAGMENT,
+  SHADOW_VERTEX,SKY_FRAGMENT,SSAO_FRAGMENT,UP_FRAGMENT} from './render-shaders.js';
+import {writeSurfaceSlots} from './surface-solver.js';
 import {loadSurfaceSheets,surfaceArray} from './surface-textures.js';
 import {SURFACE_COUNT} from './surfaces.js';
 
@@ -39,12 +42,16 @@ const LABEL_INDEX=new Map(LABELS.map((label,i)=>[label,i]));
 const ATLAS_COLUMNS=4, ATLAS_ROWS=Math.ceil(LABELS.length/ATLAS_COLUMNS);
 const TRANSPARENT_MESHES=new Set(['quad','ripple','curtain','glass','hazard','shade']);
 const DECAL_MESHES=new Set(['splat','tri','shade']);
+// Closed outward-wound solids eligible for hardware backface culling and Z-prepass.
+const CULL_MESHES=new Set(['box','ramp','bevel','cylinder','taper','cone','orb','soft','limb','mantle','ring']);
+const SYMMETRIC_CULL=new Set(['box','bevel','cylinder','taper','cone','orb','soft','limb','mantle','ring']);
 const ZONE_BATCHES=['static','lower','cabin','railCabin'];
 const SHAPE_IDS={box:1,ramp:2,bevel:3,soft:4};
 const EMPTY={};
-// Static scene chunks: 32 m cells in Morton order so a visible wedge of the
-// city collapses into a few contiguous instanced draws.
-const CHUNK=32, SMALL_RADIUS=.42, SMALL_KEY=1<<20;
+// Static scene chunks: 20 m cells in Morton order partitioned by cutout flag,
+// material fast-path class, 4 effective solid-angle tiers, and shadow role.
+const CHUNK=20;
+const TIER_RADII=[.24,.58,1.45];
 
 export function multiply(a, b) {
   const out = new Float32Array(16);
@@ -126,7 +133,8 @@ function beveledBlock(lowDetail) {
     }
     for (let i=0;i<steps.length-1;i++) for (let j=0;j<steps.length-1;j++) {
       const k=base+i*steps.length+j;
-      mesh.indices.push(k,k+1,k+steps.length,k+1,k+steps.length+1,k+steps.length);
+      if (sign>0) mesh.indices.push(k,k+steps.length,k+1,k+1,k+steps.length,k+steps.length+1);
+      else mesh.indices.push(k,k+1,k+steps.length,k+1,k+steps.length+1,k+steps.length);
     }
   }
   return mesh;
@@ -159,7 +167,7 @@ export function hazardDisk(lowDetail) {
 }
 
 function ringMesh(lowDetail) {
-  const mesh=makeMesh(), around=lowDetail?12:36, tube=lowDetail?5:10;
+  const mesh=makeMesh(), around=lowDetail?10:36, tube=lowDetail?5:10;
   for (let i=0;i<=around;i++) for (let j=0;j<=tube;j++) {
     const a=i/around*TAU, b=j/tube*TAU, ca=Math.cos(a),sa=Math.sin(a),cb=Math.cos(b),sb=Math.sin(b);
     mesh.vertex([ca*(.39+.11*cb),.11*sb,sa*(.39+.11*cb)],[ca*cb,sb,sa*cb],[i/around,j/tube]);
@@ -172,7 +180,7 @@ function ringMesh(lowDetail) {
 }
 
 export function mantleMesh(lowDetail) {
-  const mesh=makeMesh(), sides=lowDetail?16:56, rows=lowDetail?10:30;
+  const mesh=makeMesh(), sides=lowDetail?14:56, rows=lowDetail?8:30;
   const point=(t,angle)=>{
     const shape=Math.pow(Math.max(0,Math.sin(Math.PI*t)),.56);
     const radius=.49*shape*(1.16-.38*t)*(1+.055*Math.cos(angle*6)*shape);
@@ -206,7 +214,7 @@ function radial(sphere, sides, rows = 1, taper = 1) {
   }
   for (let i = 0; i < rows; i++) for (let j = 0; j < sides; j++) {
     const k = i * (sides + 1) + j;
-    mesh.indices.push(k, k + 1, k + sides + 1, k + 1, k + sides + 2, k + sides + 1);
+    mesh.indices.push(k, k + sides + 1, k + 1, k + 1, k + sides + 1, k + sides + 2);
   }
   if (!sphere) {
     for (const edge of [0, 1]) {
@@ -215,7 +223,10 @@ function radial(sphere, sides, rows = 1, taper = 1) {
       for (let j = 0; j <= sides; j++) {
         const angle = TAU * j / sides;
         mesh.vertex([Math.cos(angle) * r,y,Math.sin(angle) * r], [0,edge ? 1 : -1,0]);
-        if (j) mesh.indices.push(center, center + j, center + j + 1);
+        if (j) {
+          if (edge) mesh.indices.push(center, center + j + 1, center + j);
+          else mesh.indices.push(center, center + j, center + j + 1);
+        }
       }
     }
   }
@@ -279,7 +290,8 @@ function softBox(lowDetail) {
     }
     for (let i=0;i<k-1;i++) for (let j=0;j<k-1;j++) {
       const q=base+i*k+j;
-      mesh.indices.push(q,q+1,q+k,q+1,q+k+1,q+k);
+      if (sign>0) mesh.indices.push(q,q+k,q+1,q+1,q+k,q+k+1);
+      else mesh.indices.push(q,q+1,q+k,q+1,q+k+1,q+k);
     }
   }
   return mesh;
@@ -304,7 +316,7 @@ function limbMesh(lowDetail) {
   }
   for (let i=0;i<rows;i++) for (let j=0;j<sides;j++) {
     const q=i*(sides+1)+j;
-    mesh.indices.push(q,q+1,q+sides+1,q+1,q+sides+2,q+sides+1);
+    mesh.indices.push(q,q+sides+1,q+1,q+1,q+sides+1,q+sides+2);
   }
   return mesh;
 }
@@ -329,10 +341,10 @@ export function meshes(lowDetail = false) {
 function renderMeshes() {
   const high=meshes();
   high.bevel=beveledBlock(true);
-  high.orb=radial(true,14,9);
-  high.cylinder=radial(false,12);
-  high.taper=radial(false,12,1,.67);
-  high.cone=radial(false,12,1,.025);
+  high.orb=radial(true,12,8);
+  high.cylinder=radial(false,10);
+  high.taper=radial(false,10,1,.67);
+  high.cone=radial(false,10,1,.025);
   high.ring=ringMesh(true);
   high.mantle=mantleMesh(true);
   high.hazard=hazardDisk(true);
@@ -341,8 +353,8 @@ function renderMeshes() {
   return high;
 }
 
-// Distant chunks and shadow casters swap to these: bevels become plain boxes,
-// curved parts drop most of their segments.
+// Distant chunks and shadow casters swap to these: bevels become plain boxes
+// with analytic rounded-edge shading, curved parts drop most of their segments.
 function lodMeshes() {
   const low=meshes(true);
   low.bevel=block();
@@ -355,26 +367,32 @@ function lodMeshes() {
   return low;
 }
 
-// Writes one instance record (24 floats) without allocating.
-export function packInstance(out,o,x,y,z,w,h,d,tint,kind,opts=EMPTY) {
+// Writes one instance record (24 floats) without allocating, including
+// pre-solved (slotTop, slotSide, slotBot) packed into a0.w, a1.w, a2.w.
+export function packInstance(out,o,x,y,z,w,h,d,tint,kind,opts=EMPTY,shape=0,ensureCCW=false) {
   let r,g,b;
   if (typeof tint==='number') {r=(tint>>16&255)/255;g=(tint>>8&255)/255;b=(tint&255)/255;}
   else {r=tint[0];g=tint[1];b=tint[2];}
   let ax,ay,az,bx,by,bz,cx,cy,cz;
   const basis=opts.basis;
   if (basis) {
-    [ax,ay,az]=basis[0];[bx,by,bz]=basis[1];[cx,cy,cz]=basis[2];
+    const b0=basis[0], b1=basis[1], b2=basis[2];
+    ax=b0[0];ay=b0[1];az=b0[2];bx=b1[0];by=b1[1];bz=b1[2];cx=b2[0];cy=b2[1];cz=b2[2];
+    if (ensureCCW && (ax*(by*cz-bz*cy)-ay*(bx*cz-bz*cx)+az*(bx*cy-by*cx))*w*h*d<0) {
+      ax=-ax;ay=-ay;az=-az;
+    }
   } else {
     const yaw=opts.yaw||0, pitch=opts.pitch||0;
     const c1=Math.cos(yaw),s1=Math.sin(yaw),c2=Math.cos(pitch),s2=Math.sin(pitch);
     ax=c1;ay=0;az=-s1;bx=s1*s2;by=c2;bz=c1*s2;cx=s1*c2;cy=-s2;cz=c1*c2;
   }
-  out[o]=ax*w;out[o+1]=ay*w;out[o+2]=az*w;out[o+3]=0;
-  out[o+4]=bx*h;out[o+5]=by*h;out[o+6]=bz*h;out[o+7]=0;
-  out[o+8]=cx*d;out[o+9]=cy*d;out[o+10]=cz*d;out[o+11]=0;
+  out[o]=ax*w;out[o+1]=ay*w;out[o+2]=az*w;out[o+3]=-1;
+  out[o+4]=bx*h;out[o+5]=by*h;out[o+6]=bz*h;out[o+7]=-1;
+  out[o+8]=cx*d;out[o+9]=cy*d;out[o+10]=cz*d;out[o+11]=-1;
   out[o+12]=x;out[o+13]=y;out[o+14]=z;out[o+15]=1;
   out[o+16]=r;out[o+17]=g;out[o+18]=b;out[o+19]=kind;
   out[o+20]=opts.label??0;out[o+21]=opts.layer??0;out[o+22]=opts.stairDuplicate?1:0;out[o+23]=opts.effect??0;
+  writeSurfaceSlots(out,o,shape);
 }
 
 export function labelIndex(name) {
@@ -392,7 +410,8 @@ function frustum(m) {
 }
 
 function boxVisible(planes,min,max,ox) {
-  for (const p of planes) {
+  for (let i=0;i<6;i++) {
+    const p=planes[i];
     const x=(p[0]>=0?max[0]:min[0])+ox, y=p[1]>=0?max[1]:min[1], z=p[2]>=0?max[2]:min[2];
     if (p[0]*x+p[1]*y+p[2]*z+p[3]<0) return false;
   }
@@ -410,6 +429,10 @@ function morton(x,z) {
   let key=0;
   for (let bit=0;bit<7;bit++) key|=((x>>bit)&1)<<(2*bit)|((z>>bit)&1)<<(2*bit+1);
   return key;
+}
+
+function withDefines(source,defs) {
+  return source.replace('#version 300 es','#version 300 es\n'+defs);
 }
 
 function program(gl, vertex, fragment) {
@@ -433,7 +456,7 @@ function uniforms(gl, shader, names) {
 }
 
 // The per-texture table (colour and layer of every slot) is one uniform
-// buffer shared by the full and the lightweight scene shaders.
+// buffer shared by the full, mirror and lightweight scene shaders.
 const SURFACE_TABLE=0;
 function surfaceTable(gl,shader) {
   const index=gl.getUniformBlockIndex(shader,'SurfaceTable');
@@ -477,25 +500,40 @@ function labelTexture(gl,anisotropy) {
 const SCENE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uShape','uQuality','uHDR','uMirrorPass',
   'uShadowOn','uCascades','uShadowM0','uShadowM1','uShadowTexel','uAtlasGrid','uReflectOn','uViewport','uEnvLod','uClock',
   'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge','uDrawFar'];
+const ARCH_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uQuality','uHDR','uShadowOn',
+  'uCascades','uShadowM0','uShadowM1','uShadowTexel','uInkTexel','uInkBounds','uEnvLod','uViewport','uExposure','uSurfaceSheets','uSurfaceEdge','uDrawFar'];
+const ARCH_INTERIOR_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uHDR','uInkTexel','uInkBounds','uUnderX','uUnderY','uCabinX',
+  'uRailCabinX','uCabinY','uViewport','uExposure','uSurfaceSheets','uSurfaceEdge'];
+const MIRROR_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uEnvLod','uSurfaceSheets','uSurfaceEdge'];
+const DEPTH_UNIFORMS=['uVP','uDrawOffset','uMergeStairs'];
 const SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uField','uClock','uInterior','uHDR','uViewport','uExposure'];
+const MIRROR_SKY_UNIFORMS=['uRight','uUp','uForward','uField'];
 const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9,surface:10,sheet:11,small:12};
-// Per pass culling: LOD switch distance, how far small props draw, hard cut.
-const HIGH_DRAW={lodDist:46,smallDist:120,cull:Infinity};
+const SCENE_SAMPLERS={uShadow0:UNIT.shadow0,uInk:UNIT.ink,uAtlas:UNIT.atlas,uReflection:UNIT.reflection,
+  uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small};
+const ARCH_SAMPLERS={uShadow0:UNIT.shadow0,uShadow1:UNIT.shadow1,uInk:UNIT.ink,uEnv:UNIT.env,uDetail:UNIT.detail,
+  uSurface:UNIT.surface,uSurfaceSmall:UNIT.small};
+const ARCH_INTERIOR_SAMPLERS={uDetail:UNIT.detail,uInk:UNIT.ink,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small};
+// Per-pass culling: LOD switch distances + 4 hierarchical effective solid-angle
+// tiers (micro <0.24m, small <0.58m, medium <1.45m, large >=1.45m) + hard cut.
+const HIGH_DRAW={lodDist:22,bevelLodDist:14,tierDist:[44,92,190,Infinity],cull:Infinity};
 // Fixed render resolutions offered in the settings (pixels of the frame).
 const RESOLUTION_PIXELS={fhd:1920*1080,'2k':2560*1440};
 // The lightweight modes only draw the street around the fight: far enough to
 // see every opponent a weapon can reach, with fog covering the cut.
-const LITE_DRAW={lodDist:15,smallDist:34,cull:92};
-const ULTRA_DRAW={lodDist:0,smallDist:22,cull:64};
-const OVERVIEW_DRAW={lodDist:0,smallDist:0,noSmall:true,cull:Infinity};
-const MIRROR_DRAW={lodDist:18,smallDist:24,cull:260};
+const LITE_DRAW={lodDist:10,bevelLodDist:6,tierDist:[22,48,76,96],cull:96};
+const ULTRA_DRAW={lodDist:0,bevelLodDist:0,tierDist:[12,22,46,64],cull:64};
+const OVERVIEW_DRAW={lodDist:0,bevelLodDist:0,tierDist:[0,95,165,Infinity],cull:Infinity};
+const MIRROR_DRAW={lodDist:12,bevelLodDist:8,tierDist:[0,22,85,260],cull:260};
+const SHADOW_C0={lodDist:12,bevelLodDist:8,tierDist:[18,34,Infinity,Infinity],cull:Infinity};
+const SHADOW_C1={lodDist:0,bevelLodDist:0,tierDist:[0,0,72,Infinity],cull:Infinity};
 // Internal resolution of the lightweight modes, in lines on the short side.
 export const LITE_LINES=400, ULTRA_LINES=300;
 const LITE_FOG=[.74,.80,.85];
 const LITE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uClock','uAtlasGrid','uUnderX','uUnderY','uCabinX',
   'uRailCabinX','uCabinY','uInkBounds','uFog','uFogRange','uShape','uSurfaceSheets','uSurfaceEdge'];
 const LITE_SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uFog','uField','uInterior'];
-const ENV_SIZE=[512,256];
+const ENV_SIZE=[256,128];
 
 export class Renderer {
   constructor(canvas, paint) {
@@ -526,36 +564,43 @@ export class Renderer {
     this.anisotropy=gl.getExtension('EXT_texture_filter_anisotropic');
     this.renderLimit = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE);
     this.textureLimit = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    this.occluder = new OccluderCuller();
     try {
-      this.scene = program(gl,SCENE_VERTEX,SCENE_FRAGMENT);
+      this.scene = program(gl,SCENE_VERTEX,withDefines(SCENE_FRAGMENT,'#define FAST_SLOT 1'));
+      this.sceneOutdoorOpaque = program(gl,SCENE_VERTEX,withDefines(SCENE_FRAGMENT,'#define FAST_SLOT 1\n#define OPAQUE_PURE 1\n#define OUTDOOR_ONLY 1'));
     } catch (error) {
       // Some older mobile drivers reject very long shaders; drop the room
       // interiors and per-lamp lighting instead of failing to start.
       console.warn('Using the reduced scene shader',error);
-      this.scene = program(gl,SCENE_VERTEX,SCENE_FRAGMENT.replace('#version 300 es','#version 300 es\n#define SAFE 1'));
+      this.scene = program(gl,SCENE_VERTEX,withDefines(SCENE_FRAGMENT,'#define FAST_SLOT 1\n#define SAFE 1'));
+      this.sceneOutdoorOpaque = program(gl,SCENE_VERTEX,withDefines(SCENE_FRAGMENT,'#define FAST_SLOT 1\n#define OPAQUE_PURE 1\n#define OUTDOOR_ONLY 1\n#define SAFE 1'));
       this.reducedShader=true;
     }
+    this.archOutdoor = program(gl,ARCH_VERTEX,ARCH_OUTDOOR_FRAGMENT);
+    this.depth = program(gl,DEPTH_VERTEX,SHADOW_FRAGMENT);
     this.shadow = program(gl,SHADOW_VERTEX,SHADOW_FRAGMENT);
     this.sky = program(gl,FULLSCREEN_VERTEX,SKY_FRAGMENT);
     this.u = uniforms(gl,this.scene,SCENE_UNIFORMS);
+    this.uoo = uniforms(gl,this.sceneOutdoorOpaque,SCENE_UNIFORMS);
+    this.ua = uniforms(gl,this.archOutdoor,ARCH_UNIFORMS);
+    this.du = uniforms(gl,this.depth,DEPTH_UNIFORMS);
     this.s = uniforms(gl,this.sky,SKY_UNIFORMS);
     this.shadowUniform = gl.getUniformLocation(this.shadow,'uLight');
-    surfaceTable(gl,this.scene);
-    samplers(gl,this.scene,{uShadow0:UNIT.shadow0,uInk:UNIT.ink,uAtlas:UNIT.atlas,uReflection:UNIT.reflection,
-      uEnv:UNIT.env,uDetail:UNIT.detail,uShadow1:UNIT.shadow1,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small});
-    samplers(gl,this.sky,{uDetail:UNIT.detail});
-    try {
-      this.sceneLite=program(gl,SCENE_VERTEX,LITE_FRAGMENT);
-      this.skyLite=program(gl,FULLSCREEN_VERTEX,LITE_SKY_FRAGMENT);
-      this.ul=uniforms(gl,this.sceneLite,LITE_UNIFORMS);
-      this.sl=uniforms(gl,this.skyLite,LITE_SKY_UNIFORMS);
-      samplers(gl,this.sceneLite,{uInk:UNIT.ink,uAtlas:UNIT.atlas,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small});
-      surfaceTable(gl,this.sceneLite);
-    } catch (error) {
-      // The full shader still renders the lightweight modes, only slower.
-      console.warn('Lightweight shader unavailable',error);
-      this.sceneLite=this.skyLite=null;
+    for (const sh of [this.scene,this.sceneOutdoorOpaque]) {
+      surfaceTable(gl,sh);
+      samplers(gl,sh,SCENE_SAMPLERS);
     }
+    surfaceTable(gl,this.archOutdoor);
+    samplers(gl,this.archOutdoor,ARCH_SAMPLERS);
+    samplers(gl,this.sky,{uDetail:UNIT.detail});
+    // Mirror, interior, stair-transition, and lite shaders compile lazily on first use.
+    this.sceneOpaque = this.uo = null;
+    this.archInterior = this.uai = null;
+    this.sceneMirror = this.sceneMirrorOpaque = this.skyMirror = null;
+    this.um = this.umo = this.sm = null;
+    this.sceneLite = this.sceneLiteOpaque = this.sceneLiteArch = this.skyLite = null;
+    this.ul = this.ulo = this.ula = this.sl = null;
+    this.liteChecked = false;
     this.empty = gl.createVertexArray();
     // Real surface textures arrive later (loadSurfaces); until then a blank
     // one-pixel array keeps the sampler valid and the shaders procedural.
@@ -594,13 +639,78 @@ export class Renderer {
     this.batches={};
     for (const name of Object.keys(high)) {
       this.vaos[name]={hi:this.makeVAO(high[name]),lo:this.makeVAO(low[name])};
-      this.batches[name]=Object.fromEntries([...ZONE_BATCHES,'dynamic','adjacent'].map(key=>[key,
-        {data:new Float32Array(key==='dynamic' || key==='adjacent'?STRIDE*64:0),length:0,count:0,buffer:gl.createBuffer(),capacity:0,chunks:[]}]));
+      this.batches[name]=Object.fromEntries([...ZONE_BATCHES,'dynamic','dynamicLo','adjacent'].map(key=>[key,
+        {data:new Float32Array(key==='dynamic' || key==='dynamicLo' || key==='adjacent'?STRIDE*64:0),length:0,count:0,buffer:gl.createBuffer(),capacity:0,chunks:[]}]));
     }
     this.frame = 0;
     this.inkTime = -1;
     gl.clearDepth(1);
     gl.depthFunc(gl.LEQUAL);
+  }
+
+  ensureMirrorShaders() {
+    if (this.sceneMirror) return;
+    const gl=this.gl;
+    this.sceneMirror = program(gl,SCENE_VERTEX,withDefines(MIRROR_FRAGMENT,'#define FAST_SLOT 1'));
+    this.sceneMirrorOpaque = program(gl,SCENE_VERTEX,withDefines(MIRROR_FRAGMENT,'#define FAST_SLOT 1\n#define MIRROR_OPAQUE 1'));
+    this.skyMirror = program(gl,FULLSCREEN_VERTEX,MIRROR_SKY_FRAGMENT);
+    this.um = uniforms(gl,this.sceneMirror,MIRROR_UNIFORMS);
+    this.umo = uniforms(gl,this.sceneMirrorOpaque,MIRROR_UNIFORMS);
+    this.sm = uniforms(gl,this.skyMirror,MIRROR_SKY_UNIFORMS);
+    for (const sh of [this.sceneMirror,this.sceneMirrorOpaque]) {
+      surfaceTable(gl,sh);
+      samplers(gl,sh,{uEnv:UNIT.env,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small});
+    }
+    samplers(gl,this.skyMirror,{uEnv:UNIT.env});
+  }
+
+  ensureLiteShaders() {
+    if (this.liteChecked) return !!this.sceneLite;
+    this.liteChecked=true;
+    const gl=this.gl;
+    try {
+      this.sceneLite=program(gl,LITE_VERTEX,withDefines(LITE_FRAGMENT,'#define FAST_SLOT 1'));
+      this.sceneLiteOpaque=program(gl,LITE_VERTEX,withDefines(LITE_FRAGMENT,'#define FAST_SLOT 1\n#define OPAQUE_PURE 1'));
+      this.sceneLiteArch=program(gl,ARCH_VERTEX,ARCH_LITE_FRAGMENT);
+      this.skyLite=program(gl,FULLSCREEN_VERTEX,LITE_SKY_FRAGMENT);
+      this.ul=uniforms(gl,this.sceneLite,LITE_UNIFORMS);
+      this.ulo=uniforms(gl,this.sceneLiteOpaque,LITE_UNIFORMS);
+      this.ula=uniforms(gl,this.sceneLiteArch,LITE_UNIFORMS);
+      this.sl=uniforms(gl,this.skyLite,LITE_SKY_UNIFORMS);
+      for (const sh of [this.sceneLite,this.sceneLiteOpaque]) {
+        samplers(gl,sh,{uInk:UNIT.ink,uAtlas:UNIT.atlas,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small});
+        surfaceTable(gl,sh);
+      }
+      samplers(gl,this.sceneLiteArch,{uInk:UNIT.ink,uSurface:UNIT.surface,uSurfaceSmall:UNIT.small});
+      surfaceTable(gl,this.sceneLiteArch);
+    } catch (error) {
+      // The full shader still renders the lightweight modes, only slower.
+      console.warn('Lightweight shader unavailable',error);
+      this.sceneLite=this.sceneLiteOpaque=this.sceneLiteArch=this.skyLite=null;
+    }
+    return !!this.sceneLite;
+  }
+
+  ensureInteriorShader() {
+    if (this.archInterior) return;
+    const gl=this.gl;
+    // Only compile the ultra-lean 4-varying interior arch shader (~99% of interior
+    // geometry); remaining ramps/dynamics reuse the pre-compiled main scene shader,
+    // eliminating the multi-second first-entry interior shader compilation hitch.
+    this.archInterior=program(gl,ARCH_VERTEX,this.reducedShader?withDefines(ARCH_INTERIOR_FRAGMENT,'#define SAFE 1'):ARCH_INTERIOR_FRAGMENT);
+    this.uai=uniforms(gl,this.archInterior,ARCH_INTERIOR_UNIFORMS);
+    surfaceTable(gl,this.archInterior);
+    samplers(gl,this.archInterior,ARCH_INTERIOR_SAMPLERS);
+  }
+
+  ensureCombinedOpaqueShader() {
+    if (this.sceneOpaque) return;
+    const gl=this.gl;
+    const defs='#define FAST_SLOT 1\n#define OPAQUE_PURE 1'+(this.reducedShader?'\n#define SAFE 1':'');
+    this.sceneOpaque=program(gl,SCENE_VERTEX,withDefines(SCENE_FRAGMENT,defs));
+    this.uo=uniforms(gl,this.sceneOpaque,SCENE_UNIFORMS);
+    surfaceTable(gl,this.sceneOpaque);
+    samplers(gl,this.sceneOpaque,SCENE_SAMPLERS);
   }
 
   makeVAO(mesh) {
@@ -638,12 +748,12 @@ export class Renderer {
     return texture;
   }
 
-  // Bakes the tileable detail map that every procedural material samples.
+  // Bakes the tileable detail map that procedural materials sample.
   makeDetail() {
-    const gl=this.gl, size=512, texture=gl.createTexture();
+    const gl=this.gl, size=256, texture=gl.createTexture();
     gl.activeTexture(gl.TEXTURE0+UNIT.detail);
     gl.bindTexture(gl.TEXTURE_2D,texture);
-    gl.texStorage2D(gl.TEXTURE_2D,10,gl.RGBA8,size,size);
+    gl.texStorage2D(gl.TEXTURE_2D,9,gl.RGBA8,size,size);
     const buffer=gl.createFramebuffer();
     gl.bindFramebuffer(gl.FRAMEBUFFER,buffer);
     gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.COLOR_ATTACHMENT0,gl.TEXTURE_2D,texture,0);
@@ -652,6 +762,7 @@ export class Renderer {
     gl.uniform1f(gl.getUniformLocation(maker,'uSize'),size);
     gl.viewport(0,0,size,size);
     gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
     gl.bindVertexArray(this.empty);
     gl.drawArrays(gl.TRIANGLES,0,3);
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);
@@ -662,8 +773,6 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
     gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
-    if (this.anisotropy) gl.texParameterf(gl.TEXTURE_2D,this.anisotropy.TEXTURE_MAX_ANISOTROPY_EXT,
-      Math.min(8,gl.getParameter(this.anisotropy.MAX_TEXTURE_MAX_ANISOTROPY_EXT)||1));
     return texture;
   }
 
@@ -676,7 +785,7 @@ export class Renderer {
       this.envTexture=gl.createTexture();
       gl.activeTexture(gl.TEXTURE0+UNIT.env);
       gl.bindTexture(gl.TEXTURE_2D,this.envTexture);
-      gl.texStorage2D(gl.TEXTURE_2D,10,gl.RGBA8,width,height);
+      gl.texStorage2D(gl.TEXTURE_2D,9,gl.RGBA8,width,height);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
@@ -693,6 +802,7 @@ export class Renderer {
     gl.viewport(0,0,width,height);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
     gl.bindVertexArray(this.empty);
     gl.drawArrays(gl.TRIANGLES,0,3);
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);
@@ -716,10 +826,10 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY,arrays?.large.texture ?? this.surfacePlaceholder);
     gl.activeTexture(gl.TEXTURE0+UNIT.small);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY,arrays?.small.texture ?? this.surfaceSmallPlaceholder);
-    // The lightweight modes read the textures with plain trilinear filtering.
+    // The lightweight modes read textures with bilinear + nearest mip (2x fewer texels).
     if (this.lite && !this.liteSampler) {
       this.liteSampler=gl.createSampler();
-      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_LINEAR);
+      gl.samplerParameteri(this.liteSampler,gl.TEXTURE_MIN_FILTER,gl.LINEAR_MIPMAP_NEAREST);
       gl.samplerParameteri(this.liteSampler,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
       gl.samplerParameteri(this.liteSampler,gl.TEXTURE_WRAP_S,gl.REPEAT);
       gl.samplerParameteri(this.liteSampler,gl.TEXTURE_WRAP_T,gl.REPEAT);
@@ -762,7 +872,7 @@ export class Renderer {
 
   prepareEffects() {
     if (this.effectsUnavailable) return false;
-    const plan=[{size:2048,radius:21,every:1},{size:2048,radius:105,every:4}];
+    const plan=[{size:1536,radius:21,every:1},{size:1024,radius:105,every:8}];
     if (this.shadowBuffer && this.cascades?.length===plan.length) return true;
     this.releaseShadows();
     const gl=this.gl;
@@ -774,7 +884,7 @@ export class Renderer {
       gl.framebufferTexture2D(gl.FRAMEBUFFER,gl.DEPTH_ATTACHMENT,gl.TEXTURE_2D,texture,0);
       gl.drawBuffers([gl.NONE]);
       gl.readBuffer(gl.NONE);
-      this.cascades.push({texture,buffer,size:edge,radius,every,matrix:null,texel:2*radius/edge});
+      this.cascades.push({texture,buffer,size:edge,radius,every,matrix:null,texel:2*radius/edge,eyeX:1e9,eyeZ:1e9});
       if (i===0) {
         this.shadowBuffer=buffer;
         this.shadowTexture=texture;
@@ -850,7 +960,9 @@ export class Renderer {
           'uBloomStrength','uAOStrength','uTime','uInterior','uAOOn','uBloomOn','uFXAA']);
       const counts=gl.getInternalformatParameter(gl.RENDERBUFFER,gl.RGBA16F,gl.SAMPLES);
       post.deviceSamples=counts && counts.length?Math.max(...counts):0;
-      post.samples=Math.min(this.maxSamples??4,post.deviceSamples);
+      // Live play runs 1x RGBA16F + Subpixel FXAA + FidelityFX CAS (eliminating
+      // 4x MSAA bandwidth and resolve); offline film can request MSAA via setSamples().
+      post.samples=Math.min(this.maxSamples??0,post.deviceSamples);
       return post;
     } catch (error) {
       console.warn('HDR post-processing disabled',error);
@@ -942,7 +1054,7 @@ export class Renderer {
     post.aoBufferB=this.postBuffer([[gl.COLOR_ATTACHMENT0,post.aoB]]);
     if (!post.aoBufferA || !post.aoBufferB) return fail();
     post.bloom=[];
-    for (let w=hw,h=hh,i=0;i<6 && Math.min(w,h)>=8;i++,w=Math.max(1,w>>1),h=Math.max(1,h>>1)) {
+    for (let w=hw,h=hh,i=0;i<4 && Math.min(w,h)>=8;i++,w=Math.max(1,w>>1),h=Math.max(1,h>>1)) {
       const texture=this.postTexture(w,h,gl.RGBA16F,gl.HALF_FLOAT,gl.LINEAR);
       const buffer=this.postBuffer([[gl.COLOR_ATTACHMENT0,texture]]);
       if (!buffer) return fail();
@@ -966,6 +1078,7 @@ export class Renderer {
     }
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
+    gl.disable(gl.CULL_FACE);
     gl.depthMask(false);
     gl.bindVertexArray(this.empty);
     const tan=Math.tan(FOV/2), proj=[tan*width/height,tan,NEAR,FAR];
@@ -1080,13 +1193,24 @@ export class Renderer {
   add(type,x,y,z,w,h,d,tint,kind = 0,opts = EMPTY) {
     const pair=this.batches[type];
     if (!pair) return;
-    const batch=pair[opts.dynamic?(this.drawingAdjacent?'adjacent':'dynamic'):ZONE_BATCHES[this.zone]];
+    let batch;
+    if (opts.dynamic) {
+      if (this.drawingAdjacent) batch=pair.adjacent;
+      else if (CULL_MESHES.has(type)) {
+        let useLo=this.lite;
+        if (!useLo && this.viewPoint) {
+          const dx=x-this.viewPoint[0], dy=y-this.viewPoint[1], dz=z-this.viewPoint[2];
+          if (dx*dx+dy*dy+dz*dz>400) useLo=true;
+        }
+        batch=useLo?pair.dynamicLo:pair.dynamic;
+      } else batch=pair.dynamic;
+    } else batch=pair[ZONE_BATCHES[this.zone]];
     if (batch.length+STRIDE>batch.data.length) {
       const grown=new Float32Array(Math.max(batch.data.length*2,STRIDE*256));
       grown.set(batch.data.subarray(0,batch.length));
       batch.data=grown;
     }
-    packInstance(batch.data,batch.length,x,y,z,w,h,d,tint,kind,opts);
+    packInstance(batch.data,batch.length,x,y,z,w,h,d,tint,kind,opts,SHAPE_IDS[type]??0,SYMMETRIC_CULL.has(type));
     batch.length+=STRIDE;
   }
 
@@ -1096,55 +1220,130 @@ export class Renderer {
   }
 
   beam(a,b,width,depth,tint,kind = 0,opts = EMPTY) {
-    const y = unit(sub(b,a));
-    const ref = Math.abs(y[2]) > .93 ? [1,0,0] : [0,0,1];
-    const x = unit(cross(y,ref)), z = cross(x,y);
-    const mid = scale(add(a,b),.5);
-    this.add(opts.shape ?? 'box',...mid,width,Math.hypot(...sub(b,a)),depth,tint,kind,{...opts,basis:[x,y,z]});
+    const dx=b[0]-a[0], dy=b[1]-a[1], dz=b[2]-a[2];
+    const len=Math.hypot(dx,dy,dz), invL=1/Math.max(.00001,len);
+    const yx=dx*invL, yy=dy*invL, yz=dz*invL;
+    let xx,xy,xz;
+    if (yz>.93 || yz<-.93) {
+      const inv=1/Math.max(.00001,Math.hypot(yz,yy));
+      xx=0; xy=yz*inv; xz=-yy*inv;
+    } else {
+      const inv=1/Math.max(.00001,Math.hypot(yy,yx));
+      xx=yy*inv; xy=-yx*inv; xz=0;
+    }
+    const bx=this._bx??(this._bx=[0,0,0]), by=this._by??(this._by=[0,0,0]), bz=this._bz??(this._bz=[0,0,0]);
+    const bo=this._bo??(this._bo={basis:[bx,by,bz],dynamic:false,label:undefined,layer:undefined,stairDuplicate:false,effect:undefined,windowId:undefined});
+    bx[0]=xx; bx[1]=xy; bx[2]=xz;
+    by[0]=yx; by[1]=yy; by[2]=yz;
+    bz[0]=xy*yz-xz*yy; bz[1]=xz*yx-xx*yz; bz[2]=xx*yy-xy*yx;
+    bo.dynamic=opts.dynamic;
+    bo.label=opts.label;
+    bo.layer=opts.layer;
+    bo.stairDuplicate=opts.stairDuplicate;
+    bo.effect=opts.effect;
+    bo.windowId=opts.windowId;
+    this.add(opts.shape ?? 'box',(a[0]+b[0])*.5,(a[1]+b[1])*.5,(a[2]+b[2])*.5,width,len,depth,tint,kind,bo);
   }
 
   seal() {
+    this.occluder?.clear();
     for (const [type,pair] of Object.entries(this.batches)) {
       ZONE_BATCHES.forEach((key,zone)=>this.sealStatic(type,pair[key],zone));
     }
   }
 
-  // Sorts a static batch into spatial chunks for frustum culling and LOD.
+  // Sorts a static batch into 20 m spatial chunks partitioned by cutout status,
+  // occluder-tier band (tier >= 2 vs < 2), architectural fast-path across all
+  // zones, effective cross-sectional solid-angle tier and shadow role.
   sealStatic(type,batch,zone) {
     const gl=this.gl, count=batch.length/STRIDE, source=batch.data;
     batch.chunks=[];
     batch.count=count;
     if (!count) return;
-    const origin=ZONES[zone].x, keys=new Float64Array(count), radius=new Float32Array(count);
-    const order=new Uint32Array(count), reach=type==='tri'?1:.5;
+    const origin=ZONES[zone].x, keys=new Uint32Array(count), radius=new Float32Array(count);
+    const order=new Uint32Array(count), isTri=type==='tri', isBox=type==='box';
+    const isClosed=CULL_MESHES.has(type), canArch=isClosed && type!=='ramp';
     for (let i=0;i<count;i++) {
       const o=i*STRIDE;
-      let sum=0;
-      for (const k of [0,1,2,4,5,6,8,9,10]) sum+=source[o+k]*source[o+k];
-      radius[i]=Math.sqrt(sum)*reach;
+      let r, effR, sx=0, sy=0, sz=0;
+      if (isTri) {
+        // Triangles span p, p+a0, p+a1 (a2 is the unit surface normal, NOT a spatial extent!).
+        const ax=source[o], ay=source[o+1], az=source[o+2];
+        const bx=source[o+4], by=source[o+5], bz=source[o+6];
+        const cx=(ax+bx)/3, cy=(ay+by)/3, cz=(az+bz)/3;
+        const d0=cx*cx+cy*cy+cz*cz;
+        const d1=(ax-cx)*(ax-cx)+(ay-cy)*(ay-cy)+(az-cz)*(az-cz);
+        const d2=(bx-cx)*(bx-cx)+(by-cy)*(by-cy)+(bz-cz)*(bz-cz);
+        r=Math.sqrt(Math.max(d0,d1,d2));
+        effR=r;
+      } else {
+        const a0=source[o], a1=source[o+1], a2=source[o+2];
+        const b0=source[o+4], b1=source[o+5], b2=source[o+6];
+        const c0=source[o+8], c1=source[o+9], c2=source[o+10];
+        const sx2=a0*a0+a1*a1+a2*a2, sy2=b0*b0+b1*b1+b2*b2, sz2=c0*c0+c1*c1+c2*c2;
+        sx=Math.sqrt(sx2); sy=Math.sqrt(sy2); sz=Math.sqrt(sz2);
+        r=Math.sqrt(sx2+sy2+sz2)*.5;
+        // Effective cross-sectional solid-angle radius demotes thin railings,
+        // window mullions and wires while preserving full reach for broad walls.
+        let a=sx, b=sy, c=sz;
+        if (a>b) {const t=a;a=b;b=t;}
+        if (b>c) {const t=b;b=c;c=t;}
+        if (a>b) {const t=a;a=b;b=t;}
+        effR=Math.sqrt(b*Math.min(c,b*14))*.5;
+      }
+      radius[i]=r;
+      const tier=effR<TIER_RADII[0]?0:effR<TIER_RADII[1]?1:effR<TIER_RADII[2]?2:3;
+      const kind=Math.round(source[o+19]);
+      const cutout=(kind===14 || kind===22 || kind===27)?1:0;
+      const archSimple=(canArch && !cutout && (kind===0 || kind===1 || kind===2 || kind===3 || kind===4 || kind===19 || kind===29 || (kind===13 && isBox) || (zone!==0 && kind===15)))?1:0;
+      let noShadow=(kind===22 || kind===27)?1:0;
+      if (!noShadow && isBox && zone===0) {
+        const halfY=(Math.abs(source[o+1])+Math.abs(source[o+5])+Math.abs(source[o+9]))*.5;
+        if (source[o+13]+halfY<=.28 && sy<=.32 && (sx>=2 || sz>=2)) noShadow=1;
+      }
+      if (zone===0 && isBox && !cutout && kind!==8 && kind!==6 && kind!==3 && source[o+22]<=.5) {
+        this.occluder?.addBoxFromPacked(source,o);
+      }
       const cx=clamp(Math.floor((source[o+12]-origin)/CHUNK)+64,0,127);
       const cz=clamp(Math.floor(source[o+14]/CHUNK)+64,0,127);
-      keys[i]=(radius[i]<SMALL_RADIUS?SMALL_KEY:0)+morton(cx,cz);
-      order[i]=i;
+      const loTier=tier<2?1:0;
+      const subTier=(3-tier)&1;
+      // Contiguous key layout: [cutout:1][loTier:1][archSimple:1][subTier:1][noShadow:1][morton:14]
+      // Keeps opaqueHi, archHi, fullHi, archLo, fullLo, and cutout each contiguous in VBO memory.
+      keys[i]=(cutout<<18)|(loTier<<17)|(archSimple<<16)|(subTier<<15)|(noShadow<<14)|morton(cx,cz);
     }
-    order.sort((a,b)=>keys[a]-keys[b] || a-b);
+    // Stable O(N) 2-pass 10-bit Radix Sort over 19-bit keys (zero JS comparator calls).
+    const tmp=new Uint32Array(count), counts=new Uint32Array(1024);
+    for (let i=0;i<count;i++) counts[keys[i]&1023]++;
+    for (let b=0,sum=0;b<1024;b++) {const c=counts[b];counts[b]=sum;sum+=c;}
+    for (let i=0;i<count;i++) tmp[counts[keys[i]&1023]++]=i;
+    counts.fill(0);
+    for (let i=0;i<count;i++) counts[(keys[tmp[i]]>>>10)&1023]++;
+    for (let b=0,sum=0;b<1024;b++) {const c=counts[b];counts[b]=sum;sum+=c;}
+    for (let i=0;i<count;i++) {const idx=tmp[i];order[counts[(keys[idx]>>>10)&1023]++]=idx;}
     const data=new Float32Array(count*STRIDE);
     let chunk=null;
     for (let k=0;k<count;k++) {
-      const i=order[k], o=i*STRIDE;
-      data.set(source.subarray(o,o+STRIDE),k*STRIDE);
-      if (!chunk || chunk.key!==keys[i]) {
-        chunk={key:keys[i],start:k,count:0,small:keys[i]>=SMALL_KEY,min:[Infinity,Infinity,Infinity],max:[-Infinity,-Infinity,-Infinity]};
+      const i=order[k], o=i*STRIDE, dst=k*STRIDE;
+      for (let j=0;j<STRIDE;j++) data[dst+j]=source[o+j];
+      const key=keys[i];
+      if (!chunk || chunk.key!==key) {
+        const cutout=(key>>18)&1, loTier=(key>>17)&1, archSimple=(key>>16)&1, subTier=(key>>15)&1, noShadow=(key>>14)&1;
+        const tier=3-((loTier<<1)|subTier);
+        chunk={key,start:k,count:0,tier,small:tier<=1,cutout:!!cutout,archSimple:!!archSimple,noShadow:!!noShadow,aboveMirror:true,
+          min:[Infinity,Infinity,Infinity],max:[-Infinity,-Infinity,-Infinity]};
         batch.chunks.push(chunk);
       }
       chunk.count++;
       const r=radius[i];
       for (let axis=0;axis<3;axis++) {
-        const c=source[o+12+axis]+(type==='tri'?(source[o+axis]+source[o+4+axis])*.33:0);
-        chunk.min[axis]=Math.min(chunk.min[axis],c-r);
-        chunk.max[axis]=Math.max(chunk.max[axis],c+r);
+        const c=source[o+12+axis]+(isTri?(source[o+axis]+source[o+4+axis])/3:0);
+        const lo=c-r, hi=c+r;
+        if (lo<chunk.min[axis]) chunk.min[axis]=lo;
+        if (hi>chunk.max[axis]) chunk.max[axis]=hi;
       }
     }
+    for (const c of batch.chunks) c.aboveMirror=c.min[1]>=.04;
     gl.bindBuffer(gl.ARRAY_BUFFER,batch.buffer);
     gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
     batch.capacity=data.byteLength;
@@ -1168,6 +1367,7 @@ export class Renderer {
   clearDynamic() {
     for (const pair of Object.values(this.batches)) {
       pair.dynamic.length=0;
+      pair.dynamicLo.length=0;
       pair.adjacent.length=0;
     }
   }
@@ -1185,29 +1385,58 @@ export class Renderer {
     gl.drawElementsInstanced(gl.TRIANGLES,vao.triangles,gl.UNSIGNED_SHORT,0,count);
   }
 
-  drawStatic(type,batch,planes,eye,offset,settings) {
+  drawStatic(type,batch,planes,eye,offset,settings,filter='all',shapeLoc=null,useOcc=false) {
     if (!batch.count) return;
     const vaos=this.vaos[type];
+    const isBevel=type==='bevel';
+    const lodDist=isBevel?(settings.bevelLodDist??settings.lodDist):settings.lodDist;
+    const tierDist=settings.tierDist;
+    const gl=this.gl;
+    const occ=useOcc && offset===0 && this.occluder?.active?this.occluder:null;
     let lod=-1, start=0, end=0;
-    for (const chunk of batch.chunks) {
-      if (chunk.small && settings.noSmall) continue;
+    const flush=()=>{
+      if (end<=start) return;
+      // Analytic Rounded-Edge Bevel Promotion: bevels switched to 12-tri box LOD
+      // enable uShape=1 so SCENE_FRAGMENT bends rounded edges analytically.
+      if (isBevel && shapeLoc) gl.uniform1i(shapeLoc,lod?1:3);
+      this.drawRange(lod?vaos.lo:vaos.hi,batch.buffer,start,end-start);
+    };
+    const chunks=batch.chunks;
+    for (let i=0;i<chunks.length;i++) {
+      const chunk=chunks[i];
+      if (filter==='opaqueHi' && (chunk.cutout || chunk.tier<2)) continue;
+      if (filter==='opaqueLo' && (chunk.cutout || chunk.tier>=2)) continue;
+      if (filter==='archHi' && (chunk.cutout || !chunk.archSimple || chunk.tier<2)) continue;
+      if (filter==='archLo' && (chunk.cutout || !chunk.archSimple || chunk.tier>=2)) continue;
+      if (filter==='fullHi' && (chunk.cutout || chunk.archSimple || chunk.tier<2)) continue;
+      if (filter==='fullLo' && (chunk.cutout || chunk.archSimple || chunk.tier>=2)) continue;
+      if (filter==='opaque' && chunk.cutout) continue;
+      if (filter==='cutout' && !chunk.cutout) continue;
+      if (filter==='shadow' && chunk.noShadow) continue;
+      if (filter==='mirrorOpaque' && (!chunk.aboveMirror || chunk.cutout)) continue;
+      if (filter==='mirrorClip' && (chunk.max[1]<.04 || (chunk.aboveMirror && !chunk.cutout))) continue;
+      const limit=tierDist?tierDist[chunk.tier]:Infinity;
+      if (limit<=0) continue;
       if (!boxVisible(planes,chunk.min,chunk.max,offset)) continue;
       const distance=boxDistance(eye,chunk.min,chunk.max,offset);
-      if (distance>settings.cull || chunk.small && distance>settings.smallDist) continue;
-      const want=distance>settings.lodDist?1:0;
-      if (want===lod && chunk.start-end<=64) end=chunk.start+chunk.count;
+      if (distance>settings.cull || distance>limit) continue;
+      if (occ && !occ.isBoxVisible(chunk.min,chunk.max,0)) continue;
+      const want=distance>lodDist?1:0;
+      if (want===lod && chunk.start===end) end=chunk.start+chunk.count;
       else {
-        if (end>start) this.drawRange(lod?vaos.lo:vaos.hi,batch.buffer,start,end-start);
+        flush();
         lod=want;
         start=chunk.start;
         end=chunk.start+chunk.count;
       }
     }
-    if (end>start) this.drawRange(lod?vaos.lo:vaos.hi,batch.buffer,start,end-start);
+    flush();
   }
 
-  drawDynamic(type,batch,low=false) {
-    if (batch.count) this.drawRange(low?this.vaos[type].lo:this.vaos[type].hi,batch.buffer,0,batch.count);
+  drawDynamic(type,batch,low=false,shapeLoc=null) {
+    if (!batch.count) return;
+    if (type==='bevel' && shapeLoc) this.gl.uniform1i(shapeLoc,low?1:3);
+    this.drawRange(low?this.vaos[type].lo:this.vaos[type].hi,batch.buffer,0,batch.count);
   }
 
   renderShadows(camera) {
@@ -1217,11 +1446,19 @@ export class Renderer {
     gl.useProgram(this.shadow);
     gl.enable(gl.DEPTH_TEST);
     gl.depthMask(true);
+    gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
     gl.enable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(1.15,2);
     for (const [i,cascade] of this.cascades.entries()) {
-      if (cascade.matrix && (this.frame+i)%cascade.every) continue;
+      if (cascade.matrix && i>0) {
+        const moved=Math.hypot(camera.eye[0]-cascade.eyeX,camera.eye[2]-cascade.eyeZ);
+        if ((this.frame+i)%cascade.every && moved<3) continue;
+      } else if (cascade.matrix && (this.frame+i)%cascade.every) continue;
+      cascade.eyeX=camera.eye[0];
+      cascade.eyeZ=camera.eye[2];
       const lead=cascade.radius*.58;
       const center=[camera.eye[0]+ahead[0]*lead,clamp(camera.eye[1],0,24)*.35,camera.eye[2]+ahead[2]*lead];
       const lightView=view(add(center,scale(SUN,230)),center);
@@ -1233,14 +1470,16 @@ export class Renderer {
       gl.clear(gl.DEPTH_BUFFER_BIT);
       gl.uniformMatrix4fv(this.shadowUniform,false,cascade.matrix);
       const planes=frustum(cascade.matrix);
-      const settings=i?{noSmall:true,lodDist:0,smallDist:0,cull:Infinity}:{lodDist:12,smallDist:34,cull:Infinity};
+      const settings=i?SHADOW_C1:SHADOW_C0;
       for (const [type,pair] of Object.entries(this.batches)) {
         if (TRANSPARENT_MESHES.has(type) || DECAL_MESHES.has(type)) continue;
-        this.drawStatic(type,pair.static,planes,camera.eye,0,settings);
+        this.drawStatic(type,pair.static,planes,camera.eye,0,settings,'shadow');
         this.drawDynamic(type,pair.dynamic,true);
+        this.drawDynamic(type,pair.dynamicLo,true);
       }
     }
     gl.disable(gl.POLYGON_OFFSET_FILL);
+    gl.disable(gl.CULL_FACE);
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);
   }
 
@@ -1266,14 +1505,22 @@ export class Renderer {
       canvas.width=w;
       canvas.height=h;
     }
+    const direction = unit(sub(camera.target,camera.eye));
+    const right = unit(cross(direction,UP));
+    const up = cross(right,direction);
     const outdoor=this.viewZone===0 && this.interior<.995;
     // No shadow maps and no mirror pass at all in the lightweight modes.
     this.effects=outdoor && !this.lite && this.prepareEffects();
-    const mirrorW=Math.max(1,Math.round(w*.5)), mirrorH=Math.max(1,Math.round(h*.5));
-    this.reflections=this.effects && !this.lite && this.options?.reflections!==false && this.prepareMirror(mirrorW,mirrorH);
+    // Visibility-gated planar reflections: skip when street-level puddles are
+    // not visible (aerial overview, high elevation, or looking up into the sky).
+    const needMirror=this.effects && !this.lite && this.options?.reflections!==false &&
+      !this.overview && camera.eye[1]<=18 && direction[1]<=.35;
+    const mirrorW=Math.max(1,Math.round(w*.35)), mirrorH=Math.max(1,Math.round(h*.35));
+    this.reflections=needMirror && this.prepareMirror(mirrorW,mirrorH);
     this.hdr=!this.lite && this.preparePost(w,h);
     for (const pair of Object.values(this.batches)) {
       this.upload(pair.dynamic);
+      this.upload(pair.dynamicLo);
       if (this.mergeStairs) this.upload(pair.adjacent);
       else pair.adjacent.count=0;
     }
@@ -1312,9 +1559,6 @@ export class Renderer {
     }
     this.lastInkMask=visibleMask;
     if (this.envTexture && outdoor && Math.abs(clock-this.envClock)>20) this.renderEnv(clock);
-    const direction = unit(sub(camera.target,camera.eye));
-    const right = unit(cross(direction,UP));
-    const up = cross(right,direction);
     if (this.reflections) {
       const reflected=([x,y,z])=>[x,-y,z];
       gl.bindFramebuffer(gl.FRAMEBUFFER,this.mirrorBuffer);
@@ -1327,31 +1571,78 @@ export class Renderer {
     gl.bindVertexArray(null);
   }
 
-  pass(w,h,direction,right,up,eye,vp,paint,clock,mirror) {
+  // Dedicated ultra-light planar reflection pass (no shadows, no detail/bump
+  // maps, no room tracing, single-tap env sky, front-face culled).
+  mirrorPass(w,h,direction,right,up,eye,vp) {
+    this.ensureMirrorShaders();
     const gl=this.gl;
-    if (this.lite && !mirror && this.sceneLite) return this.litePass(w,h,direction,right,up,eye,vp,paint,clock);
-    const hdr=mirror || this.hdr;
     gl.viewport(0,0,w,h);
     gl.depthMask(true);
+    gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);
-    if (hdr) gl.clearColor(.052,.058,.055,0);
-    else gl.clearColor(.23,.25,.24,1);
+    gl.clearColor(.052,.058,.055,0);
     gl.clear(gl.DEPTH_BUFFER_BIT|gl.COLOR_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
-    gl.useProgram(this.scene);
-    const u=this.active=this.u;
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.FRONT);
+    gl.activeTexture(gl.TEXTURE0+UNIT.env);
+    gl.bindTexture(gl.TEXTURE_2D,this.envTexture);
+    const planes=frustum(vp);
+    const settings=MIRROR_DRAW;
+    const setCommon=(prog,u)=>{
+      gl.useProgram(prog);
+      gl.uniformMatrix4fv(u.uVP,false,vp);
+      gl.uniform1f(u.uDrawOffset,0);
+      gl.uniform1i(u.uMergeStairs,0);
+      gl.uniform3fv(u.uEye,eye);
+      gl.uniform3fv(u.uSun,SUN);
+      gl.uniform3fv(u.uSunColor,SUN_RADIANCE);
+      gl.uniform1f(u.uEnvLod,8);
+      this.bindSurfaces(u,this.surfaceSheets);
+    };
+    // Sub-pass 1: buildings completely above the mirror plane (zero-discard Early-Z).
+    setCommon(this.sceneMirrorOpaque,this.umo);
+    for (const [type,pair] of Object.entries(this.batches)) {
+      if (TRANSPARENT_MESHES.has(type) || DECAL_MESHES.has(type)) continue;
+      this.drawStatic(type,pair.static,planes,eye,0,settings,'mirrorOpaque');
+    }
+    // Sub-pass 2: geometry straddling y = 0.037 + dynamic objects.
+    setCommon(this.sceneMirror,this.um);
+    for (const [type,pair] of Object.entries(this.batches)) {
+      if (TRANSPARENT_MESHES.has(type) || DECAL_MESHES.has(type)) continue;
+      this.drawStatic(type,pair.static,planes,eye,0,settings,'mirrorClip');
+      this.drawDynamic(type,pair.dynamic,true);
+      this.drawDynamic(type,pair.dynamicLo,true);
+    }
+    // Single-tap pre-baked sky probe.
+    gl.disable(gl.CULL_FACE);
+    gl.depthMask(false);
+    gl.useProgram(this.skyMirror);
+    const f=Math.tan(FOV/2), s=this.sm;
+    gl.uniform3fv(s.uRight,right);
+    gl.uniform3fv(s.uUp,up);
+    gl.uniform3fv(s.uForward,direction);
+    gl.uniform2f(s.uField,f*w/h,f);
+    gl.bindVertexArray(this.empty);
+    gl.drawArrays(gl.TRIANGLES,0,3);
+    gl.depthMask(true);
+    gl.cullFace(gl.BACK);
+  }
+
+  bindSceneUniforms(u,w,h,vp,paint,clock,hdr) {
+    const gl=this.gl;
     gl.uniformMatrix4fv(u.uVP,false,vp);
     gl.uniform3fv(u.uSun,SUN);
     gl.uniform3fv(u.uSunColor,SUN_RADIANCE);
-    gl.uniform1i(u.uQuality,mirror || this.lite?0:2);
+    gl.uniform1i(u.uQuality,this.lite?0:2);
     gl.uniform1i(u.uHDR,hdr?1:0);
-    gl.uniform1i(u.uMirrorPass,mirror?1:0);
+    gl.uniform1i(u.uMirrorPass,0);
     gl.uniform1f(u.uExposure,this.exposure());
     const far=this.options?.drawDistance ?? Infinity;
-    gl.uniform1f(u.uDrawFar,mirror || this.overview || !Number.isFinite(far)?0:far);
+    gl.uniform1f(u.uDrawFar,this.overview || !Number.isFinite(far)?0:far);
     gl.uniform2f(u.uViewport,w,h);
     gl.uniform1f(u.uClock,clock);
-    gl.uniform1f(u.uEnvLod,9);
+    gl.uniform1f(u.uEnvLod,8);
     gl.uniform2f(u.uInkTexel,1/paint.w,1/paint.h);
     gl.uniform2f(u.uInkBounds,paint.boundX,paint.boundZ);
     gl.uniform2f(u.uAtlasGrid,ATLAS_COLUMNS,ATLAS_ROWS);
@@ -1365,6 +1656,103 @@ export class Renderer {
     if (cascades[0]) gl.uniformMatrix4fv(u.uShadowM0,false,cascades[0].matrix);
     if (cascades[1]) gl.uniformMatrix4fv(u.uShadowM1,false,cascades[1].matrix);
     gl.uniform4f(u.uShadowTexel,1/(cascades[0]?.size||1),1/(cascades[1]?.size||1),cascades[0]?.texel||0,cascades[1]?.texel||0);
+    this.bindSurfaces(u,this.surfaceSheets);
+  }
+
+  bindArchUniforms(u,w,h,vp,eye,paint,hdr) {
+    const gl=this.gl;
+    gl.uniformMatrix4fv(u.uVP,false,vp);
+    gl.uniform1f(u.uDrawOffset,0);
+    gl.uniform1i(u.uMergeStairs,0);
+    gl.uniform3f(u.uEye,eye[0],eye[1],eye[2]);
+    gl.uniform3fv(u.uSun,SUN);
+    gl.uniform3fv(u.uSunColor,SUN_RADIANCE);
+    gl.uniform1i(u.uQuality,this.lite?0:2);
+    gl.uniform1i(u.uHDR,hdr?1:0);
+    gl.uniform1i(u.uShadowOn,this.effects?1:0);
+    gl.uniform1f(u.uExposure,this.exposure());
+    const far=this.options?.drawDistance ?? Infinity;
+    gl.uniform1f(u.uDrawFar,this.overview || !Number.isFinite(far)?0:far);
+    gl.uniform2f(u.uViewport,w,h);
+    gl.uniform1f(u.uEnvLod,8);
+    gl.uniform2f(u.uInkTexel,1/paint.w,1/paint.h);
+    gl.uniform2f(u.uInkBounds,paint.boundX,paint.boundZ);
+    const cascades=this.effects?this.cascades:[];
+    gl.uniform1i(u.uCascades,cascades.length);
+    if (cascades[0]) gl.uniformMatrix4fv(u.uShadowM0,false,cascades[0].matrix);
+    if (cascades[1]) gl.uniformMatrix4fv(u.uShadowM1,false,cascades[1].matrix);
+    gl.uniform4f(u.uShadowTexel,1/(cascades[0]?.size||1),1/(cascades[1]?.size||1),cascades[0]?.texel||0,cascades[1]?.texel||0);
+    this.bindSurfaces(u,this.surfaceSheets);
+  }
+
+  bindArchInteriorUniforms(u,w,h,vp,eye,paint,hdr) {
+    const gl=this.gl;
+    gl.uniformMatrix4fv(u.uVP,false,vp);
+    gl.uniform1f(u.uDrawOffset,0);
+    gl.uniform1i(u.uMergeStairs,0);
+    gl.uniform3f(u.uEye,eye[0],eye[1],eye[2]);
+    gl.uniform1i(u.uHDR,hdr?1:0);
+    gl.uniform1f(u.uExposure,this.exposure());
+    gl.uniform2f(u.uViewport,w,h);
+    gl.uniform2f(u.uInkTexel,1/paint.w,1/paint.h);
+    gl.uniform2f(u.uInkBounds,paint.boundX,paint.boundZ);
+    gl.uniform1f(u.uUnderX,UNDER_X);
+    gl.uniform1f(u.uUnderY,UNDER_Y);
+    gl.uniform1f(u.uCabinX,CABIN_X);
+    gl.uniform1f(u.uRailCabinX,RAIL_CABIN_X);
+    gl.uniform1f(u.uCabinY,CABIN_Y);
+    this.bindSurfaces(u,this.surfaceSheets);
+  }
+
+  drawArchStage(eye,planes,settings,filter,useOcc) {
+    const batchKey=ZONE_BATCHES[this.viewZone];
+    for (const [type,pair] of Object.entries(this.batches)) {
+      if (!CULL_MESHES.has(type) || type==='ramp') continue;
+      this.drawStatic(type,pair[batchKey],planes,eye,0,settings,filter,null,useOcc);
+    }
+  }
+
+  // Selective Occluder Z-Prepass: populates Z with large static occluders
+  // (tier >= 2) only. Small props (tier <= 1) and dynamic actors/vehicles skip
+  // pre-pass and draw once with LEQUAL so Early-Z rejects hidden props/actors
+  // without double vertex submission.
+  depthPrepass(eye,planes,vp,settings,useOcc=false) {
+    const gl=this.gl, zone=this.viewZone, du=this.du;
+    const merged=this.mergeStairs;
+    const views=merged?[zone,1-zone]:[zone];
+    gl.useProgram(this.depth);
+    gl.uniformMatrix4fv(du.uVP,false,vp);
+    gl.uniform1i(du.uMergeStairs,merged?1:0);
+    gl.colorMask(false,false,false,false);
+    gl.depthMask(true);
+    gl.depthFunc(gl.LEQUAL);
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    for (const level of views) {
+      const offset=ZONES[zone].x-ZONES[level].x;
+      gl.uniform1f(du.uDrawOffset,offset);
+      for (const [type,pair] of Object.entries(this.batches)) {
+        if (!CULL_MESHES.has(type)) continue;
+        this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,'opaqueHi',null,useOcc);
+      }
+    }
+    gl.colorMask(true,true,true,true);
+  }
+
+  pass(w,h,direction,right,up,eye,vp,paint,clock,mirror) {
+    if (mirror) return this.mirrorPass(w,h,direction,right,up,eye,vp);
+    const gl=this.gl;
+    if (this.lite && this.ensureLiteShaders()) return this.litePass(w,h,direction,right,up,eye,vp,paint,clock);
+    const hdr=this.hdr;
+    gl.viewport(0,0,w,h);
+    gl.depthMask(true);
+    gl.depthFunc(gl.LEQUAL);
+    gl.disable(gl.BLEND);
+    if (hdr) gl.clearColor(.052,.058,.055,0);
+    else gl.clearColor(.23,.25,.24,1);
+    gl.clear(gl.DEPTH_BUFFER_BIT|gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    const cascades=this.effects?this.cascades:[];
     gl.activeTexture(gl.TEXTURE0+UNIT.shadow0);
     gl.bindTexture(gl.TEXTURE_2D,cascades[0]?.texture ?? this.dummyDepth);
     gl.activeTexture(gl.TEXTURE0+UNIT.shadow1);
@@ -1374,14 +1762,77 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0+UNIT.atlas);
     gl.bindTexture(gl.TEXTURE_2D,this.atlas);
     gl.activeTexture(gl.TEXTURE0+UNIT.reflection);
-    gl.bindTexture(gl.TEXTURE_2D,mirror || !this.reflections ? this.atlas : this.mirrorTexture);
+    gl.bindTexture(gl.TEXTURE_2D,!this.reflections ? this.atlas : this.mirrorTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.env);
     gl.bindTexture(gl.TEXTURE_2D,this.envTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.detail);
     gl.bindTexture(gl.TEXTURE_2D,this.detail);
-    this.bindSurfaces(u,this.surfaceSheets);
     const planes=frustum(vp);
-    this.drawScene(eye,planes,mirror,false);
+    const settings=this.drawSettings(false);
+    const useOcc=this.viewZone===0 && !this.overview && !this.mergeStairs && !!this.occluder;
+    if (useOcc) this.occluder.build(vp,eye,planes);
+    else if (this.occluder) this.occluder.active=false;
+    // Stage 0: Selective Hi-Z depth pre-pass for large static occluders.
+    this.depthPrepass(eye,planes,vp,settings,useOcc);
+    // Stage 1: Domain-specialized zero-discard pure-opaque shading.
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    if (this.viewZone===0 && this.interior<=.001 && !this.mergeStairs) {
+      // Stage 1A: 4-varying outdoor architectural PBR shader (~87% of static solids).
+      gl.useProgram(this.archOutdoor);
+      this.bindArchUniforms(this.ua,w,h,vp,eye,paint,hdr);
+      gl.depthMask(false);
+      gl.depthFunc(gl.EQUAL);
+      this.drawArchStage(eye,planes,settings,'archHi',useOcc);
+      // Stage 1B: Outdoor-specialized full PBR shader for skyscrapers/windows/roads.
+      gl.useProgram(this.sceneOutdoorOpaque);
+      this.active=this.uoo;
+      this.bindSceneUniforms(this.uoo,w,h,vp,paint,clock,hdr);
+      this.drawSceneStage(eye,planes,settings,'fullHi',useOcc);
+      // Single-submission small props (tier <= 1) & dynamic objects tested against Stage 0 Z.
+      gl.depthMask(true);
+      gl.depthFunc(gl.LEQUAL);
+      this.drawSceneStage(eye,planes,settings,'fullLo',useOcc);
+      gl.useProgram(this.archOutdoor);
+      this.drawArchStage(eye,planes,settings,'archLo',useOcc);
+    } else if (this.interior>=.999 && !this.mergeStairs) {
+      this.ensureInteriorShader();
+      gl.useProgram(this.archInterior);
+      this.bindArchInteriorUniforms(this.uai,w,h,vp,eye,paint,hdr);
+      gl.depthMask(false);
+      gl.depthFunc(gl.EQUAL);
+      this.drawArchStage(eye,planes,settings,'archHi',false);
+      // Remaining ~0.5% static ramps & dynamic actors reuse pre-compiled main shader.
+      gl.useProgram(this.scene);
+      this.active=this.u;
+      this.bindSceneUniforms(this.u,w,h,vp,paint,clock,hdr);
+      this.drawSceneStage(eye,planes,settings,'fullHi',false);
+      gl.depthMask(true);
+      gl.depthFunc(gl.LEQUAL);
+      this.drawSceneStage(eye,planes,settings,'fullLo',false);
+      gl.useProgram(this.archInterior);
+      this.drawArchStage(eye,planes,settings,'archLo',false);
+    } else {
+      this.ensureCombinedOpaqueShader();
+      gl.useProgram(this.sceneOpaque);
+      this.active=this.uo;
+      this.bindSceneUniforms(this.uo,w,h,vp,paint,clock,hdr);
+      gl.depthMask(false);
+      gl.depthFunc(gl.EQUAL);
+      this.drawSceneStage(eye,planes,settings,'opaqueHi',useOcc);
+      gl.depthMask(true);
+      gl.depthFunc(gl.LEQUAL);
+      this.drawSceneStage(eye,planes,settings,'opaqueLo',useOcc);
+    }
+    // Stage 2: Cutouts (foliage, road paint, outer disk) & decals (splat, tri).
+    gl.depthMask(true);
+    gl.depthFunc(gl.LEQUAL);
+    gl.useProgram(this.scene);
+    this.active=this.u;
+    this.bindSceneUniforms(this.u,w,h,vp,paint,clock,hdr);
+    this.drawSceneStage(eye,planes,settings,'cutout',useOcc);
+    // Stage 3: Sky background (Early-Z skips all occluded geometry pixels).
+    gl.disable(gl.CULL_FACE);
     if (this.interior<.995) {
       gl.useProgram(this.sky);
       const f=Math.tan(FOV/2), s=this.s;
@@ -1401,20 +1852,12 @@ export class Renderer {
       gl.depthMask(true);
       gl.useProgram(this.scene);
     }
-    this.drawScene(eye,planes,mirror,true);
+    // Stage 4: Transparent meshes (labels, glass, curtains, ripples, hazards, shade).
+    this.drawSceneStage(eye,planes,settings,'alpha',useOcc);
   }
 
-  // The lightweight frame: one unshadowed pass straight to the screen.
-  litePass(w,h,direction,right,up,eye,vp,paint,clock) {
-    const gl=this.gl, u=this.active=this.ul;
-    const reach=this.drawSettings(false).cull;
-    gl.viewport(0,0,w,h);
-    gl.depthMask(true);
-    gl.disable(gl.BLEND);
-    gl.clearColor(...(this.interior>.5?[.055,.062,.058]:LITE_FOG),1);
-    gl.clear(gl.DEPTH_BUFFER_BIT|gl.COLOR_BUFFER_BIT);
-    gl.enable(gl.DEPTH_TEST);
-    gl.useProgram(this.sceneLite);
+  bindLiteUniforms(u,vp,paint,clock,reach) {
+    const gl=this.gl;
     gl.uniformMatrix4fv(u.uVP,false,vp);
     gl.uniform3fv(u.uSun,SUN);
     gl.uniform1f(u.uClock,clock);
@@ -1428,14 +1871,69 @@ export class Renderer {
     gl.uniform3fv(u.uFog,LITE_FOG);
     if (Number.isFinite(reach)) gl.uniform2f(u.uFogRange,reach*.5,reach*.97);
     else gl.uniform2f(u.uFogRange,1e7,2e7);
+    // The ultra-light mode keeps flat colours: no texture taps at all.
+    this.bindSurfaces(u,this.ultra?0:this.surfaceSheets);
+  }
+
+  // The lightweight frame: CPU Hi-Z + Selective Z-prepass + zero-discard opaque pass.
+  litePass(w,h,direction,right,up,eye,vp,paint,clock) {
+    const gl=this.gl;
+    const settings=this.drawSettings(false);
+    const reach=settings.cull;
+    gl.viewport(0,0,w,h);
+    gl.depthMask(true);
+    gl.depthFunc(gl.LEQUAL);
+    gl.disable(gl.BLEND);
+    gl.clearColor(...(this.interior>.5?[.055,.062,.058]:LITE_FOG),1);
+    gl.clear(gl.DEPTH_BUFFER_BIT|gl.COLOR_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
     gl.activeTexture(gl.TEXTURE0+UNIT.ink);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.inkTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.atlas);
     gl.bindTexture(gl.TEXTURE_2D,this.atlas);
-    // The ultra-light mode keeps flat colours: no texture taps at all.
-    this.bindSurfaces(u,this.ultra?0:this.surfaceSheets);
     const planes=frustum(vp);
-    this.drawScene(eye,planes,false,false);
+    const useOcc=this.viewZone===0 && !this.overview && !this.mergeStairs && !!this.occluder;
+    if (useOcc) this.occluder.build(vp,eye,planes);
+    else if (this.occluder) this.occluder.active=false;
+    // Stage 0: Selective occluder Z-prepass.
+    this.depthPrepass(eye,planes,vp,settings,useOcc);
+    // Stage 1: Zero-discard pure-opaque lite shaders (4-varying arch + 6-varying general).
+    gl.enable(gl.CULL_FACE);
+    gl.cullFace(gl.BACK);
+    gl.depthMask(false);
+    gl.depthFunc(gl.EQUAL);
+    if (this.sceneLiteArch && !this.mergeStairs) {
+      gl.useProgram(this.sceneLiteArch);
+      this.bindLiteUniforms(this.ula,vp,paint,clock,reach);
+      gl.uniform1f(this.ula.uDrawOffset,0);
+      gl.uniform1i(this.ula.uMergeStairs,0);
+      gl.uniform3f(this.ula.uEye,eye[0],eye[1],eye[2]);
+      this.drawArchStage(eye,planes,settings,'archHi',useOcc);
+      gl.useProgram(this.sceneLiteOpaque);
+      this.active=this.ulo;
+      this.bindLiteUniforms(this.ulo,vp,paint,clock,reach);
+      this.drawSceneStage(eye,planes,settings,'fullHi',useOcc);
+      gl.depthMask(true);
+      gl.depthFunc(gl.LEQUAL);
+      this.drawSceneStage(eye,planes,settings,'fullLo',useOcc);
+      gl.useProgram(this.sceneLiteArch);
+      this.drawArchStage(eye,planes,settings,'archLo',useOcc);
+    } else {
+      gl.useProgram(this.sceneLiteOpaque);
+      this.active=this.ulo;
+      this.bindLiteUniforms(this.ulo,vp,paint,clock,reach);
+      this.drawSceneStage(eye,planes,settings,'opaqueHi',useOcc);
+      gl.depthMask(true);
+      gl.depthFunc(gl.LEQUAL);
+      this.drawSceneStage(eye,planes,settings,'opaqueLo',useOcc);
+    }
+    // Stage 2: Cutouts & decals.
+    gl.useProgram(this.sceneLite);
+    this.active=this.ul;
+    this.bindLiteUniforms(this.ul,vp,paint,clock,reach);
+    this.drawSceneStage(eye,planes,settings,'cutout',useOcc);
+    // Stage 3: Sky.
+    gl.disable(gl.CULL_FACE);
     if (this.interior<.995) {
       gl.useProgram(this.skyLite);
       const f=Math.tan(FOV/2), s=this.sl;
@@ -1452,17 +1950,19 @@ export class Renderer {
       gl.depthMask(true);
       gl.useProgram(this.sceneLite);
     }
-    this.drawScene(eye,planes,false,true);
+    // Stage 4: Transparents.
+    this.drawSceneStage(eye,planes,settings,'alpha',useOcc);
   }
 
   drawSettings(mirror) {
-    const preset=mirror?MIRROR_DRAW:!this.lite?HIGH_DRAW:this.overview?OVERVIEW_DRAW:this.ultra?ULTRA_DRAW:LITE_DRAW;
+    const preset=mirror?MIRROR_DRAW:!this.lite?(this.overview?OVERVIEW_DRAW:HIGH_DRAW):this.overview?OVERVIEW_DRAW:this.ultra?ULTRA_DRAW:LITE_DRAW;
     const far=this.options?.drawDistance ?? Infinity;
     if (mirror || this.overview || !Number.isFinite(far)) return preset;
     // The draw-distance setting replaces the mode's own cut, near or far.
     const cached=this.cullCache;
     if (cached?.preset===preset && cached.far===far) return cached.settings;
-    const settings={...preset,cull:far,lodDist:Math.min(preset.lodDist,far*.5),smallDist:Math.min(preset.smallDist,far*.7)};
+    const settings={...preset,cull:far,lodDist:Math.min(preset.lodDist,far*.5),bevelLodDist:Math.min(preset.bevelLodDist,far*.4),
+      tierDist:preset.tierDist.map(d=>Math.min(d,far))};
     this.cullCache={preset,far,settings};
     return settings;
   }
@@ -1472,32 +1972,60 @@ export class Renderer {
     return this.overview?Infinity:this.drawSettings(false).cull;
   }
 
-  drawScene(eye,planes,mirror,alpha) {
+  drawSceneStage(eye,planes,settings,stage,useOcc=false) {
     const gl=this.gl, zone=this.viewZone, u=this.active ?? this.u;
-    const merged=!mirror && this.mergeStairs;
+    const merged=this.mergeStairs;
     const views=merged?[[zone,'dynamic'],[1-zone,'adjacent']]:[[zone,'dynamic']];
     gl.uniform1i(u.uMergeStairs,merged?1:0);
-    if (alpha) {
+    if (stage==='alpha') {
       gl.enable(gl.BLEND);
       gl.blendFuncSeparate(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA,gl.ZERO,gl.ONE);
       gl.depthMask(false);
+      gl.disable(gl.CULL_FACE);
     }
-    const settings=this.drawSettings(mirror);
+    const isHiOpaque=stage==='opaqueHi' || stage==='fullHi';
+    const isLoOpaque=stage==='opaqueLo' || stage==='fullLo';
     for (const [level,dynamicKey] of views) {
       const offset=ZONES[zone].x-ZONES[level].x;
       gl.uniform1f(u.uDrawOffset,offset);
-      gl.uniform1f(u.uZoneX,ZONES[level].x);
+      if (u.uZoneX) gl.uniform1f(u.uZoneX,ZONES[level].x);
       gl.uniform3f(u.uEye,eye[0]-offset,eye[1],eye[2]);
-      gl.uniform1i(u.uShadowOn,this.effects && level===0?1:0);
-      gl.uniform1i(u.uReflectOn,this.reflections && !mirror && level===0?1:0);
+      if (u.uShadowOn) gl.uniform1i(u.uShadowOn,this.effects && level===0?1:0);
+      if (u.uReflectOn) gl.uniform1i(u.uReflectOn,this.reflections && level===0?1:0);
       for (const [type,pair] of Object.entries(this.batches)) {
-        if (TRANSPARENT_MESHES.has(type)!==alpha) continue;
-        gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
-        this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings);
-        this.drawDynamic(type,pair[dynamicKey],this.ultra);
+        const isAlpha=TRANSPARENT_MESHES.has(type);
+        const isClosed=CULL_MESHES.has(type);
+        if (stage==='alpha') {
+          if (!isAlpha) continue;
+          gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
+          this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,'all',u.uShape,useOcc);
+          this.drawDynamic(type,pair[dynamicKey],this.ultra,u.uShape);
+        } else if (isHiOpaque) {
+          if (!isClosed) continue;
+          gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
+          this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,stage,u.uShape,useOcc);
+        } else if (isLoOpaque) {
+          if (!isClosed) continue;
+          gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
+          this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,stage,u.uShape,useOcc);
+          this.drawDynamic(type,pair[dynamicKey],this.lite,u.uShape);
+          if (dynamicKey==='dynamic') this.drawDynamic(type,pair.dynamicLo,true,u.uShape);
+        } else {
+          // Cutout chunks of closed meshes + non-closed opaque decals (splat, tri).
+          if (isAlpha) continue;
+          gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
+          if (isClosed) {
+            gl.enable(gl.CULL_FACE);
+            this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,'cutout',u.uShape,useOcc);
+          } else {
+            gl.disable(gl.CULL_FACE);
+            this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,'all',u.uShape,useOcc);
+            this.drawDynamic(type,pair[dynamicKey],this.lite,u.uShape);
+          }
+        }
       }
     }
-    if (alpha) {
+    if (stage==='alpha') {
       gl.depthMask(true);
       gl.disable(gl.BLEND);
     }

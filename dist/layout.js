@@ -1,6 +1,6 @@
 export const BOUNDS=[53.5,35];
 export const CITY_RADIUS=500;
-export const inCity=(x,z,margin=0)=>Math.hypot(x,z)<=CITY_RADIUS-margin;
+export const inCity=(x,z,margin=0)=>{const r=CITY_RADIUS-margin;return r>=0 && x*x+z*z<=r*r;};
 export function cityExit(from,to,margin=0) {
   const radius=CITY_RADIUS-margin;
   const x=from[0],z=from[2],dx=to[0]-x,dz=to[2]-z;

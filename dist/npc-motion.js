@@ -18,18 +18,25 @@ export function resetGait(a) {
 }
 
 export function limbJoint(root,end,upper,lower,pole) {
-  const axis=end.map((value,i)=>value-root[i]);
-  const span=Math.hypot(...axis);
-  if (span<1e-5) return root.map((value,i)=>value+pole[i]*upper);
-  for (let i=0;i<3;i++) axis[i]/=span;
-  const length=clamp(span,Math.abs(upper-lower)+.001,upper+lower-.001);
-  const along=(upper**2-lower**2+length**2)/(2*length);
-  const bend=Math.sqrt(Math.max(0,upper**2-along**2));
-  const dot=pole.reduce((sum,value,i)=>sum+value*axis[i],0);
-  let side=pole.map((value,i)=>value-dot*axis[i]);
-  if (Math.hypot(...side)<1e-6) side=Math.abs(axis[1])<.7?[axis[2],0,-axis[0]]:[0,axis[2],-axis[1]];
-  const norm=Math.hypot(...side);
-  return root.map((value,i)=>value+axis[i]*along+side[i]*bend/norm);
+  const rx=root[0], ry=root[1], rz=root[2];
+  const dx=end[0]-rx, dy=end[1]-ry, dz=end[2]-rz;
+  const span=Math.hypot(dx,dy,dz);
+  if (span<1e-5) return [rx+pole[0]*upper,ry+pole[1]*upper,rz+pole[2]*upper];
+  const inv=1/span, ax=dx*inv, ay=dy*inv, az=dz*inv;
+  const lo=Math.abs(upper-lower)+.001, hi=upper+lower-.001;
+  const length=span<lo?lo:span>hi?hi:span;
+  const along=(upper*upper-lower*lower+length*length)/(2*length);
+  const bend=Math.sqrt(Math.max(0,upper*upper-along*along));
+  const pd=pole[0]*ax+pole[1]*ay+pole[2]*az;
+  let sx=pole[0]-pd*ax, sy=pole[1]-pd*ay, sz=pole[2]-pd*az;
+  let norm=Math.hypot(sx,sy,sz);
+  if (norm<1e-6) {
+    if (Math.abs(ay)<.7) {sx=az;sy=0;sz=-ax;}
+    else {sx=0;sy=az;sz=-ay;}
+    norm=Math.hypot(sx,sy,sz);
+  }
+  const s=bend/norm;
+  return [rx+ax*along+sx*s,ry+ay*along+sy*s,rz+az*along+sz*s];
 }
 
 export class NpcMotion {
@@ -39,10 +46,12 @@ export class NpcMotion {
   }
 
   begin() {
-    for (const group of this.groups) group.length=0;
+    for (let i=0;i<4;i++) this.groups[i].length=0;
     const b=this.battle;
-    for (const a of b.actors) if (a.down<=0 && !a.ride && !a.lift) this.groups[zoneOf(a.x)].push(a);
-    for (const a of b.raiders.members) if (a.active && !a.ride && !a.lift) this.groups[zoneOf(a.x)].push(a);
+    const actors=b.actors;
+    for (let i=0;i<actors.length;i++) {const a=actors[i];if (a.down<=0 && !a.ride && !a.lift) this.groups[zoneOf(a.x)].push(a);}
+    const raiders=b.raiders.members;
+    for (let i=0;i<raiders.length;i++) {const a=raiders[i];if (a.active && !a.ride && !a.lift) this.groups[zoneOf(a.x)].push(a);}
     if (b.boss.active) this.groups[zoneOf(b.boss.x)].push(b.boss);
   }
 
@@ -60,38 +69,86 @@ export class NpcMotion {
   }
 
   roomFor(a,x,y,z,r,h) {
-    const shift=zoneOf(x)!==zoneOf(a.x)?stairNeighborShift(a.x,a.z,1):0;
-    for (const [other,ox] of this.neighbors(a,x,z,r+1.5)) {
-      if (other.ride || other.lift || y+h<=other.y+.09 || other.y+height(other)<=y+.09) continue;
-      const sum=(r+radius(other))*.82;
-      const end=(x-ox)**2+(z-other.z)**2;
-      if (end>=sum*sum) continue;
-      const start=(a.x+shift-ox)**2+(a.z-other.z)**2;
-      if (end+1e-8<Math.min(start,sum*sum)) return false;
+    const level=zoneOf(x), reach=r+1.5;
+    const shift=level!==zoneOf(a.x)?stairNeighborShift(a.x,a.z,1):0;
+    const axShift=a.x+shift, az=a.z;
+    const g0=this.groups[level];
+    for (let i=0;i<g0.length;i++) {
+      const other=g0[i];
+      if (other===a || other.ride || other.lift || (other.down??0)>0 || ((other.isRaider || other.isBoss) && !other.active)) continue;
+      const ox=other.x;
+      if (ox-x>=reach || x-ox>=reach || other.z-z>=reach || z-other.z>=reach || zoneOf(ox)!==level) continue;
+      if (y+h<=other.y+.09 || other.y+height(other)<=y+.09) continue;
+      const sum=(r+radius(other))*.82, sum2=sum*sum;
+      const dx=x-ox, dz=z-other.z, end=dx*dx+dz*dz;
+      if (end>=sum2) continue;
+      const sdx=axShift-ox, sdz=az-other.z, start=sdx*sdx+sdz*sdz;
+      if (end+1e-8<(start<sum2?start:sum2)) return false;
+    }
+    const nShift=stairNeighborShift(x,z,reach);
+    if (nShift) {
+      const g1=this.groups[1-level];
+      for (let i=0;i<g1.length;i++) {
+        const other=g1[i];
+        if (other===a || other.ride || other.lift || (other.down??0)>0 || ((other.isRaider || other.isBoss) && !other.active)) continue;
+        if (other.z-z>=reach || z-other.z>=reach || zoneOf(other.x)===level) continue;
+        const ox=other.x-nShift;
+        if (ox-x>=reach || x-ox>=reach) continue;
+        if (y+h<=other.y+.09 || other.y+height(other)<=y+.09) continue;
+        const sum=(r+radius(other))*.82, sum2=sum*sum;
+        const dx=x-ox, dz=z-other.z, end=dx*dx+dz*dz;
+        if (end>=sum2) continue;
+        const sdx=axShift-ox, sdz=az-other.z, start=sdx*sdx+sdz*sdz;
+        if (end+1e-8<(start<sum2?start:sum2)) return false;
+      }
     }
     return true;
   }
 
   avoid(a,vx,vz) {
-    if (Math.hypot(vx,vz)<.15) return [vx,vz];
-    const b=this.battle;
-    let pushX=0,pushZ=0,slow=1;
-    for (const [other,ox] of this.neighbors(a,a.x,a.z,4.1)) {
-      if (Math.abs(a.y-other.y)>1.05 || other.ride || other.lift) continue;
-      const rx=ox-a.x, rz=other.z-a.z, dist=Math.hypot(rx,rz);
-      if (dist<.02 || dist>4.1) continue;
+    if (vx*vx+vz*vz<.0225) return [vx,vz];
+    const b=this.battle, ax=a.x, ay=a.y, az=a.z, ra=radius(a), level=zoneOf(ax);
+    let pushX=0, pushZ=0, slow=1;
+    const check=(other,ox)=>{
+      if (Math.abs(ay-other.y)>1.05 || other.ride || other.lift) return;
+      const rx=ox-ax, rz=other.z-az, d2=rx*rx+rz*rz;
+      if (d2<.0004 || d2>16.81) return;
+      const dist=Math.sqrt(d2);
       const ux=vx-(other.vx??0), uz=vz-(other.vz??0), toward=rx*ux+rz*uz;
-      const t=clamp(toward/Math.max(.1,ux*ux+uz*uz),0,.43);
-      const px=rx-ux*t,pz=rz-uz*t, near=Math.hypot(px,pz);
-      const limit=radius(a)+radius(other)+.42;
-      if (near>=limit || toward<0 && dist>limit*.75) continue;
-      if (dist>1.5 && b.world.blocked((a.x+ox)/2,(a.y+other.y)/2+.36,(a.z+other.z)/2,.13,.68)) continue;
+      const denom=ux*ux+uz*uz;
+      let t=toward/(denom>.1?denom:.1);
+      if (t<0) t=0; else if (t>.43) t=.43;
+      const px=rx-ux*t, pz=rz-uz*t, near=Math.hypot(px,pz);
+      const limit=ra+radius(other)+.42;
+      if (near>=limit || (toward<0 && dist>limit*.75)) return;
+      if (dist>1.5 && b.world.blocked((ax+ox)*.5,(ay+other.y)*.5+.36,(az+other.z)*.5,.13,.68)) return;
       const cross=rx*vz-rz*vx;
-      const side=Math.abs(cross)<.42?1:Math.sign(cross);
-      const weight=(1-near/limit)*(dist<1.6?3.6:2.3);
-      pushX+=(-rx/dist*.43-rz/dist*side)*weight;
-      pushZ+=(-rz/dist*.43+rx/dist*side)*weight;
-      slow=Math.min(slow,1-.49*(1-near/limit));
+      const side=Math.abs(cross)<.42?1:cross>0?1:-1;
+      const invD=1/dist, f=1-near/limit, weight=f*(dist<1.6?3.6:2.3);
+      pushX+=(-rx*invD*.43-rz*invD*side)*weight;
+      pushZ+=(-rz*invD*.43+rx*invD*side)*weight;
+      const s=1-.49*f;
+      if (s<slow) slow=s;
+    };
+    const g0=this.groups[level];
+    for (let i=0;i<g0.length;i++) {
+      const other=g0[i];
+      if (other===a || (other.down??0)>0 || ((other.isRaider || other.isBoss) && !other.active)) continue;
+      const ox=other.x;
+      if (ox-ax>=4.1 || ax-ox>=4.1 || other.z-az>=4.1 || az-other.z>=4.1 || zoneOf(ox)!==level) continue;
+      check(other,ox);
+    }
+    const shift=stairNeighborShift(ax,az,4.1);
+    if (shift) {
+      const g1=this.groups[1-level];
+      for (let i=0;i<g1.length;i++) {
+        const other=g1[i];
+        if (other===a || (other.down??0)>0 || ((other.isRaider || other.isBoss) && !other.active)) continue;
+        if (other.z-az>=4.1 || az-other.z>=4.1 || zoneOf(other.x)===level) continue;
+        const ox=other.x-shift;
+        if (ox-ax>=4.1 || ax-ox>=4.1) continue;
+        check(other,ox);
+      }
     }
     return [vx*slow+pushX,vz*slow+pushZ];
   }

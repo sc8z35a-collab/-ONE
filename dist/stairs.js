@@ -26,12 +26,15 @@ export function stairPoint(stair,level,t=level===0?-1.0:STAIR_RUN+1.0) {
 
 export function stairAt(x,z,margin=0) {
   const level=zoneOf(x);
-  if (level>=2 || Math.abs(z)<10.5-margin || Math.abs(z)>15.25+margin) return null;
+  if (level>=2 || z<-15.25-margin || z>15.25+margin || (z>-10.5+margin && z<10.5-margin)) return null;
   const lx=localX(x);
-  if (Math.abs(lx)<30.8-margin || Math.abs(lx)>46.3+margin) return null;
-  for (const stair of STAIRS) {
+  if (lx<-46.3-margin || lx>46.3+margin || (lx>-30.8+margin && lx<30.8-margin)) return null;
+  for (let i=0;i<4;i++) {
+    const stair=STAIRS[i];
     const t=(lx-stair.x)*stair.dir;
-    if (t< -margin || t>STAIR_RUN+margin || Math.abs(z-stair.z)>HALF+margin) continue;
+    if (t<-margin || t>STAIR_RUN+margin) continue;
+    const dz=z-stair.z;
+    if (dz<-HALF-margin || dz>HALF+margin) continue;
     return {stair,t,level};
   }
   return null;
@@ -48,8 +51,36 @@ export function stairNeighborShift(x,z,radius) {
 }
 
 export function stairFloor(x,z) {
-  const p=stairLane(x,z);
-  return p?{y:stairY(p.t),layer:p.level===1?2:0,stair:p.stair}:null;
+  const level=zoneOf(x);
+  if (level>=2 || z<-15.25 || z>15.25 || (z>-10.5 && z<10.5)) return null;
+  const lx=localX(x);
+  if (lx<-46.3 || lx>46.3 || (lx>-30.8 && lx<30.8)) return null;
+  for (let i=0;i<4;i++) {
+    const stair=STAIRS[i];
+    const t=(lx-stair.x)*stair.dir;
+    if (t<0 || t>STAIR_RUN) continue;
+    const dz=z-stair.z;
+    if (dz<-HALF || dz>HALF) continue;
+    if (level===0?t<=STAIR_SEAM+.68:t>=STAIR_SEAM-.68) return {y:stairY(t),layer:level===1?2:0,stair};
+    return null;
+  }
+  return null;
+}
+
+export function stairFloorY(x,z) {
+  const level=zoneOf(x);
+  if (level>=2 || z<-15.25 || z>15.25 || (z>-10.5 && z<10.5)) return NaN;
+  const lx=localX(x);
+  if (lx<-46.3 || lx>46.3 || (lx>-30.8 && lx<30.8)) return NaN;
+  for (let i=0;i<4;i++) {
+    const stair=STAIRS[i];
+    const t=(lx-stair.x)*stair.dir;
+    if (t<0 || t>STAIR_RUN) continue;
+    const dz=z-stair.z;
+    if (dz<-HALF || dz>HALF) continue;
+    return (level===0?t<=STAIR_SEAM+.68:t>=STAIR_SEAM-.68)?stairY(t):NaN;
+  }
+  return NaN;
 }
 
 export function stairCrossing(x,z,nx,nz,y) {

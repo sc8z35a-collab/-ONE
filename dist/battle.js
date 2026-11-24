@@ -10,7 +10,7 @@ import {drawCabinDoors,drawCabinScenery,drawCabinWindows} from './metro-stage.js
 import {Tactics} from './tactics.js';
 import {NpcMotion,resetGait,limbJoint} from './npc-motion.js';
 import {NpcPerception} from './npc-perception.js';
-import {stairCrossing,stairEnd,stairLane,stairNeighborShift,stairRay} from './stairs.js';
+import {stairCrossing,stairEnd,stairFloorY,stairLane,stairNeighborShift,stairRay} from './stairs.js';
 import {actorInRay,collectShapes,traceShapes} from './collision.js';
 import {AUTO_AIM_LOCK,EBOT,INK_EPSILON,OM_HOMING,PAINT_RADIUS_FACTOR,SUPERS,WEAPONS,shotTravel,weaponById} from './weapons.js';
 import {SUBWEAPONS,Subweapons,subweaponById} from './subweapons.js';
@@ -135,31 +135,62 @@ class Navigation {
     const grid=this.grid=new Array(this.columns*this.rows);
     for (let z=0;z<this.rows;z++) for (let x=0;x<this.columns;x++) {
       const px=this.x0+x*spacing, pz=this.z0+z*spacing;
-      if (stairLane(px,pz) || !world.stand(px,pz,.58)) continue;
-      const node={x:px,z:pz,i:this.nodes.length,links:[]};
+      const sy=stairFloorY(px,pz);
+      if (sy===sy || !world.stand(px,pz,.58)) continue;
+      const f=world.floor(px,pz);
+      const node={x:px,z:pz,y:f.y,layer:f.layer,i:this.nodes.length,links:[],dists:[]};
       this.nodes.push(node);
       grid[z*this.columns+x]=node;
     }
+    const cols=this.columns, rows=this.rows;
+    const dirs=[[1,0],[-1,1],[0,1],[1,1]];
     for (let index=0;index<grid.length;index++) {
       const node=grid[index];
       if (!node) continue;
-      const column=index%this.columns,row=Math.floor(index/this.columns);
-      for (let dz=-1;dz<=1;dz++) for (let dx=-1;dx<=1;dx++) {
-        if ((!dx && !dz) || column+dx<0 || column+dx>=this.columns || row+dz<0 || row+dz>=this.rows) continue;
-        const next=grid[(row+dz)*this.columns+column+dx];
-        if (next && this.clear(node,next)) node.links.push(next);
+      const column=index%cols, row=(index/cols)|0;
+      for (let d=0;d<4;d++) {
+        const nx=column+dirs[d][0], nz=row+dirs[d][1];
+        if (nx<0 || nx>=cols || nz<0 || nz>=rows) continue;
+        const next=grid[nz*cols+nx];
+        if (next && this.clear(node,next)) {
+          const dist=Math.hypot(next.x-node.x,next.z-node.z);
+          node.links.push(next); node.dists.push(dist);
+          next.links.push(node); next.dists.push(dist);
+        }
       }
     }
+    const n=this.nodes.length;
+    this._g=new Float32Array(n);
+    this._f=new Float32Array(n);
+    this._parent=new Int32Array(n);
+    this._stamp=new Uint32Array(n);
+    this._heap=new Int32Array(n);
+    this._heapPos=new Int32Array(n);
+    this._wVal=new Float32Array(n);
+    this._wStamp=new Uint32Array(n);
+    this._wGen=0;
+    this._gen=0;
   }
 
   clear(a,b,radius=.61,height=1.68) {
-    const count=Math.ceil(distance(a,b)/.28);
-    let floor=this.world.floor(a.x,a.z).y;
-    const allowStairs=!!stairLane(a.x,a.z) || !!stairLane(b.x,b.z);
+    const ax=a.x, az=a.z, dx=b.x-ax, dz=b.z-az;
+    const count=Math.ceil(Math.hypot(dx,dz)/.28);
+    if (!count) return true;
+    const world=this.world;
+    let floor=world.floorY(ax,az);
+    const sa=stairFloorY(ax,az), sb=stairFloorY(b.x,b.z);
+    const allowStairs=(sa===sa) || (sb===sb);
+    const inv=1/count, sx=dx*inv, sz=dz*inv;
+    let x=ax, z=az;
     for (let step=1;step<=count;step++) {
-      const t=step/count;
-      const x=mix(a.x,b.x,t),z=mix(a.z,b.z,t),y=this.world.floor(x,z).y;
-      if (!allowStairs && stairLane(x,z) || Math.abs(y-floor)>.39 || this.world.blocked(x,y+.025,z,radius,height)) return false;
+      x+=sx; z+=sz;
+      if (!allowStairs) {
+        const sy=stairFloorY(x,z);
+        if (sy===sy) return false;
+      }
+      const y=world.floorY(x,z);
+      const dy=y-floor;
+      if (dy>.39 || dy<-.39 || world.blocked(x,y+.025,z,radius,height)) return false;
       floor=y;
     }
     return true;
@@ -167,15 +198,30 @@ class Navigation {
 
   nearest(point,radius=.43,height=1.68) {
     let best=null, bestDistance=Infinity;
-    const col=Math.round((point.x-this.x0)/this.spacing),row=Math.round((point.z-this.z0)/this.spacing);
-    for (let z=Math.max(0,row-3);z<=Math.min(this.rows-1,row+3);z++) {
-      for (let x=Math.max(0,col-3);x<=Math.min(this.columns-1,col+3);x++) {
-        const node=this.grid[z*this.columns+x];
-        if (!node) continue;
-        const d=(node.x-point.x)**2+(node.z-point.z)**2;
-        if (d<bestDistance && this.clear(point,node,radius,height)) {
-          best=node;
-          bestDistance=d;
+    const px=point.x, pz=point.z, cols=this.columns, rows=this.rows;
+    const col=Math.round((px-this.x0)/this.spacing), row=Math.round((pz-this.z0)/this.spacing);
+    const grid=this.grid;
+    for (let ring=0;ring<=3;ring++) {
+      if (ring===0) {
+        if (col>=0 && col<cols && row>=0 && row<rows) {
+          const node=grid[row*cols+col];
+          if (node) {
+            const dx=node.x-px, dz=node.z-pz, d=dx*dx+dz*dz;
+            if (d<bestDistance && this.clear(point,node,radius,height)) {best=node;bestDistance=d;}
+          }
+        }
+        continue;
+      }
+      const z0=row-ring, z1=row+ring, x0=col-ring, x1=col+ring, stepX=ring*2;
+      for (let z=z0;z<=z1;z++) {
+        if (z<0 || z>=rows) continue;
+        const rowOff=z*cols, step=(z===z0 || z===z1)?1:stepX;
+        for (let x=x0;x<=x1;x+=step) {
+          if (x<0 || x>=cols) continue;
+          const node=grid[rowOff+x];
+          if (!node) continue;
+          const dx=node.x-px, dz=node.z-pz, d=dx*dx+dz*dz;
+          if (d<bestDistance && this.clear(point,node,radius,height)) {best=node;bestDistance=d;}
         }
       }
     }
@@ -186,41 +232,80 @@ class Navigation {
     const start=this.nearest(from,Math.min(radius,.43),height), end=goal;
     if (!start || !end) return [];
     if (!weight && !openAt && this.clear(from,end,radius,height)) return [end];
-    const g=new Float32Array(this.nodes.length).fill(Infinity);
-    const f=new Float32Array(this.nodes.length).fill(Infinity);
-    const parent=new Int32Array(this.nodes.length).fill(-1);
-    const queued=new Uint8Array(this.nodes.length);
-    const open=[start];
-    g[start.i]=0;
-    f[start.i]=distance(start,end);
-    queued[start.i]=1;
-    while (open.length) {
-      let index=0;
-      for (let k=1;k<open.length;k++) if (f[open[k].i]<f[open[index].i]) index=k;
-      const here=open[index];
-      open[index]=open[open.length-1];
-      open.pop();
-      queued[here.i]=0;
-      if (here===end) {
+    const nodes=this.nodes, g=this._g, f=this._f, parent=this._parent;
+    const stamp=this._stamp, heap=this._heap, heapPos=this._heapPos;
+    let gen=++this._gen;
+    if (gen===0) {stamp.fill(0);gen=this._gen=1;}
+    const endX=end.x, endZ=end.z, si=start.i, ei=end.i;
+    stamp[si]=gen;
+    g[si]=0;
+    f[si]=Math.hypot(start.x-endX,start.z-endZ);
+    parent[si]=-1;
+    heap[0]=si;
+    heapPos[si]=0;
+    let heapSize=1;
+    const checkClear=radius>.61 || height>1.68;
+    const siftUp=pos=>{
+      const nodeIdx=heap[pos], fv=f[nodeIdx];
+      while (pos>0) {
+        const up=(pos-1)>>1, upNode=heap[up];
+        if (fv>=f[upNode]) break;
+        heap[pos]=upNode; heapPos[upNode]=pos;
+        pos=up;
+      }
+      heap[pos]=nodeIdx; heapPos[nodeIdx]=pos;
+    };
+    while (heapSize>0) {
+      const hi=heap[0];
+      heapPos[hi]=-1;
+      const last=heap[--heapSize];
+      if (heapSize>0) {
+        const fv=f[last];
+        let pos=0;
+        while (true) {
+          const l=(pos<<1)+1;
+          if (l>=heapSize) break;
+          const r=l+1;
+          let best=l, bf=f[heap[l]];
+          if (r<heapSize) {const rf=f[heap[r]];if (rf<bf) {best=r;bf=rf;}}
+          if (fv<=bf) break;
+          const bn=heap[best];
+          heap[pos]=bn; heapPos[bn]=pos;
+          pos=best;
+        }
+        heap[pos]=last; heapPos[last]=pos;
+      }
+      if (hi===ei) {
         const route=[];
-        for (let k=end.i;k!==start.i && k>=0;k=parent[k]) route.push(this.nodes[k]);
+        for (let k=ei;k!==si && k>=0;k=parent[k]) route.push(nodes[k]);
         route.push(start);
         route.reverse();
         while (route.length>1 && !weight && !openAt && this.clear(from,route[1],radius,height)) route.shift();
         return route;
       }
-      for (const next of here.links) {
+      const here=nodes[hi], links=here.links, dists=here.dists, gHere=g[hi];
+      for (let i=0;i<links.length;i++) {
+        const next=links[i];
         if (openAt && !openAt(next)) continue;
-        if ((radius>.61 || height>1.68) && !this.clear(here,next,radius,height)) continue;
-        const cost=g[here.i]+distance(here,next)*(weight?weight(next):1);
-        if (cost>=g[next.i]) continue;
-        g[next.i]=cost;
-        f[next.i]=cost+distance(next,end);
-        parent[next.i]=here.i;
-        if (!queued[next.i]) {
-          queued[next.i]=1;
-          open.push(next);
+        if (checkClear && !this.clear(here,next,radius,height)) continue;
+        const ni=next.i;
+        if (stamp[ni]!==gen) {
+          stamp[ni]=gen;
+          g[ni]=Infinity;
+          parent[ni]=-1;
+          heapPos[ni]=-1;
         }
+        const cost=gHere+dists[i]*(weight?weight(next):1);
+        if (cost>=g[ni]) continue;
+        g[ni]=cost;
+        f[ni]=cost+Math.hypot(next.x-endX,next.z-endZ);
+        parent[ni]=hi;
+        const pos=heapPos[ni];
+        if (pos<0) {
+          heap[heapSize]=ni;
+          heapPos[ni]=heapSize;
+          siftUp(heapSize++);
+        } else siftUp(pos);
       }
     }
     return [];
@@ -540,24 +625,28 @@ export class Battle {
     let best=precise?this.world.traceExact(start,end,clearance):this.world.trace(start,end);
     const object=this.stage.trace(start,end,clearance,best?.t);
     if (object && (!best || object.t<best.t)) best=object;
-    if (isCabin(start[0]) && sameLevel(start[0],end[0])) {
-      const rail=this.cabinTrain(start[0]);
-      if (!rail.cabinGlassAt || rail.cabinGlassAt!==rail.train || rail.cabinDoorAt!==rail.train.doorOpen || rail.cabinDoorSide!==rail.line.doorSide) {
-        rail.cabinDoorShapes=collectShapes(r=>{
-          drawCabinDoors(r,rail);
-          drawCabinWindows(r,rail);
-        });
-        rail.cabinGlassAt=rail.train;
-        rail.cabinDoorAt=rail.train.doorOpen;
-        rail.cabinDoorSide=rail.line.doorSide;
+    const zone=zoneOf(start[0]);
+    if (zone>=2) {
+      if (sameLevel(start[0],end[0])) {
+        const rail=this.cabinTrain(start[0]);
+        if (!rail.cabinGlassAt || rail.cabinGlassAt!==rail.train || rail.cabinDoorAt!==rail.train.doorOpen || rail.cabinDoorSide!==rail.line.doorSide) {
+          rail.cabinDoorShapes=collectShapes(r=>{
+            drawCabinDoors(r,rail);
+            drawCabinWindows(r,rail);
+          });
+          rail.cabinGlassAt=rail.train;
+          rail.cabinDoorAt=rail.train.doorOpen;
+          rail.cabinDoorSide=rail.line.doorSide;
+        }
+        const door=traceShapes(rail.cabinDoorShapes,start,end,clearance);
+        if (door && (!best || door.t<best.t)) best=door.shape.windowId?{...door,cabinWindow:rail}:door;
       }
-      const door=traceShapes(rail.cabinDoorShapes,start,end,clearance);
-      if (door && (!best || door.t<best.t)) best=door.shape.windowId?{...door,cabinWindow:rail}:door;
+      return best;
     }
-    for (const rail of [this.transit,this.metro]) {
-      const train=rail.trace(start,end,precise,clearance);
-      if (train && (!best || train.t<best.t)) best=train;
-    }
+    const train0=this.transit.trace(start,end,precise,clearance);
+    if (train0 && (!best || train0.t<best.t)) best=train0;
+    const train1=this.metro.trace(start,end,precise,clearance);
+    if (train1 && (!best || train1.t<best.t)) best=train1;
     return best;
   }
 
@@ -611,30 +700,47 @@ export class Battle {
       const contacts=actor.team>=0?this.tactics.intelligence(actor,zone).filter(c=>c.fresh>.52):[];
       const startInk=this.paint.get(actor.x,actor.z,this.world.floor(actor.x,actor.z).layer);
       const endInk=this.paint.get(target.x,target.z,this.world.floor(target.x,target.z).layer);
-      const middle={x:(actor.x+target.x)/2,z:(actor.z+target.z)/2};
-      const middleInk=this.paint.get(middle.x,middle.z,this.world.floor(middle.x,middle.z).layer);
-      const hostile=actor.team>=0 && [startInk,endInk,middleInk].some(ink=>ink===2-actor.team);
-      const weight=!clear && actor.team>=0 || hostile && distance(actor,target)>5?node=>{
-        const cache=weights.get(node.i);
-        if (cache!==undefined) return cache;
-        const floor=this.world.floor(node.x,node.z);
-        const ink=this.paint.get(node.x,node.z,floor.layer);
-        const risk=contacts.reduce((sum,c)=>sum+Math.max(0,1-distance(node,c)/7.7)*c.fresh,0);
-        const value=1+(ink===2-actor.team?.48:0)+Math.min(1.05,risk*(actor.hp<65?.91:.33));
-        weights.set(node.i,value);
-        return value;
-      }:null;
-      const weights=new Map(), blocked=new Map();
-      const openAt=stalled?node=>{
-        if (distance(actor,node)>8) return true;
-        if (blocked.has(node.i)) return !blocked.get(node.i);
-        const y=this.world.floor(node.x,node.z).y;
-        const probe={x:node.x,y:y+.028,z:node.z,radius,height};
-        const occupied=this.stage.blocked(probe.x,probe.y,probe.z,radius,height) ||
-          !this.stage.canEnter(actor,probe.x,probe.y,probe.z) || this.transit.blocksActor(probe) || this.metro.blocksActor(probe);
-        blocked.set(node.i,occupied);
-        return !occupied;
-      }:null;
+      const mx=(actor.x+target.x)*.5, mz=(actor.z+target.z)*.5;
+      const middleInk=this.paint.get(mx,mz,this.world.floor(mx,mz).layer);
+      const enemyInk=2-actor.team;
+      const hostile=actor.team>=0 && (startInk===enemyInk || endInk===enemyInk || middleInk===enemyInk);
+      const useWeight=!clear && actor.team>=0 || hostile && distance(actor,target)>5;
+      let weight=null;
+      if (useWeight) {
+        const wVal=nav._wVal, wStamp=nav._wStamp, cLen=contacts.length;
+        let wGen=++nav._wGen;
+        if (wGen===0) {wStamp.fill(0);wGen=nav._wGen=1;}
+        const riskScale=actor.hp<65?.91:.33, paint=this.paint;
+        weight=node=>{
+          const ni=node.i;
+          if (wStamp[ni]===wGen) return wVal[ni];
+          const ink=paint.get(node.x,node.z,node.layer);
+          let risk=0;
+          for (let ci=0;ci<cLen;ci++) {
+            const c=contacts[ci], d=Math.hypot(node.x-c.x,node.z-c.z);
+            if (d<7.7) risk+=(1-d/7.7)*c.fresh;
+          }
+          const rScaled=risk*riskScale;
+          const value=1+(ink===enemyInk?.48:0)+(rScaled<1.05?rScaled:1.05);
+          wStamp[ni]=wGen;
+          wVal[ni]=value;
+          return value;
+        };
+      }
+      let openAt=null;
+      if (stalled) {
+        const blocked=new Map(), probe={x:0,y:0,z:0,radius,height};
+        openAt=node=>{
+          if (distance(actor,node)>8) return true;
+          const cached=blocked.get(node.i);
+          if (cached!==undefined) return !cached;
+          probe.x=node.x; probe.y=node.y+.028; probe.z=node.z;
+          const occupied=this.stage.blocked(probe.x,probe.y,probe.z,radius,height) ||
+            !this.stage.canEnter(actor,probe.x,probe.y,probe.z) || this.transit.blocksActor(probe) || this.metro.blocksActor(probe);
+          blocked.set(node.i,occupied);
+          return !occupied;
+        };
+      }
       actor.travelPath=clear && !weight && !openAt?null:nav.route(actor,nav.nearest(target,radius,height),radius,height,weight,openAt);
     }
     const path=actor.travelPath;
@@ -682,14 +788,28 @@ export class Battle {
   }
 
   wallOwner(point,normal,shape=-1,grip=0) {
-    for (let i=this.decals.length-1;i>=0;i--) {
-      const mark=this.decals[i], neighbor=shape>=0 && mark.shape>=0 && mark.shape!==shape;
-      if (neighbor && !grip || dot(mark.normal,normal)<(grip?.95:.99) || !sameLevel(point[0],mark.p[0])) continue;
-      const delta=sub(point,mark.p);
-      if (Math.abs(dot(mark.normal,delta))>(grip?.16:.095) || Math.hypot(...delta)>mark.radius*1.83+grip) continue;
-      const axes=decalBasis(mark.normal,mark.phase);
-      const u=dot(delta,axes[0])/(mark.radius*1.66),v=dot(delta,axes[1])/(mark.radius*1.35);
-      if (Math.hypot(u,v)<=splatRadius(Math.atan2(v,u))+grip/(mark.radius*1.66)) return mark.team+1;
+    const px=point[0], py=point[1], pz=point[2];
+    const nx=normal[0], ny=normal[1], nz=normal[2];
+    const minDot=grip?.95:.99, maxPlane=grip?.16:.095;
+    const zone=zoneOf(px), decals=this.decals;
+    for (let i=decals.length-1;i>=0;i--) {
+      const mark=decals[i];
+      if (!grip && shape>=0 && mark.shape>=0 && mark.shape!==shape) continue;
+      const mn=mark.normal;
+      if (mn[0]*nx+mn[1]*ny+mn[2]*nz<minDot) continue;
+      const mp=mark.p;
+      if (zoneOf(mp[0])!==zone) continue;
+      const dx=px-mp[0], dy=py-mp[1], dz=pz-mp[2];
+      const maxR=mark.radius*1.83+grip;
+      if (dx*dx+dy*dy+dz*dz>maxR*maxR) continue;
+      const plane=mn[0]*dx+mn[1]*dy+mn[2]*dz;
+      if (plane>maxPlane || plane<-maxPlane) continue;
+      const axes=mark._axes ?? (mark._axes=decalBasis(mn,mark.phase));
+      const a0=axes[0], a1=axes[1];
+      const invU=1/(mark.radius*1.66);
+      const u=(dx*a0[0]+dy*a0[1]+dz*a0[2])*invU;
+      const v=(dx*a1[0]+dy*a1[1]+dz*a1[2])/(mark.radius*1.35);
+      if (Math.hypot(u,v)<=splatRadius(Math.atan2(v,u))+grip*invU) return mark.team+1;
     }
     return 0;
   }
@@ -757,28 +877,42 @@ export class Battle {
   }
 
   stepActor(actor,dx,dz,boarding=false) {
-    const before={x:actor.x,y:actor.y,z:actor.z};
+    const bx=actor.x, by=actor.y, bz=actor.z;
+    const motion=this.motion, stage=this.stage, isP=actor.isPlayer;
     this.world.step(actor,dx,dz,(x,y,z,radius,height)=>
-      !this.stage.blocked(x,y,z,radius,height) && this.stage.canEnter(actor,x,y,z) &&
-      (actor.isPlayer || this.motion.roomFor(actor,x,y,z,radius,height)));
-    if (boarding && actor.isPlayer && !actor.predicted &&
-        (this.transit.walkThrough(actor,before) || this.metro.walkThrough(actor,before))) return true;
-    const hull=actor.isPlayer?actor:{...actor,radius:(actor.radius??(actor.swimming?.33:.4))+.039};
-    if (this.transit.blocksActor(hull) || this.metro.blocksActor(hull)) {
-      actor.x=before.x;actor.z=before.z;actor.y=before.y;
-    } else if (!actor.predicted) this.stage.visit(actor,before);
+      !stage.blocked(x,y,z,radius,height) && stage.canEnter(actor,x,y,z) &&
+      (isP || motion.roomFor(actor,x,y,z,radius,height)));
+    if (boarding && isP && !actor.predicted) {
+      const before={x:bx,y:by,z:bz};
+      if (this.transit.walkThrough(actor,before) || this.metro.walkThrough(actor,before)) return true;
+    }
+    const rOver=isP?undefined:(actor.radius??(actor.swimming?.33:.4))+.039;
+    if (this.transit.blocksActor(actor,rOver) || this.metro.blocksActor(actor,rOver)) {
+      actor.x=bx;actor.z=bz;actor.y=by;
+    } else if (!actor.predicted && zoneOf(actor.x)===0) {
+      this.stage.visit(actor,{x:bx,y:by,z:bz});
+    }
     return false;
   }
 
   bodyBlocked(actor,radius,height) {
     return this.world.blocked(actor.x,actor.y+.018,actor.z,radius,height) ||
       this.stage.blocked(actor.x,actor.y+.018,actor.z,radius,height) ||
-      [this.transit,this.metro].some(rail=>rail.blocksActor({...actor,radius,height}));
+      this.transit.blocksActor(actor,radius,height) ||
+      this.metro.blocksActor(actor,radius,height);
   }
 
   trainContact(actor,fromY,toY) {
+    const zone=zoneOf(actor.x);
+    if (zone>=2) return null;
+    const hiY=fromY>toY?fromY:toY, loY=fromY<toY?fromY:toY;
+    const ly0=this.transit.line.y, ly1=this.metro.line.y;
+    const check0=zone===this.transit.section && hiY>=ly0-.05 && loY<=ly0+5.3;
+    const check1=zone===this.metro.section && hiY>=ly1-.05 && loY<=ly1+5.3;
+    if (!check0 && !check1) return null;
     const start=[actor.x,fromY,actor.z], end=[actor.x,toY,actor.z];
-    const first=this.transit.trace(start,end), second=this.metro.trace(start,end);
+    const first=check0?this.transit.trace(start,end):null;
+    const second=check1?this.metro.trace(start,end):null;
     return first && (!second || first.t<second.t)?first:second;
   }
 
@@ -1343,6 +1477,9 @@ export class Battle {
   updateShots(dt) {
     this.drainWalls(dt);
     while (this.inkImpacts.length && this.clock-this.inkImpacts[0].at>=INK_HIT_DURATION) this.inkImpacts.shift();
+    const toBuf=this._shotTo ?? (this._shotTo=[0,0,0]);
+    const endBuf=this._shotEnd ?? (this._shotEnd=[0,0,0]);
+    const halfDt2=.5*dt*dt, gDrop=9.81*dt;
     for (let i=this.shots.length-1;i>=0;i--) {
       const shot=this.shots[i];
       if (shot.life!==undefined && shot.age>=shot.life) {
@@ -1351,41 +1488,61 @@ export class Battle {
         continue;
       }
       if (shot.homing) this.guideShot(shot,dt);
+      const pos=shot.pos, vel=shot.vel;
       if (shot.bend) {
         const turn=Math.sin(shot.age*7.1)*dt;
-        shot.vel[0]+=shot.bend[0]*turn;
-        shot.vel[2]+=shot.bend[2]*turn;
+        vel[0]+=shot.bend[0]*turn;
+        vel[2]+=shot.bend[2]*turn;
       }
-      const to=add(shot.pos,scale(shot.vel,dt));
-      to[1]-=.5*shot.weapon.gravity*dt*dt;
-      const fraction=shotFraction(shot.pos,to);
-      const end=fraction<1?add(shot.pos,scale(sub(to,shot.pos),fraction)):to;
-      if (fraction>0 && this.impactShot(shot,shot.pos,end) || fraction<1 || to[1]<ZONES[zoneOf(shot.pos[0])].y-18) {
+      const g=shot.weapon.gravity;
+      toBuf[0]=pos[0]+vel[0]*dt;
+      toBuf[1]=pos[1]+vel[1]*dt-g*halfDt2;
+      toBuf[2]=pos[2]+vel[2]*dt;
+      const fraction=shotFraction(pos,toBuf);
+      let end=toBuf;
+      if (fraction<1) {
+        endBuf[0]=pos[0]+(toBuf[0]-pos[0])*fraction;
+        endBuf[1]=pos[1]+(toBuf[1]-pos[1])*fraction;
+        endBuf[2]=pos[2]+(toBuf[2]-pos[2])*fraction;
+        end=endBuf;
+      }
+      if (fraction>0 && this.impactShot(shot,pos,end) || fraction<1 || toBuf[1]<ZONES[zoneOf(pos[0])].y-18) {
         this.shots.splice(i,1);
         continue;
       }
-      shot.vel[1]-=shot.weapon.gravity*dt;
-      shot.pos=stairEnd(shot.pos,to);
+      vel[1]-=g*dt;
+      const seam=stairRay(pos,toBuf);
+      pos[0]=seam?toBuf[0]+seam.shift:toBuf[0];
+      pos[1]=toBuf[1];
+      pos[2]=toBuf[2];
       shot.age+=dt;
     }
+    const world=this.world;
     for (let i=this.drops.length-1;i>=0;i--) {
       const drop=this.drops[i];
-      const from=drop.p, to=add(from,scale(drop.v,dt)), wet=(drop.wet || drop.volume) && drop.team>=0;
-      const hit=wet && this.traceShot(from,to,true);
+      const from=drop.p, v=drop.v, fy=from[1];
+      toBuf[0]=from[0]+v[0]*dt;
+      toBuf[1]=fy+v[1]*dt;
+      toBuf[2]=from[2]+v[2]*dt;
+      const wet=(drop.wet || drop.volume) && drop.team>=0;
+      const hit=wet && this.traceShot(from,toBuf,true);
       if (hit) {
         this.landDrop(drop,hit);
         this.drops.splice(i,1);
         continue;
       }
-      drop.p=stairEnd(from,to);
-      drop.v[1]-=9.81*dt;
+      const seam=stairRay(from,toBuf);
+      const dx=seam?toBuf[0]+seam.shift:toBuf[0], dy=toBuf[1], dz=toBuf[2];
+      from[0]=dx; from[1]=dy; from[2]=dz;
+      v[1]-=gDrop;
       drop.life-=dt;
-      const [dx,dy,dz]=drop.p;
       const zone=zoneOf(dx), line=zone===0?RAIL:zone===1?METRO:null;
-      const landsOnRail=line && from[1]>=line.y && dy<=line.y && Math.abs(dx-line.center)<line.edge && Math.abs(dz-line.z)<line.halfWidth;
-      const floor=landsOnRail?{y:line.y,layer:line.layer}:this.world.floor(dx,dz);
-      if (drop.p[1]<=floor.y) {
-        if (wet) this.landDrop(drop,{position:drop.p,layer:floor.layer});
+      const landsOnRail=line && fy>=line.y && dy<=line.y && Math.abs(dx-line.center)<line.edge && Math.abs(dz-line.z)<line.halfWidth;
+      if (landsOnRail) {
+        if (wet) this.landDrop(drop,{position:from,layer:line.layer});
+        this.drops.splice(i,1);
+      } else if (dy<=world.floorY(dx,dz)) {
+        if (wet) this.landDrop(drop,{position:from,layer:world.floor(dx,dz).layer});
         this.drops.splice(i,1);
       } else if (drop.life<=0) this.drops.splice(i,1);
     }
@@ -1511,59 +1668,91 @@ export class Battle {
         chip.z-Math.sin(chip.yaw)*side*.122,.063,.011,.153,0xa29670,4,opts);
     }
     // The lightweight modes draw nothing beyond their fogged draw distance.
-    const reach=renderer.reach??Infinity, within=(x,z,limit)=>limit===Infinity || Math.hypot(x-viewX,z-viewZ)<limit;
-    for (const actor of this.actors) {
-      if (actor!==hideCrew && actor.down<=0 && !actor.ride && sameLevel(actor.x,viewX) && within(actor.x,actor.z,reach+6)) {
-        drawCrew(renderer,actor,visualClock);
-      }
+    const reach=renderer.reach??Infinity, reach2=reach===Infinity?Infinity:reach*reach;
+    const actors=this.actors, actorLim=reach===Infinity?Infinity:(reach+6)*(reach+6);
+    for (let i=0;i<actors.length;i++) {
+      const actor=actors[i];
+      if (actor===hideCrew || actor.down>0 || actor.ride || !sameLevel(actor.x,viewX)) continue;
+      if (actorLim!==Infinity) {const dx=actor.x-viewX, dz=actor.z-viewZ; if (dx*dx+dz*dz>=actorLim) continue;}
+      drawCrew(renderer,actor,visualClock);
     }
     this.abilities.draw(renderer,viewX);
     this.subweapons.draw(renderer,viewX);
     this.boss.draw(renderer,viewX);
     this.raiders.draw(renderer,viewX);
-    for (const shot of this.shots) {
-      if (!sameLevel(shot.pos[0],viewX) || !within(shot.pos[0],shot.pos[2],reach)) continue;
-      const y=unit(shot.vel), x=unit(cross(y,[0,1,0])), z=cross(x,y);
-      const position=add(shot.pos,scale(y,-.11));
-      const size=shot.weapon.size, ink=TEAM_INK[shot.actor.team] ?? RAIDER_INK;
-      renderer.add('orb',...position,size,size*(shot.weapon.id==='lob'?1.42:2.84),size,ink,9,{dynamic:true,basis:[x,y,z]});
+    const shots=this.shots;
+    for (let i=0;i<shots.length;i++) {
+      const shot=shots[i], sp=shot.pos;
+      if (!sameLevel(sp[0],viewX)) continue;
+      if (reach2!==Infinity) {const dx=sp[0]-viewX, dz=sp[2]-viewZ; if (dx*dx+dz*dz>=reach2) continue;}
+      const sv=shot.vel, speed=Math.hypot(sv[0],sv[1],sv[2]), invS=1/Math.max(.00001,speed);
+      const yx=sv[0]*invS, yy=sv[1]*invS, yz=sv[2]*invS;
+      const xInv=1/Math.max(.00001,Math.hypot(yz,yx));
+      const xx=-yz*xInv, xz=yx*xInv;
+      _sbX[0]=xx; _sbX[1]=0; _sbX[2]=xz;
+      _sbY[0]=yx; _sbY[1]=yy; _sbY[2]=yz;
+      _sbZ[0]=-xz*yy; _sbZ[1]=xz*yx-xx*yz; _sbZ[2]=xx*yy;
+      _dynBasis.basis=_shotBasis;
+      const px=sp[0]-yx*.11, py=sp[1]-yy*.11, pz=sp[2]-yz*.11;
+      const size=shot.weapon.size, ink=TEAM_INK[shot.actor.team] ?? RAIDER_INK, isLob=shot.weapon.id==='lob';
+      renderer.add('orb',px,py,pz,size,size*(isLob?1.42:2.84),size,ink,9,_dynBasis);
       if (renderer.fidelity) {
         // A liquid streak that stretches with speed behind the leading drop.
-        const speed=Math.hypot(...shot.vel), tail=clamp(speed*.022,.22,.95)*(shot.weapon.id==='lob'?.55:1);
-        renderer.add('limb',...add(position,scale(y,-tail*.5)),size*.78,tail,size*.78,ink,9,{dynamic:true,basis:[x,y,z]});
-        renderer.add('orb',...add(position,scale(y,size*.35)),size*.42,size*.9,size*.42,0xf6fffc,3,{dynamic:true,basis:[x,y,z]});
+        const tail=clamp(speed*.022,.22,.95)*(isLob?.55:1), ht=-tail*.5, h35=size*.35;
+        renderer.add('limb',px+yx*ht,py+yy*ht,pz+yz*ht,size*.78,tail,size*.78,ink,9,_dynBasis);
+        renderer.add('orb',px+yx*h35,py+yy*h35,pz+yz*h35,size*.42,size*.9,size*.42,0xf6fffc,3,_dynBasis);
       } else if (!renderer.lite) {
-        const trail=add(position,scale(y,-.28));
-        renderer.add('orb',...trail,size*.48,size*1.22,size*.48,ink,9,{dynamic:true,basis:[x,y,z]});
+        renderer.add('orb',px-yx*.28,py-yy*.28,pz-yz*.28,size*.48,size*1.22,size*.48,ink,9,_dynBasis);
       }
     }
-    for (let i=0;i<this.drops.length;i+=renderer.ultra?3:renderer.lite?2:1) {
-      const d=this.drops[i];
-      if (!sameLevel(d.p[0],viewX) || !within(d.p[0],d.p[2],reach*.7)) continue;
+    const dropStep=renderer.ultra?3:renderer.lite?2:1, dropLim=reach===Infinity?Infinity:(reach*.7)*(reach*.7);
+    const drops=this.drops;
+    for (let i=0;i<drops.length;i+=dropStep) {
+      const d=drops[i], dp=d.p;
+      if (!sameLevel(dp[0],viewX)) continue;
+      if (dropLim!==Infinity) {const dx=dp[0]-viewX, dz=dp[2]-viewZ; if (dx*dx+dz*dz>=dropLim) continue;}
       const size=d.size*(.46+.54*d.life/d.max);
-      renderer.add('orb',...d.p,size,size*1.42,size,TEAM_INK[d.team] ?? 0xb573c7,9,{dynamic:true});
+      renderer.add('orb',dp[0],dp[1],dp[2],size,size*1.42,size,TEAM_INK[d.team] ?? 0xb573c7,9,_dyn);
     }
-    for (const hit of this.inkImpacts) {
-      if (sameLevel(hit.p[0],viewX)) drawInkImpact(renderer,hit,[viewX,viewY,viewZ],this.clock+(this.impactAgeOffset??0));
+    const impacts=this.inkImpacts;
+    if (impacts.length) {
+      const eye=[viewX,viewY,viewZ];
+      for (let i=0;i<impacts.length;i++) {
+        const hit=impacts[i];
+        if (sameLevel(hit.p[0],viewX)) drawInkImpact(renderer,hit,eye,visualClock);
+      }
     }
-    const markReach=Math.min(140,reach*.8);
-    for (const decal of this.decals) {
-      if (!sameLevel(decal.p[0],viewX) || Math.hypot(decal.p[0]-viewX,decal.p[2]-viewZ)>markReach) continue;
+    const markReach=Math.min(140,reach*.8), markReach2=markReach*markReach, decals=this.decals;
+    for (let i=0;i<decals.length;i++) {
+      const decal=decals[i], dp=decal.p;
+      if (!sameLevel(dp[0],viewX)) continue;
+      const dx=dp[0]-viewX, dz=dp[2]-viewZ;
+      if (dx*dx+dz*dz>markReach2) continue;
       const tint=TEAM_INK[decal.team];
-      const shape=decalShape(this.world.geometry,decal);
+      const shape=decalShape(this.world.geometry,decal), org=shape.origin;
       if (shape.fan) {
-        for (const basis of shape.fan) renderer.add('tri',...shape.origin,1,1,1,tint,26,{dynamic:true,basis});
-      } else renderer.add('splat',...shape.origin,decal.radius*1.66,decal.radius*1.35,1,tint,26,{dynamic:true,basis:shape.axes});
+        const fan=shape.fan;
+        for (let j=0;j<fan.length;j++) {_dynBasis.basis=fan[j];renderer.add('tri',org[0],org[1],org[2],1,1,1,tint,26,_dynBasis);}
+      } else {_dynBasis.basis=shape.axes;renderer.add('splat',org[0],org[1],org[2],decal.radius*1.66,decal.radius*1.35,1,tint,26,_dynBasis);}
     }
   }
 }
+
+const _dyn={dynamic:true};
+const _dynYaw={dynamic:true,yaw:0};
+const _dynYP={dynamic:true,yaw:0,pitch:0};
+const _dynLabel={dynamic:true,label:0};
+const _dynBasis={dynamic:true,basis:null};
+const _dynBeam={dynamic:true,shape:'limb'};
+const _sbX=[0,0,0], _sbY=[0,0,0], _sbZ=[0,0,0], _shotBasis=[_sbX,_sbY,_sbZ];
 
 function crewPose(a,time,yaw=Math.PI-a.yaw) {
   const vx=a.vx??0,vz=a.vz??0,vy=a.vy??0,phase=a.steps??0;
   const speed=Math.hypot(vx,vz),pace=clamp(speed/5.9,0,1);
   const cy=Math.cos(yaw),sy=Math.sin(yaw);
   const loc=(x,y,z)=>[a.x+x*cy+z*sy,a.y+y,a.z-x*sy+z*cy];
-  const fore=(vx*sy+vz*cy)/Math.max(1,speed),lateral=(vx*cy-vz*sy)/Math.max(1,speed);
+  const invSpd=1/(speed>1?speed:1);
+  const fore=(vx*sy+vz*cy)*invSpd,lateral=(vx*cy-vz*sy)*invSpd;
   const airborne=a.airborne ?? Math.abs(vy)>.48,rising=airborne && vy>0;
   const crouch=a.landing??0,swing=Math.sin(phase),transfer=Math.cos(phase);
   const brace=a.brace??0, peek=a.peek??0, ready=a.readyPose??0, hit=a.flare??0;
@@ -1585,7 +1774,7 @@ function gunPose(a,pose,weapon=a.weapon??WEAPONS[0]) {
     return pose.loc(x+pose.sway*.87,1.25+pose.rise*.87+dy*c-dz*s,.437+pose.lean*.87+dy*s+dz*c);
   };
   const barrel=weapon.id==='charge'?.56:weapon.id==='lob'?.34:weapon.id==='rd2'?.44:weapon.id==='td'?.30:.315;
-  return {at,pitch,barrel};
+  return {at,pitch,barrel,c,s,recoil,pose};
 }
 
 export function drawCrew(r,a,time,showEffects=true) {
@@ -1603,29 +1792,35 @@ export function drawCrew(r,a,time,showEffects=true) {
     return;
   }
   if (r.fidelity && showEffects && range<60 && !a.climbing && !(a.airborne ?? Math.abs(a.vy??0)>.48)) {
-    r.add('shade',a.x,a.y+.016,a.z,a.swimming?1.05:1.25,1,a.swimming?1.35:1.25,0,28,{dynamic:true,label:.62});
+    _dynLabel.label=.62;
+    r.add('shade',a.x,a.y+.016,a.z,a.swimming?1.05:1.25,1,a.swimming?1.35:1.25,0,28,_dynLabel);
   }
   if (showEffects && a.guard>0) {
     const pulse=.15*Math.sin(time*8);
-    r.add('ripple',a.x,a.y+.06,a.z,2.14+pulse,.03,2.14+pulse,0xd3fff2,12,{dynamic:true,label:.08});
-    r.add('ripple',a.x,a.y+1.03,a.z,2.02,.03,2.02,0x86ded0,12,{dynamic:true,label:.24});
+    _dynLabel.label=.08;
+    r.add('ripple',a.x,a.y+.06,a.z,2.14+pulse,.03,2.14+pulse,0xd3fff2,12,_dynLabel);
+    _dynLabel.label=.24;
+    r.add('ripple',a.x,a.y+1.03,a.z,2.02,.03,2.02,0x86ded0,12,_dynLabel);
     for (let i=0;i<4;i++) {
-      const angle=i*TAU/4, direction=forward(angle);
-      r.add('curtain',a.x+direction[0]*.69,a.y+.99,a.z+direction[2]*.69,1.31,1.84,1,bright,16,
+      const angle=i*TAU/4;
+      r.add('curtain',a.x+Math.sin(angle)*.69,a.y+.99,a.z-Math.cos(angle)*.69,1.31,1.84,1,bright,16,
         {dynamic:true,yaw:-angle,label:1-a.guard/95});
     }
   }
   const pose=crewPose(a,time,yaw);
   const {cy,sy,loc,phase,pace,fore,lateral,airborne,rising,crouch,swing,transfer,rise,sway,lean}=pose;
+  const ax=a.x, ay=a.y, az=a.z;
   if (a.swimming) {
     const pull=time*(a.climbing?11:a.inkSwimming?14:8)+phase*.82+a.index*.8;
     const stretch=1+pace*(a.inkSwimming?.26:.08);
     const tilt=a.climbing?-Math.PI/2:Math.cos(pull)*pace*.10;
     const cp=Math.cos(tilt),sp=Math.sin(tilt);
     const centerY=a.climbing?.54:.11, centerZ=a.climbing?.17:0;
+    _dynYP.yaw=yaw;
     const squid=(type,x,y,z,w,h,d,color,material,pitch=0)=>{
-      const p=loc(x,centerY+(y-.11)*cp-z*sp,centerZ+(y-.11)*sp+z*cp);
-      r.add(type,...p,w,h,d,color,material,{dynamic:true,yaw,pitch:pitch+tilt});
+      const ly=centerY+(y-.11)*cp-z*sp, lz=centerZ+(y-.11)*sp+z*cp;
+      _dynYP.pitch=pitch+tilt;
+      r.add(type,ax+x*cy+lz*sy,ay+ly,az-x*sy+lz*cy,w,h,d,color,material,_dynYP);
     };
     squid('orb',0,.104,-.067,.69,.178,.94*stretch,bright,9);
     squid(soft,0,.139,-.116,.64,.173,.68*stretch,tint,9,-.10);
@@ -1649,16 +1844,21 @@ export function drawCrew(r,a,time,showEffects=true) {
   // (kept apart from the scene's 18, train seat fabric, for the textures).
   const material=(mat,c)=>mat===2?(c===BOOT?21:c===GRAPHITE?31:30):mat===4 && (c===tint || c===bright)?20:mat;
   const part=(type,x,y,z,w,h,d,c,mat=2,pitch=0)=>{
-    const upper=clamp((y-.66)*1.06,0,1);
-    r.add(type,...loc(x+sway*upper,y+rise*upper,z+lean*upper),w,h,d,c,material(mat,c),
-      {dynamic:true,yaw,pitch:pitch-lean*upper*.48});
+    let upper=(y-.66)*1.06;
+    if (upper<0) upper=0; else if (upper>1) upper=1;
+    const lx=x+sway*upper, ly=y+rise*upper, lz=z+lean*upper;
+    _dynYP.yaw=yaw;
+    _dynYP.pitch=pitch-lean*upper*.48;
+    r.add(type,ax+lx*cy+lz*sy,ay+ly,az-lx*sy+lz*cy,w,h,d,c,material(mat,c),_dynYP);
   };
   const weapon=a.weapon ?? WEAPONS[0];
   const aimYaw=Math.PI-a.yaw;
-  const gun=weapon.roller?null:gunPose(a,crewPose(a,time,aimYaw));
+  const gun=weapon.roller?null:gunPose(a,aimYaw===yaw?pose:crewPose(a,time,aimYaw));
   const torso=(x,y,z)=>{
-    const upper=clamp((y-.66)*1.06,0,1);
-    return loc(x+sway*upper,y+rise*upper,z+lean*upper);
+    let upper=(y-.66)*1.06;
+    if (upper<0) upper=0; else if (upper>1) upper=1;
+    const lx=x+sway*upper, ly=y+rise*upper, lz=z+lean*upper;
+    return [ax+lx*cy+lz*sy,ay+ly,az-lx*sy+lz*cy];
   };
   // A fresh hit flashes the whole suit; an ebot copy wears a paler shell.
   const struck=a.damageAge<.15, copy=!!(a.clone || a.cloneOf);
@@ -1666,16 +1866,18 @@ export function drawCrew(r,a,time,showEffects=true) {
   const armor=struck?0xff8f70:copy?0x6d8792:0x263943;
   if (showEffects && copy) {
     const spin=time*2.4+(a.index??0);
-    r.add('ring',a.x,a.y+2.32+Math.sin(spin)*.03,a.z,.5,.05,.5,bright,3,{dynamic:true,yaw:spin});
+    _dynYaw.yaw=spin;
+    r.add('ring',ax,ay+2.32+Math.sin(spin)*.03,az,.5,.05,.5,bright,3,_dynYaw);
   }
   if (showEffects && (a.activeSpecial==='om' || a.activeSpecial==='om2') && a.superUntil>time) {
     // OM Bomb: seeker lights orbit the crew member while its rounds track.
     const count=a.activeSpecial==='om2'?4:2;
     for (let i=0;i<count;i++) {
       const angle=time*5.2+i*TAU/count, lift=1.15+.35*Math.sin(time*3.1+i*1.7);
-      r.add('orb',a.x+Math.cos(angle)*.72,a.y+lift,a.z+Math.sin(angle)*.72,.13,.13,.13,i%2?0xfff4ce:bright,3,{dynamic:true});
+      r.add('orb',ax+Math.cos(angle)*.72,ay+lift,az+Math.sin(angle)*.72,.13,.13,.13,i%2?0xfff4ce:bright,3,_dyn);
     }
-    r.add('ripple',a.x,a.y+.05,a.z,1.7+.2*Math.sin(time*9),.03,1.7+.2*Math.sin(time*9),0xfff4ce,12,{dynamic:true,label:.35});
+    _dynLabel.label=.35;
+    r.add('ripple',ax,ay+.05,az,1.7+.2*Math.sin(time*9),.03,1.7+.2*Math.sin(time*9),0xfff4ce,12,_dynLabel);
   }
   // On screen the crew is a plain figure (helmet, suit, tank, limbs, gun) that
   // the suit textures dress; hit detection keeps the detailed shapes below.
@@ -1899,6 +2101,7 @@ export function drawCrew(r,a,time,showEffects=true) {
 // The crew as drawn on screen: about twenty plain parts instead of a hundred.
 function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor,hit,tint,bright,yaw,aimYaw,showEffects}) {
   const {cy,sy,loc,pace,fore,lateral,airborne,rising,crouch,swing,transfer,rise,sway,lean}=pose;
+  const ax=a.x, ay=a.y, az=a.z;
   const visor=a.team===0?0x4c8c99:0x825650;
   part(soft,0,1.07,0,.64,.72,.44,tint,20,.10);
   part(soft,0,.80,.02,.57,.17,.41,GRAPHITE,21);
@@ -1909,55 +2112,71 @@ function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor
   const fill=tankHeight*.70*clamp(a.tank/capacity,0,1);
   part('bevel',0,1.13,-.40,.46,tankHeight,.29,0x5d6f73,4);
   if (fill>.003) part('box',0,1.13+(fill-tankHeight*.70)*.5,-.553,.32,fill,.03,bright,3);
-  for (const sign of [-1,1]) {
+  _dynBeam.shape=limbShape;
+  const planted=!!(a.feet && !airborne && !a.isPlayer);
+  for (let sIdx=0;sIdx<2;sIdx++) {
+    const sign=sIdx===0?-1:1;
     const step=swing*sign*pace;
     const forwardStep=airborne?sign*(rising?.20:.12):fore*step*.39;
     const sideStep=airborne?sign*.055:lateral*step*.31;
     const lift=airborne?(rising?.27:.12)+sign*.045:Math.max(0,transfer*sign)*pace*.17;
-    const planted=a.feet && !airborne && !a.isPlayer, base=sign<0?0:4;
+    const base=sIdx===0?0:4;
     const hip=loc(sign*.175+sway*.24,.753+rise*(planted?.61:.43),lean*.25);
-    let ankle, foot, bootYaw=yaw, bootPitch=0;
+    let ankle, fxFoot, fyFoot, fzFoot, bootYaw=yaw, bootPitch=0;
     if (planted) {
       bootYaw=Math.PI-a.feet[base+3];
       const fx=Math.sin(bootYaw), fz=Math.cos(bootYaw);
-      foot=[a.feet[base],a.feet[base+1]+.06,a.feet[base+2]];
-      ankle=[foot[0]-fx*.064,foot[1]+.111,foot[2]-fz*.064];
+      fxFoot=a.feet[base]; fyFoot=a.feet[base+1]+.06; fzFoot=a.feet[base+2];
+      ankle=[fxFoot-fx*.064,fyFoot+.111,fzFoot-fz*.064];
     } else {
-      const local=[sign*.185+sideStep,.112+lift,.10+forwardStep];
-      foot=loc(...local);
-      ankle=loc(local[0],local[1]+.112,local[2]-.065);
+      const lx=sign*.185+sideStep, ly=.112+lift, lz=.10+forwardStep;
+      fxFoot=ax+lx*cy+lz*sy; fyFoot=ay+ly; fzFoot=az-lx*sy+lz*cy;
+      const lzA=lz-.065;
+      ankle=[ax+lx*cy+lzA*sy,ay+ly+.112,az-lx*sy+lzA*cy];
       bootPitch=airborne?(rising?-.32:.16):transfer*sign*pace*.14;
     }
     const knee=limbJoint(hip,ankle,.383,.370,[Math.sin(bootYaw),.09,Math.cos(bootYaw)]);
-    r.beam(hip,knee,.26,.27,GRAPHITE,31,{dynamic:true,shape:limbShape});
-    r.beam(knee,ankle,.22,.23,hit,30,{dynamic:true,shape:limbShape});
-    r.add(soft,...foot,.30,.19,.47,BOOT,21,{dynamic:true,yaw:bootYaw,pitch:bootPitch});
+    r.beam(hip,knee,.26,.27,GRAPHITE,31,_dynBeam);
+    r.beam(knee,ankle,.22,.23,hit,30,_dynBeam);
+    _dynYP.yaw=bootYaw; _dynYP.pitch=bootPitch;
+    r.add(soft,fxFoot,fyFoot,fzFoot,.30,.19,.47,BOOT,21,_dynYP);
     const armSwing=sign>0?-step*.14:0, armLift=airborne?.07:armSwing*.28-crouch*.035;
     const shoulder=torso(sign*.331,1.241,.023);
     part(soft,sign*.34,1.245,.02,.28,.26,.31,tint,20);
-    const hand=weapon.roller?loc(sign*.25,1.13,.40):gun.at(...(sign<0?[-.416,1.22,.44]:[-.285,1.18,.66]));
+    const hand=weapon.roller?loc(sign*.25,1.13,.40):sign<0?gun.at(-.416,1.22,.44):gun.at(-.285,1.18,.66);
     const elbow=planted || a.brace>0?limbJoint(shoulder,hand,.371,.415,[sign*cy,-.58,-sign*sy]):
       loc(sign*.386,1.06+armLift,.22+armSwing);
-    r.beam(shoulder,elbow,.19,.21,tint,30,{dynamic:true,shape:limbShape});
-    r.beam(elbow,hand,.165,.18,hit,30,{dynamic:true,shape:limbShape});
-    r.add('orb',...hand,.20,.19,.22,BOOT,21,{dynamic:true,yaw});
+    r.beam(shoulder,elbow,.19,.21,tint,30,_dynBeam);
+    r.beam(elbow,hand,.165,.18,hit,30,_dynBeam);
+    _dynYaw.yaw=yaw;
+    r.add('orb',hand[0],hand[1],hand[2],.20,.19,.22,BOOT,21,_dynYaw);
   }
   if (weapon.roller) {
     const {y:headY,z:headZ}=rollerPosition(a);
-    const axis=[cy,0,-sy], up=[0,1,0];
-    r.add('cylinder',...loc(0,headY,headZ),.62,1.76,.62,bright,9,{dynamic:true,basis:[up,axis,cross(up,axis)]});
-    r.beam(loc(0,headY+.2,headZ-.1),loc(0,1.13,.40),.075,.075,GRAPHITE,4,{dynamic:true});
+    _sbX[0]=0; _sbX[1]=1; _sbX[2]=0;
+    _sbY[0]=cy; _sbY[1]=0; _sbY[2]=-sy;
+    _sbZ[0]=-sy; _sbZ[1]=0; _sbZ[2]=-cy;
+    _dynBasis.basis=_shotBasis;
+    r.add('cylinder',ax+headZ*sy,ay+headY,az+headZ*cy,.62,1.76,.62,bright,9,_dynBasis);
+    r.beam(loc(0,headY+.2,headZ-.1),loc(0,1.13,.40),.075,.075,GRAPHITE,4,_dyn);
     return;
   }
-  const big=['lob','rd2','td'].includes(weapon.id), barrel=gun.barrel, width=big?.34:weapon.id==='fan'?.30:.235;
-  const gunPart=(type,x,y,z,w,h,d,color,mat=4,pitch=0)=>r.add(type,...gun.at(x,y,z),w,h,d,color,mat,
-    {dynamic:true,yaw:aimYaw,pitch:pitch+gun.pitch});
-  gunPart('bevel',-.415,1.30,.474,weapon.id==='dual'?.35:width,big?.29:.222,.565,GRAPHITE);
+  const wid=weapon.id, big=wid==='lob' || wid==='rd2' || wid==='td', barrel=gun.barrel, width=big?.34:wid==='fan'?.30:.235;
+  const gp=gun.pose, gcy=gp.cy, gsy=gp.sy, gc=gun.c, gs=gun.s, grec=gun.recoil;
+  const gsway=gp.sway*.87, grise=1.25+gp.rise*.87, glean=.437+gp.lean*.87;
+  _dynYP.yaw=aimYaw;
+  const gunPart=(type,x,y,z,w,h,d,color,mat=4,pitch=0)=>{
+    const dy=y-1.25, dz=z-.437-grec;
+    const lx=x+gsway, ly=grise+dy*gc-dz*gs, lz=glean+dy*gs+dz*gc;
+    _dynYP.pitch=pitch+gun.pitch;
+    r.add(type,ax+lx*gcy+lz*gsy,ay+ly,az-lx*gsy+lz*gcy,w,h,d,color,mat,_dynYP);
+  };
+  gunPart('bevel',-.415,1.30,.474,wid==='dual'?.35:width,big?.29:.222,.565,GRAPHITE);
   gunPart('box',-.415,1.343,.49,width+.02,.12,.41,tint,20);
   gunPart('cylinder',-.415,1.30,.69+barrel*.30,big?.25:.14,barrel,big?.25:.14,TRIM,4,Math.PI/2);
   gunPart('box',-.415,1.205,.359,.125,.207,.17,BOOT,21,-.20);
   if (showEffects && (a.recoil>.65 && !a.muzzleBlocked || a.charge>.12)) {
-    const flash=a.charge>.12?.071+.095*a.charge:weapon.id==='td'?.46:weapon.id==='rd2'?.27:.14;
+    const flash=a.charge>.12?.071+.095*a.charge:wid==='td'?.46:wid==='rd2'?.27:.14;
     gunPart('orb',-.415,1.30,.785+barrel*.85,flash,flash,flash*1.7,bright,3);
   }
 }

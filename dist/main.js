@@ -951,12 +951,17 @@ function showTitle() {
   $('start').focus({preventScroll:true});
 }
 
+const MAP_CYAN32=0xffbed128, MAP_AMBER32=0xff4476f4;
+const MAP_FLOOR32=0xff57523e, MAP_RAISED32=0xff747561, MAP_WALL32=0xff2f2918;
+let mapPixels32=null;
+
 function mapSetup() {
   const width=mini.width,height=mini.height;
   mapImage=miniCtx.createImageData(width,height);
+  mapPixels32=new Uint32Array(mapImage.data.buffer);
   for (const [level,zone] of ZONES.entries()) {
     const indices=new Int32Array(width*height).fill(-1);
-    const colors=new Uint8Array(width*height*3);
+    const colors32=new Uint32Array(width*height);
     const [boundX,boundZ]=zone.bounds;
     for (let iz=0;iz<height;iz++) for (let ix=0;ix<width;ix++) {
       const i=iz*width+ix;
@@ -965,9 +970,9 @@ function mapSetup() {
       const layer=onTrack?TRACK_LAYER:world.floor(x,z).layer, index=paint.index(x,z,layer);
       const allowed=paint.mask[index];
       if (allowed) indices[i]=index;
-      colors.set(allowed?(layer===1 || layer===3 || onTrack || level>=2?[97,117,116]:[62,82,87]):[24,41,47],i*3);
+      colors32[i]=allowed?(layer===1 || layer===3 || onTrack || level>=2?MAP_RAISED32:MAP_FLOOR32):MAP_WALL32;
     }
-    mapLayers[level]={indices,colors,boundX,boundZ};
+    mapLayers[level]={indices,colors32,boundX,boundZ};
   }
 }
 
@@ -975,14 +980,11 @@ function drawMap() {
   if (!battle || !mapImage) return;
   const view=battle.cameraActor(), level=mapLevel==='auto'?(watchingAerial()?0:zoneOf(view.x)):Number(mapLevel);
   const cabin=level>=2?battle.cabinTrain(view.x):null;
-  const {indices,colors,boundX,boundZ}=mapLayers[level];
-  const {data}=mapImage, owners=paint.owner;
-  for (let i=0,o=0;i<indices.length;i++,o+=4) {
+  const {indices,colors32,boundX,boundZ}=mapLayers[level];
+  const out=mapPixels32, owners=paint.owner;
+  for (let i=0,n=indices.length;i<n;i++) {
     const index=indices[i], owner=index===-1?0:owners[index];
-    if (owner===1) {data[o]=40;data[o+1]=209;data[o+2]=190;}
-    else if (owner===2) {data[o]=244;data[o+1]=118;data[o+2]=68;}
-    else {data[o]=colors[i*3];data[o+1]=colors[i*3+1];data[o+2]=colors[i*3+2];}
-    data[o+3]=255;
+    out[i]=owner===1?MAP_CYAN32:owner===2?MAP_AMBER32:colors32[i];
   }
   miniCtx.putImageData(mapImage,0,0);
   const outer=level===0 && zoneOf(view.x)===0 && (Math.abs(view.x)>boundX || Math.abs(view.z)>boundZ);

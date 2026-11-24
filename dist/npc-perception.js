@@ -19,14 +19,15 @@ export class NpcPerception {
 
   sight(a,b) {
     if (!this.live(a,b) || zoneOf(a.x)!==zoneOf(b.x)) return null;
-    const dx=b.x-a.x,dy=b.y-a.y,dz=b.z-a.z,d=Math.hypot(dx,dz);
+    const dx=b.x-a.x, dy=b.y-a.y, dz=b.z-a.z, d=Math.hypot(dx,dz);
     const reach=a.isBoss?39:a.isRaider?28:a.weapon.blast?18:Math.min(33,a.weapon.range*.93);
-    if (Math.hypot(d,dy*.85)>reach || b.inkSwimming && d>8.8) return null;
-    const [fx,,fz]=forward(a.yaw), bearing=(dx*fx+dz*fz)/Math.max(.01,d);
+    if (d*d+(dy*.85)*(dy*.85)>reach*reach || (b.inkSwimming && d>8.8)) return null;
+    const bearing=(dx*Math.sin(a.yaw)-dz*Math.cos(a.yaw))/(d>.01?d:.01);
     if (d>(a.isRaider?2.65:5.2) && bearing<(a.isBoss?-.69:a.isRaider?.36:-.13)) return null;
     const eye=[a.x,a.y+eyeHeight(a),a.z];
-    const body=visibleHeight(b), samples=b.swimming?[body]:[body,body+(b.isBoss?.72:.44),body*.56];
-    for (const h of samples) {
+    const body=visibleHeight(b), count=b.swimming?1:3;
+    for (let i=0;i<count;i++) {
+      const h=i===0?body:i===1?body+(b.isBoss?.72:.44):body*.56;
       const point=[b.x,b.y+h,b.z];
       if (!this.battle.traceShot(eye,point,true) && !this.battle.subweapons.block(eye,point,a.team)) return point;
     }
@@ -35,14 +36,20 @@ export class NpcPerception {
 
   select(a,previous=null) {
     const b=this.battle;
-    let score=Infinity,best=null,point=null;
-    const candidates=a.isRaider||a.isBoss?b.actors:[...b.actors,...b.raiders.members,b.boss];
-    for (const enemy of candidates) {
-      if (!this.live(a,enemy)) continue;
+    let score=Infinity, best=null, point=null;
+    const tryEnemy=enemy=>{
+      if (!this.live(a,enemy)) return;
       const rank=distance(a,enemy)*(enemy===previous?.82:1)+(enemy.isBoss && a.index%3!==0?7:0);
-      if (rank>=score) continue;
+      if (rank>=score) return;
       const sample=this.sight(a,enemy);
       if (sample) {score=rank;best=enemy;point=sample;}
+    };
+    const actors=b.actors;
+    for (let i=0;i<actors.length;i++) tryEnemy(actors[i]);
+    if (!a.isRaider && !a.isBoss) {
+      const raiders=b.raiders.members;
+      for (let i=0;i<raiders.length;i++) tryEnemy(raiders[i]);
+      tryEnemy(b.boss);
     }
     return {enemy:best,point};
   }
