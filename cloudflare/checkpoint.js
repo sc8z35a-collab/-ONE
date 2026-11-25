@@ -123,7 +123,7 @@ export function checkpointOf(b) {
   const chipOwner=owner?owner.isRaider?['raid',owner.index]:['crew',b.actors.indexOf(owner)]:null;
   const game={
     version:STORAGE_VERSION,field:{width:b.paint.w,height:b.paint.h,boundX:b.paint.boundX,boundZ:b.paint.boundZ},
-    clock:b.clock,elapsed:b.elapsed,left:b.left,countdown:b.countdown,watching:b.watching,finished:b.finished,shotSequence:b.shotSequence,
+    clock:b.clock,elapsed:b.elapsed,left:b.left,countdown:b.countdown,watching:b.watching,finished:b.finished,unlimited:!!b.unlimited,shotSequence:b.shotSequence,
     actors:b.actors.map(a=>({...actor(a),weaponId:a.weapon.id,...(a.cloneOf && {casterIndex:b.actors.indexOf(a.cloneOf)})})),
     tactics:{
       crew:b.actors.map(a=>savedTactics(b.tactics.states.get(a))),
@@ -133,6 +133,7 @@ export function checkpointOf(b) {
     transit:transit(b.transit),metro:transit(b.metro),
     boss:{...fields(b.boss),cast:clone(b.boss.cast),attacks:clone(b.boss.attacks)},bossTarget:reference(b,b.boss.target),
     raiders:{...fields(b.raiders),members:b.raiders.members.map(actor)},
+    hazards:b.hazards?b.hazards.checkpoint():null,
     decals:clone(b.decals),drops:clone(b.drops),events:clone(b.events),
     inkImpacts:b.inkImpacts.map(({target,...impact})=>({...clone(impact),target:reference(b,target)})),
     inkTime:b.paint.time,battleSeed:b.rng.state(),raidSeed:b.raiders.rng.state(),
@@ -186,6 +187,7 @@ export function restoreCheckpoint(b,stored) {
       saved.actors.filter(a=>a.casterIndex===undefined).length!==b.actors.length) return;
   const data=saved.version<5?migratePositions(clone(saved)):saved;
   for (const key of ['clock','elapsed','left','countdown','watching','finished']) b[key]=data[key];
+  if (data.unlimited!==undefined) b.unlimited=!!data.unlimited;
   b.shotSequence=data.shotSequence??0;
   // ebot copies follow the regular crew in the saved order, so every stored
   // crew index still points at the same fighter after the restore.
@@ -195,8 +197,9 @@ export function restoreCheckpoint(b,stored) {
   for (let i=0;i<b.actors.length;i++) {
     const a=b.actors[i];
     const {weaponId,casterIndex,...saved}=data.actors[i];
-    Object.assign(a,saved,{drone:null,beaming:false,route:[],travelLine:null,travelGoal:null,enemy:null,goal:null});
-    if (weaponId) a.weapon=weaponById(weaponId);
+    Object.assign(a,{isCheater:false,baseHp:100,agility:1,jumpFactor:1,regenFactor:1},saved,
+      {drone:null,beaming:false,route:[],travelLine:null,travelGoal:null,enemy:null,goal:null});
+    if (weaponId) a.weapon=shotWeaponById(weaponId);
     a.rollHold=0;
     a.rollUsed=false;
     a.rolling=false;
@@ -215,6 +218,7 @@ export function restoreCheckpoint(b,stored) {
     b.boss.maxHp=bossMax;
   }
   Object.assign(b.raiders,data.raiders);
+  if (b.hazards && data.hazards) b.hazards.restoreCheckpoint(data.hazards);
   if (Number.isInteger(data.battleSeed)) b.rng=randomGenerator(data.battleSeed);
   if (Number.isInteger(data.raidSeed)) b.raiders.rng=randomGenerator(data.raidSeed);
   for (const a of b.raiders.members) {

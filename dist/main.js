@@ -75,6 +75,7 @@ function readPrefs() {
     weapon:weaponById(saved.weapon).id,
     sub:subweaponById(saved.sub).id,
     teamSize:saved.teamSize===4?4:8,
+    unlimitedTime:saved.unlimitedTime===true,
     sensitivity:Number.isFinite(saved.sensitivity)?clamp(saved.sensitivity,.55,1.75):1,
     quality:['ultra','lite','high'].includes(saved.quality)?saved.quality:'auto',
     resolution:['fhd','2k'].includes(saved.resolution)?saved.resolution:'auto',
@@ -120,9 +121,14 @@ function createRenderer() {
 function savePrefs() {
   try { localStorage.setItem(PREF_KEY,JSON.stringify(prefs)); } catch { /* Private browsing may restrict storage. */ }
   const versus=prefs.teamSize+' VS '+prefs.teamSize;
-  $('match-tag').textContent=versus;
-  $('watch-caption').textContent='WATCH '+versus;
+  $('match-tag').textContent=versus+(prefs.unlimitedTime?' · ∞':'');
+  $('watch-caption').textContent='WATCH '+versus+(prefs.unlimitedTime?' · ∞':'');
   $('active-weapon').textContent=weaponById(prefs.weapon).name+' / '+subweaponById(prefs.sub).name;
+  const tl=$('time-limit');
+  if (tl) {
+    tl.setAttribute('aria-pressed',String(prefs.unlimitedTime));
+    setText('time-limit-state',prefs.unlimitedTime?'無制限 ∞':'7分');
+  }
   applyQuality();
 }
 
@@ -430,7 +436,8 @@ function loadout(inMatch=false) {
   const draft={
     weapon:inMatch?remote?.pendingLoadout?.weapon??player.weapon.id:prefs.weapon,
     sub:inMatch?remote?.pendingLoadout?.sub??player.subId:prefs.sub,
-    teamSize:prefs.teamSize
+    teamSize:prefs.teamSize,
+    unlimitedTime:prefs.unlimitedTime
   };
   const kind=inMatch?(dialogKind==='pause'?'pause-loadout':'match-loadout'):'loadout';
   const content=document.createElement('div');
@@ -443,16 +450,26 @@ function loadout(inMatch=false) {
   const subOptions=document.createElement('div');
   subOptions.className='weapon-options sub-options';
   function refresh() {
-    for (const option of teamOptions.children) option.setAttribute('aria-pressed',String(Number(option.dataset.size)===draft.teamSize));
+    for (const option of teamOptions.children) {
+      if (option.dataset.size) option.setAttribute('aria-pressed',String(Number(option.dataset.size)===draft.teamSize));
+      if (option.dataset.unlimited) option.setAttribute('aria-pressed',String((option.dataset.unlimited==='true')===draft.unlimitedTime));
+    }
     for (const option of weapons.children) option.setAttribute('aria-pressed',String(option.dataset.weapon===draft.weapon));
     for (const option of subOptions.children) option.setAttribute('aria-pressed',String(option.dataset.sub===draft.sub));
     const special=SUPERS[weaponById(draft.weapon).special];
     description.textContent=special.name+'　'+special.detail;
   }
-  if (!inMatch) for (const size of [4,8]) {
-    const option=button(size+'対'+size,'option',()=>{draft.teamSize=size;refresh();});
-    option.dataset.size=String(size);
-    teamOptions.append(option);
+  if (!inMatch) {
+    for (const size of [4,8]) {
+      const option=button(size+'対'+size,'option',()=>{draft.teamSize=size;refresh();});
+      option.dataset.size=String(size);
+      teamOptions.append(option);
+    }
+    for (const [unlimited,label] of [[false,'試合時間 7分'],[true,'試合時間 無制限 ∞']]) {
+      const option=button(label,'option',()=>{draft.unlimitedTime=unlimited;refresh();});
+      option.dataset.unlimited=String(unlimited);
+      teamOptions.append(option);
+    }
   }
   for (const weapon of WEAPONS) {
     const option=button('','weapon-card',()=>{draft.weapon=weapon.id;refresh();});
@@ -641,7 +658,7 @@ function pause() {
   const actions=[button('対戦に戻る','primary',pause)];
   if (battle.player) actions.push(button('武器を変更','secondary',()=>loadout(true)));
   if (!embeddedApp && !fullscreenElement()) actions.push(button('全画面','secondary',()=>fullScreen(false,true)));
-  if (battle.timeless) actions.push(button('試合を終えてリザルトへ','secondary',finish));
+  if (battle.unlimited) actions.push(button('試合を終えてリザルトへ','secondary',finish));
   actions.push(button('タイトルへ','secondary',showTitle));
   showDialog('pause','一時停止',info,actions);
 }
@@ -812,7 +829,7 @@ async function start(mode,request='choose') {
         yaw=actor.yaw;
         pitch=REST_PITCH;
         viewActor=null;
-      }},{teamSize:prefs.teamSize,weapon:prefs.weapon,sub:prefs.sub}));
+      }},{teamSize:prefs.teamSize,weapon:prefs.weapon,sub:prefs.sub,unlimitedTime:prefs.unlimitedTime}));
       return;
     }
     if (!cloud.ready) {
@@ -842,7 +859,7 @@ async function start(mode,request='choose') {
       }
     };
     showDialog('server','サーバーに接続中',p,[button('戻る','secondary',cancel)]);
-    const ticket=resume ?? await createCloudRoom({mode,teamSize:prefs.teamSize,weapon:prefs.weapon,sub:prefs.sub},accessCode,token.controller);
+    const ticket=resume ?? await createCloudRoom({mode,teamSize:prefs.teamSize,weapon:prefs.weapon,sub:prefs.sub,unlimitedTime:prefs.unlimitedTime},accessCode,token.controller);
     if (token.canceled) return;
     const client=token.client=new RemoteMatch(ticket,world,{sound,onTravel:syncTravel,status:(state,note)=>{
       setCompute(state==='connected'?'CLOUDFLARE · 接続中':state==='reconnecting'?'CLOUDFLARE · 再接続中':'CLOUDFLARE · 接続切れ');
@@ -901,8 +918,9 @@ function mount(mode,scene,resumed=false) {
   $('reticle').hidden=mode==='watch';
   $('stairs-note').hidden=true;
   const versus=battle.teamSize+' VS '+battle.teamSize;
-  $('hud-mode').textContent=versus+(battle.timeless?' / TIMELESS':mode==='watch'?' / NPC戦':' / ナワバリ戦');
-  $('clock-label').textContent=battle.timeless?'TIMELESS':'残り時間';
+  const suffix=battle.timeless?' / TIMELESS':(mode==='watch'?' / NPC戦':' / ナワバリ戦')+(battle.unlimited?' · 無制限':'');
+  $('hud-mode').textContent=versus+suffix;
+  $('clock-label').textContent=battle.timeless?'TIMELESS':battle.unlimited?'無制限':'残り時間';
   $('squads').classList.toggle('expanded',battle.teamSize>4);
   resetSquads();
   updateOrientation();
@@ -1024,7 +1042,7 @@ function drawMap() {
     }
     for (const rail of [battle.transit,battle.metro]) if (rail.visibleIn(level)) {
       const train=rail.train;
-      miniCtx.fillStyle=['derailed','recover','return'].includes(train.phase)?'#fb9a75':'#fff0c6';
+      miniCtx.fillStyle=train.berserk?'#ff2838':['derailed','recover','return'].includes(train.phase)?'#fb9a75':'#fff0c6';
       miniCtx.fillRect(px(train.x)-5,pz(line.z+train.lateral)-1.8,10,3.6);
     }
     if (level===0 && battle.boss.active) {
@@ -1032,6 +1050,40 @@ function drawMap() {
       miniCtx.beginPath();
       miniCtx.arc(px(battle.boss.x),pz(battle.boss.z),4.5,0,Math.PI*2);
       miniCtx.fill();
+    }
+    const hz=battle.hazards;
+    if (hz) {
+      if (level===0 && hz.tsunami?.phase==='wave') {
+        miniCtx.fillStyle='rgba(36,166,214,0.48)';
+        const wx=px(hz.tsunami.x);
+        miniCtx.fillRect(wx-9,0,18,mini.height);
+      }
+      if (level===1 && hz.underFlood?.active && hz.underFlood.depth>.2) {
+        miniCtx.fillStyle='rgba(24,132,178,0.34)';
+        miniCtx.fillRect(0,0,mini.width,mini.height);
+      }
+      if (level===0) for (const s of hz.snipers) if (s.active) {
+        miniCtx.fillStyle='#ff3848';
+        miniCtx.fillRect(px(s.x)-2.5,pz(s.z)-2.5,5,5);
+      }
+      for (const d of hz.rogueDrones) if (d.active && zoneOf(d.x)===level) {
+        miniCtx.fillStyle='#e2408a';
+        miniCtx.beginPath();
+        miniCtx.arc(px(localX(d.x)),pz(d.z),3,0,Math.PI*2);
+        miniCtx.fill();
+      }
+      if (level===0 && hz.goat?.active) {
+        const gx=px(hz.goat.x), gz=pz(hz.goat.z);
+        miniCtx.fillStyle='#ff2644';
+        miniCtx.beginPath();
+        miniCtx.arc(gx,gz,6,0,Math.PI*2);
+        miniCtx.fill();
+        miniCtx.strokeStyle='#ffd45a';
+        miniCtx.lineWidth=1.8;
+        miniCtx.beginPath();
+        miniCtx.arc(gx,gz,8,0,Math.PI*2);
+        miniCtx.stroke();
+      }
     }
   } else {
     const open=cabin.train.stop && cabin.train.doorOpen>.70 && !cabin.failed();
@@ -1096,7 +1148,7 @@ function updateWeaponHud(weapon) {
   label.textContent=weapon.name;
   $('charge-track').hidden=!weapon.charge;
   $('fire-caption').textContent=weapon.roller?'振る・転がす':weapon.charge?'溜め撃ち':'撃つ';
-  $('reticle').classList.toggle('wide',weapon.id==='fan');
+  $('reticle').classList.toggle('wide',weapon.id==='fan' || weapon.id==='autoeima');
   $('reticle').classList.toggle('charged',!!weapon.charge);
 }
 
@@ -1146,10 +1198,12 @@ function updateHud() {
   if (!battle) return;
   const time=Math.ceil(battle.left);
   const format=s=>Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
-  setText('time',battle.timeless?'∞':format(time));
-  $('time').classList.toggle('urgent',time<=30);
-  const boss=battle.boss, raiders=battle.raiders, view=battle.cameraActor(), level=watchingAerial()?0:zoneOf(view.x);
-  $('boss-hud').hidden=!boss.active;
+  setText('time',battle.unlimited?'∞':format(time));
+  $('time').classList.toggle('urgent',!battle.unlimited && time<=30);
+  const boss=battle.boss, raiders=battle.raiders, hz=battle.hazards, tb=hz?.trainBoss, goat=hz?.goat, view=battle.cameraActor(), level=watchingAerial()?0:zoneOf(view.x);
+  const showGoat=!!goat?.active;
+  const showTrainBoss=!showGoat && !!tb?.active && !boss.active;
+  $('boss-hud').hidden=!showGoat && !boss.active && !showTrainBoss;
   const stationService=!watchingAerial() && level<2?battle.transportService(view):null;
   const transit=level>=2?battle.cabinTrain(view.x):stationService?.rail ??
     [battle.transit,battle.metro].find(rail=>rail.section===level && (rail.failed() || rail.alertUntil>rail.time)) ??
@@ -1190,15 +1244,29 @@ function updateHud() {
       node.classList.toggle('next',selected && !info.docked);
     }
   }
-  if (boss.active) {
+  if (showGoat) {
+    setText('boss-name',goat.name);
+    $('boss-phase').textContent=goat.phase===3?'破滅':goat.phase===2?'激昂':'降臨';
+    const ratio=clamp(goat.hp/goat.maxHp,0,1);
+    $('boss-pct').textContent=Math.ceil(ratio*100)+'%';
+    $('boss-bar').style.transform='scaleX('+ratio+')';
+  } else if (boss.active) {
+    setText('boss-name',boss.name);
     $('boss-phase').textContent='第'+boss.phase+'段階';
     const ratio=boss.hp/boss.maxHp;
     $('boss-pct').textContent=Math.ceil(ratio*100)+'%';
     $('boss-bar').style.transform='scaleX('+ratio+')';
+  } else if (showTrainBoss) {
+    setText('boss-name',tb.name);
+    $('boss-phase').textContent='暴走ボス';
+    const ratio=clamp(tb.hp/tb.maxHp,0,1);
+    $('boss-pct').textContent=Math.ceil(ratio*100)+'%';
+    $('boss-bar').style.transform='scaleX('+ratio+')';
   }
-  const hazard=battle.timeless?raiders:boss, alert=$('boss-alert');
-  alert.hidden=hazard.alertUntil<=battle.clock;
-  if (!alert.hidden && alert.textContent!==hazard.alert) alert.textContent=hazard.alert;
+  const primaryAlert=battle.timeless?raiders:boss, alert=$('boss-alert');
+  const activeAlert=hz && hz.alertUntil>battle.clock && hz.alertUntil>=primaryAlert.alertUntil?hz:primaryAlert;
+  alert.hidden=activeAlert.alertUntil<=battle.clock;
+  if (!alert.hidden && alert.textContent!==activeAlert.alert) alert.textContent=activeAlert.alert;
   for (let i=0;i<2;i++) {
     const value=paint.percent(i);
     scoreNodes[i].firstChild.nodeValue=value.toFixed(1);
@@ -1230,9 +1298,17 @@ function updateHud() {
   } else {
     setText('viewing',watchingAerial()?'地上の全景':view.name+' · '+(view.intent || ZONES[level].name));
   }
-  if (battle.countdown>0) message(String(Math.ceil(battle.countdown)),battle.timeless?'タイムレスバトル':'ナワバリ戦');
+  if (battle.countdown>0) message(String(Math.ceil(battle.countdown)),battle.timeless?'タイムレスバトル':battle.unlimited?'ナワバリ戦 · 時間無制限':'ナワバリ戦');
   else if (battle.clock<3.77) message('GO!','街区を塗り広げろ');
-  else if (p?.down>0) message(String(Math.ceil(p.down)),p.downBy==='boss'?'オオモノイカに倒された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':'復帰まで '+RESPAWN_SECONDS+'秒');
+  else if (p?.down>0) {
+    const downNote=p.downBy==='goat'?'破壊神ゴートに蹂躙された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
+      p.downBy==='boss'?'オオモノイカに倒された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
+      p.downBy==='trainBoss'?'暴走列車に撃破された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
+      p.downBy==='drown'?'水没して溺死した · 復帰まで '+RESPAWN_SECONDS+'秒':
+      p.downBy==='hazard'?'襲撃イベントに倒された · 復帰まで '+RESPAWN_SECONDS+'秒':
+      '復帰まで '+RESPAWN_SECONDS+'秒';
+    message(String(Math.ceil(p.down)),downNote);
+  }
   else message('','');
   const feedKey=battle.events.map(event=>event.team+':'+event.label).join('|');
   if (feedKey!==lastFeed) {
@@ -1418,7 +1494,7 @@ function drawFocus(now) {
   marker.style.setProperty('--lock-alpha',direct?1:.68*clamp((focus.until-now)/180,0,1));
   marker.classList.toggle('tracking',!direct);
   marker.classList.toggle('boss',!!target.isBoss);
-  marker.classList.toggle('homing',(p.activeSpecial==='om' || p.activeSpecial==='om2') && p.superUntil>battle.clock);
+  marker.classList.toggle('homing',((p.activeSpecial==='om' || p.activeSpecial==='om2') && p.superUntil>battle.clock) || !!p.weapon?.homing);
   lockMotion(marker,now,direct,[x,y,z]);
   marker.hidden=false;
 }
@@ -1624,6 +1700,10 @@ $('watch-view').addEventListener('click',()=>{
 });
 $('how').addEventListener('click',guide);
 $('loadout').addEventListener('click',()=>loadout());
+$('time-limit')?.addEventListener('click',()=>{
+  prefs.unlimitedTime=!prefs.unlimitedTime;
+  savePrefs();
+});
 $('change-loadout').addEventListener('click',()=>{if (!dialogKind) loadout(true);});
 $('quality').addEventListener('click',()=>{
   prefs.quality={high:'lite',lite:'ultra',ultra:'high'}[qualityLevel()];

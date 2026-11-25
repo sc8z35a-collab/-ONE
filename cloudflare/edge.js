@@ -75,7 +75,8 @@ async function smallJSON(request) {
 export function optionsFor(body) {
   if (!body || !['play','watch','timeless'].includes(body.mode) || !WEAPONS.some(w=>w.id===body.weapon)) return null;
   if (body.sub!==undefined && !SUBWEAPONS.some(sub=>sub.id===body.sub)) return null;
-  return {mode:body.mode,weapon:body.weapon,sub:subweaponById(body.sub).id,teamSize:body.mode==='timeless' || body.teamSize===4?4:8};
+  return {mode:body.mode,weapon:body.weapon,sub:subweaponById(body.sub).id,teamSize:body.mode==='timeless' || body.teamSize===4?4:8,
+    ...(body.unlimitedTime?{unlimitedTime:true}:{})};
 }
 
 export async function handleEdge(request,env) {

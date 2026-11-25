@@ -66,8 +66,8 @@ export class Abilities {
     actor.slam=null;
     actor.giant=actor.beaming=false;
     actor.radius=actor.height=undefined;
-    actor.maxHp=100;
-    actor.hp=Math.min(actor.hp,100);
+    actor.maxHp=actor.baseHp??100;
+    actor.hp=Math.min(actor.hp,actor.maxHp);
     actor.guard=0;
     actor.rangeFactor=1;
   }
@@ -104,8 +104,8 @@ export class Abilities {
     }
     if (id==='range') actor.rangeFactor=1.75;
     if (id==='health') {
-      actor.maxHp=200;
-      actor.hp=Math.min(200,actor.hp+100);
+      actor.maxHp=(actor.baseHp??100)+100;
+      actor.hp=Math.min(actor.maxHp,actor.hp+100);
     }
     if (id==='slam') {
       actor.slam={age:0,...this.slamMotion(actor)};
@@ -148,8 +148,11 @@ export class Abilities {
   enemies(actor,atX=actor.x) {
     const b=this.battle;
     const list=b.actors.filter(other=>other.team!==actor.team && other.down<=0 && !other.ride && !other.lift && sameLevel(other.x,atX));
-    for (const raider of b.raiders.members) if (raider.active && !raider.ride && !raider.lift && sameLevel(raider.x,atX)) list.push(raider);
-    if (b.boss.active && sameLevel(b.boss.x,atX)) list.push(b.boss);
+    if (actor.team>=0) {
+      for (const raider of b.raiders.members) if (raider.active && !raider.ride && !raider.lift && sameLevel(raider.x,atX)) list.push(raider);
+      if (b.boss.active && sameLevel(b.boss.x,atX)) list.push(b.boss);
+      if (b.hazards) for (const h of b.hazards.targets(atX)) list.push(h);
+    }
     return list;
   }
 

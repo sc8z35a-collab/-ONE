@@ -5,14 +5,14 @@ const q=n=>Math.round(n*100)/100;
 const v=p=>p.map(q);
 const dropView=d=>[...v(d.p),q(d.size),q(d.life/d.max),d.team,...v(d.v),q(d.life)];
 const railKeys=['x','stop','direction','phase','wait','speed','doorOpen','wetness','lateral','sideSpeed','yaw','roll','lift',
-  'risk','spray','inkColor','viewDirection','routePitch','destination'];
+  'risk','spray','inkColor','viewDirection','routePitch','destination','berserk'];
 // Meters never round up into a false "ready", and timers never round down
 // into a false "finished": both are cut to a millisecond on the safe side.
 const meters=new Set(['tank','charge','superCharge','hp']);
 const timers=new Set(['down','shield','superUntil','droneReady','subReady','doorReady','revealUntil']);
 const cut=(value,round)=>Number.isFinite(value)?round(value*1000)/1000:value;
 const actorView=(a,close=true)=>{
-  const special={isPlayer:!!a.isPlayer,weapon:a.weapon?.id,drone:!!a.drone,ride:!!a.ride,lift:a.lift?{left:q(a.lift.left)}:null,
+  const special={isPlayer:!!a.isPlayer,isCheater:!!a.isCheater,weapon:a.weapon?.id,drone:!!a.drone,ride:!!a.ride,lift:a.lift?{left:q(a.lift.left)}:null,
     slam:!!a.slam,beaming:!!a.beaming,bodyYaw:q(a.bodyYaw??a.yaw),feet:close && a.feet?v(a.feet):null,clone:!!a.cloneOf,
     brace:a.brace??0,peek:a.peek??0,readyPose:a.readyPose??0,flare:a.flare??0,poseBank:a.poseBank??0};
   return AVATAR_FIELDS.map(key=>{
@@ -38,13 +38,14 @@ export function frameOf(b,zone,fullInk,sounds,mergeStairs=false) {
   };
   const a=b.abilities, boss=b.boss, raiders=b.raiders;
   return {
-    type:'frame',mode:b.mode,teamSize:b.teamSize,timeless:b.timeless,
-    clock:b.clock,elapsed:q(b.elapsed),left:b.timeless?null:b.left,countdown:b.countdown,finished:b.finished,watching:b.watching,
+    type:'frame',mode:b.mode,teamSize:b.teamSize,timeless:b.timeless,unlimited:!!b.unlimited,
+    clock:b.clock,elapsed:q(b.elapsed),left:b.unlimited?null:b.left,countdown:b.countdown,finished:b.finished,watching:b.watching,
     actors:b.actors.map(actor=>actorView(actor,nearby(actor.x))),transit:railView(b.transit,nearby(b.transit.line.center)),metro:railView(b.metro,nearby(b.metro.line.center)),
     boss:{active:boss.active,spawned:boss.spawned,phase:boss.phase,hp:q(boss.hp),maxHp:boss.maxHp,alert:boss.alert,
       alertUntil:q(boss.alertUntil),x:q(boss.x),y:q(boss.y),z:q(boss.z),vx:q(boss.vx),vz:q(boss.vz),yaw:q(boss.yaw),steps:q(boss.steps??0),poseBank:q(boss.poseBank??0),cast:nearby(boss.x)?boss.cast:null,
       attacks:nearby(boss.x)?boss.attacks.map(({hit,...attack})=>attack):[]},
     raiders:{next:q(raiders.next),wave:raiders.wave,alert:raiders.alert,alertUntil:q(raiders.alertUntil),members:raiders.live().map(actor=>actorView(actor,nearby(actor.x)))},
+    hazards:b.hazards?b.hazards.snapshot(zone,mergeStairs):null,
     shots:b.shots.filter(s=>nearby(s.pos[0])).slice(-90).map(s=>[...v(s.pos),...v(s.vel),s.actor.team,s.weapon.id,s.weapon.size,s.id]),
     drops:b.drops.filter(d=>nearby(d.p[0])).slice(-66).map(dropView),
     inkImpacts:b.inkImpacts.filter(hit=>nearby(hit.p[0])).map(hit=>[...v(hit.p),hit.team,q(hit.at),hit.normal,hit.kind??0]),
@@ -73,7 +74,7 @@ function changed(previous,next) {
   for (const key of Object.keys(next)) if (!same(previous?.[key],next[key])) out[key]=next[key];
   return out;
 }
-const RARE=['mode','teamSize','timeless','stage','events','chip','total','zoneTotal','wakes'];
+const RARE=['mode','teamSize','timeless','unlimited','stage','events','chip','total','zoneTotal','wakes'];
 
 // The wire form of a snapshot. A link that already holds a snapshot receives
 // only what changed since: sparse crew rows, the changed train and boss

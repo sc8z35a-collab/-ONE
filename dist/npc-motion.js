@@ -181,12 +181,12 @@ export class NpcMotion {
   }
 
   turn(a,yaw,pitch,dt) {
-    const difference=angle(a.yaw,yaw);
-    const rate=a.isBoss?2.6:a.weapon?.charge?6.6:8.6;
-    const desired=clamp(difference*9,-rate,rate);
-    a.yawSpeed=(a.yawSpeed??0)+clamp(desired-(a.yawSpeed??0),-44*dt,44*dt);
+    const difference=angle(a.yaw,yaw), ag=a.agility??1;
+    const rate=(a.isBoss?2.6:a.weapon?.charge?6.6:8.6)*ag;
+    const desired=clamp(difference*9*ag,-rate,rate);
+    a.yawSpeed=(a.yawSpeed??0)+clamp(desired-(a.yawSpeed??0),-44*ag*dt,44*ag*dt);
     a.yaw=angle(0,a.yaw+Math.sign(difference)*Math.min(Math.abs(difference),Math.max(0,a.yawSpeed*dt*Math.sign(difference))));
-    if (Number.isFinite(pitch)) a.pitch=(a.pitch??0)+clamp(pitch-(a.pitch??0),-3.6*dt,3.6*dt);
+    if (Number.isFinite(pitch)) a.pitch=(a.pitch??0)+clamp(pitch-(a.pitch??0),-3.6*ag*dt,3.6*ag*dt);
   }
 
   drive(a,vx,vz,dt,{swim=false,jump=false,look,pitch,brace=0,peek=0,ready=0,emergency=false}={}) {
@@ -195,7 +195,7 @@ export class NpcMotion {
     if (look!==undefined || desiredSpeed>.09) this.turn(a,look??heading(vx,vz),pitch,dt);
     if (!a.isBoss) [vx,vz]=this.avoid(a,vx,vz);
     const ax=vx-(a.driveX??0),az=vz-(a.driveZ??0);
-    const rate=emergency?68:a.isBoss?8:a.airborne?8.5:desiredSpeed<.12?33:27;
+    const rate=(emergency?68:a.isBoss?8:a.airborne?8.5:desiredSpeed<.12?33:27)*(a.agility??1);
     const fraction=Math.min(1,rate*dt/Math.max(.001,Math.hypot(ax,az)));
     a.driveX=(a.driveX??0)+ax*fraction;
     a.driveZ=(a.driveZ??0)+az*fraction;

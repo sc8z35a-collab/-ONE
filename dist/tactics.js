@@ -214,7 +214,7 @@ export class Tactics {
     return destination && this.enterCabinExit(actor,rail,stop,dt);
   }
 
-  follow(actor,s,dt,swim=false) {
+  follow(actor,s,dt,swim=false,pose={}) {
     const b=this.battle, plan=s.plan;
     if (!plan?.steps.length) return false;
     for (let i=0;i<4 && plan.steps.length;i++) {
@@ -222,7 +222,7 @@ export class Tactics {
       if (step.kind==='walk') {
         if (level!==step.to.level) {s.plan=null;return false;}
         if (distance(actor,step.to)<.84) {plan.steps.shift();continue;}
-        if (!b.navigate(actor,step.to,dt,actor.isRaider?3.42:5.28,swim)) {s.plan=null;return false;}
+        if (!b.navigate(actor,step.to,dt,actor.isRaider?3.42:5.28,swim,pose)) {s.plan=null;return false;}
         return true;
       }
       if (step.kind==='stairs') {
@@ -410,6 +410,9 @@ export class Tactics {
 
   crew(actor,enemy,dt,sight=null) {
     const b=this.battle,s=this.state(actor), level=zoneOf(actor.x), d=enemy?distance(actor,enemy):Infinity;
+    const hnv=b.hnv1;
+    // HNV1 Master Disaster & World-Boss Survival Layer (Tsunami, B1 Flood, Goat, Sniper Laser, Train Boss)
+    if (hnv?.survivalAction(actor,dt,sight)) {s.cover=null;actor.charge=0;return;}
     const hazard=b.subweapons.danger(actor) ?? bossOrTentacle(b,actor);
     if (hazard) {
       s.cover=null;
@@ -429,9 +432,13 @@ export class Tactics {
       actor.intent='爆発範囲から退避';
       if (escape && b.navigate(actor,escape,dt,5.8)) return;
     }
-    if (actor.hp<51 || actor.tank<actor.weapon.cost*1.9) s.recovering=true;
-    if (actor.hp>79 && actor.tank>actor.tankMax*.55) s.recovering=false;
-    if (enemy && actor.superCharge>=100) {
+    const maxHp=actor.maxHp??100;
+    const lowHp=maxHp*(hnv?.48:.51), okHp=maxHp*.79;
+    if (actor.hp<lowHp || actor.tank<actor.weapon.cost*1.9) s.recovering=true;
+    if (actor.hp>okHp && actor.tank>actor.tankMax*.55) s.recovering=false;
+    if (hnv) {
+      if (hnv.orchestrateAbilities(actor,enemy,sight,s)) return;
+    } else if (enemy && actor.superCharge>=100) {
       const id=actor.weapon.special, group=this.intelligence(actor,level).filter(c=>distance(c,enemy)<6.5).length;
       const use=id==='shield'?actor.hp<68:id==='health'?actor.hp<61:id==='range'?d>13:
         id==='slam'?d<5.2:id==='giant'?d<8.4:id==='beam'?d>5:id==='vortex'?group>=2 || d<9.5:d<17;
@@ -454,9 +461,11 @@ export class Tactics {
     const stair=stairLane(actor.x,actor.z);
     if (!stair && !committed && order?.kind==='flank' && d>5.7 && distance(actor,order.goal)>.94) {
       const point=sight?.point??[order.contact.x,(order.contact.y??actor.y)+1.1,order.contact.z];
-      if (b.navigate(actor,order.goal,dt,5.28,false,{look:bearing(actor,point),ready:.83})) {
-        actor.intent='味方の射線に合わせて側面へ';
-        if (enemy) this.combat.shoot(actor,s,sight,dt);
+      const ink=b.paint.get(actor.x,actor.z,b.world.floor(actor.x,actor.z).layer);
+      const flankSwim=hnv && !enemy && ink===actor.team+1;
+      if (b.navigate(actor,order.goal,dt,5.28,flankSwim,{look:bearing(actor,point),ready:.83})) {
+        actor.intent=hnv?'HNV1: 味方の射線に合わせて側面挟撃':'味方の射線に合わせて側面へ';
+        if (enemy && !flankSwim) this.combat.shoot(actor,s,sight,dt);
         return;
       }
     }
@@ -469,14 +478,14 @@ export class Tactics {
       const look=bearing(actor,[contact.x,actor.y+1,contact.z]);
       if (s.inspect!==contact) {
         s.inspect=contact;
-        s.inspectAt=b.clock+.66;
+        s.inspectAt=b.clock+(hnv?.34:.66);
       }
       if (b.clock<s.inspectAt || distance(actor,contact)<1.9) {
         actor.intent=contact===sight.heard?'発砲音の方向を確認':'最後に目撃した地点を警戒';
         b.motion.drive(actor,0,0,dt,{look,ready:.85,brace:.21});
         return;
       }
-      if (b.navigate(actor,contact,dt,3.95,false,{look,ready:.85,brace:.21})) return;
+      if (b.navigate(actor,contact,dt,4.45,false,{look,ready:.85,brace:.21})) return;
     }
     const currentStair=stairLane(actor.x,actor.z);
     if (currentStair && !s.plan?.steps.length) {
@@ -487,19 +496,20 @@ export class Tactics {
     if ((!s.plan?.steps.length && b.clock>=s.replan) ||
         (b.clock>=s.replan && s.plan?.steps[0]?.kind==='walk' && !currentStair && s.plan.steps.length===1)) {
       s.plan=this.choose(actor,s);
-      s.replan=b.clock+4.4+b.rng()*2.9;
+      s.replan=b.clock+(hnv?3.2+b.rng()*2.2:4.4+b.rng()*2.9);
     }
-    if (!enemy && actor.weapon.special!=='range' && actor.tank>65 &&
+    if (!hnv && !enemy && actor.weapon.special!=='range' && actor.tank>65 &&
         this.contacts[actor.team].size===0 && actor.index%4===2 && b.elapsed>16) b.abilities.summon(actor);
     actor.intent=role(actor)==='flank'?'別ルートから裏取り':role(actor)==='anchor'?'射線の通る場所を確保':'味方と塗りを広げる';
     const ink=b.paint.get(actor.x,actor.z,b.world.floor(actor.x,actor.z).layer);
     const swim=ink===actor.team+1 && (actor.tank<actor.tankMax*.77 || s.plan?.cost>9);
-    if (this.follow(actor,s,dt,swim)) {
+    const patrolPose=hnv && !swim?hnv.patrolPose(actor):{};
+    if (this.follow(actor,s,dt,swim,patrolPose)) {
       if (!actor.ride && !enemy && s.plan?.steps[0]?.kind==='walk') this.paintAhead(actor,s.plan?.steps[0]?.to);
       return;
     }
     if (enemy && this.combat.engage(actor,enemy,s,dt,sight)) return;
-    b.motion.drive(actor,0,0,dt,{swim});
+    b.motion.drive(actor,0,0,dt,{swim,...patrolPose});
     this.paintAhead(actor,s.plan?.goal);
   }
 

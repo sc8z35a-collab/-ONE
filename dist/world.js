@@ -1080,21 +1080,102 @@ export class World {
     for (const side of [-1,1]) {
       // Beyond the loop's curves: east of it, and west past the apartment blocks.
       for (let i=0;i<7;i++) this.tower(side>0?96+R()*14:-(152+R()*10),-36+i*12,7+R()*7,6+R()*7,9+R()*27,panelColors[(i+2)%panelColors.length]);
-      for (const sign of [-1,1]) {
-        r.add('box',side*55.1,.64,sign*15.23,.43,1.28,14.6,0xa6a99d,1);
-        this.rail([side*55.1,1.27,sign*8.0],[side*55.1,1.27,sign*22.3],0x879592,8);
-        r.add('box',side*55.6,2.5,sign*6.9,.25,5.0,.25,0x87938b,4);
-      }
-      r.add('box',side*55.6,4.25,0,.22,.38,13.75,0x809086,4);
-      r.add('box',side*55.47,3.87,0,.18,.86,3.71,0x528274,2);
-      r.label('ROUTE 07',side*55.36,3.88,0,3.45,.78,WHITE,side>0?-T:T);
     }
     for (const [a,b] of [[[-37,6.9,9.5],[-20,6.7,-20.9]],[[-20,6.7,-20.9],[4,9.6,-20.8]],[[-37,9.7,-22],[36,9.1,-22]],[[12.8,12.8,-24],[30,8.0,19.9]]]) {
       const cable=(t)=>[mix(a[0],b[0],t),mix(a[1],b[1],t)-Math.sin(t*Math.PI)*.62,mix(a[2],b[2],t)];
       for (let j=0;j<12;j++) r.beam(cable(j/12),cable((j+1)/12),.031,.034,0x525e59,4);
     }
-    r.add('box',-57.2,.07,1.5,4.9,.17,11.3,0x8d9b93,1);
-    r.add('box',57.2,.07,1.5,4.9,.17,11.3,0x8d9b93,1);
     buildOuterCity(this);
+    this.encloseArenaWithApartments();
+  }
+
+  // Encloses all four sides of the arena with continuous apartment buildings so
+  // nobody can walk, jump, or climb out of the map. Where the elevated train
+  // loop exits east and west, an apartment-integrated railway tunnel portal
+  // lets the train pass cleanly while blocking players and NPCs.
+  encloseArenaWithApartments() {
+    const r=this.r;
+    const addApartment=(x,z,w,h,d,yaw,tint,style,topGuard=true)=>{
+      const rot=Math.abs(Math.sin(yaw))>.5;
+      r.add('box',x,h*.5,z,rot?d:w,h,rot?w:d,tint,10,{yaw,label:style});
+      this.obstacle(x,h*.5,z,w,h,d);
+      // Rooftop parapet and cornice cap
+      r.add('box',x,h+.18,z,w+.24,.36,d+.24,0xb4b3a6,1);
+      r.add('box',x,h+.62,z,Math.min(w*.34,4.2),.72,Math.min(d*.34,3.6),0x8f9993,4);
+      // Architectural horizontal slab bands along the street-facing side
+      const cy=Math.cos(yaw), sy=Math.sin(yaw);
+      const faceX=x+sy*(rot?w*.5:d*.5), faceZ=z+cy*(rot?d*.5:w*.5);
+      for (let fy=3.2;fy<h-.8;fy+=3.0) {
+        if (rot) r.add('box',faceX+Math.sign(sy)*.08,fy,z,.18,.14,d-.2,0xc5c1b2,1);
+        else r.add('box',x,fy,faceZ+Math.sign(cy)*.08,w-.2,.14,.18,0xc5c1b2,1);
+      }
+      // Invisible actor-only roof guard prevents ink-climbing over the perimeter out of bounds.
+      if (topGuard) this.obstacle(x,h+6.5,z,w,13,d,false);
+    };
+
+    // 1. North & South continuous apartment backing walls behind the shop/home row
+    //    (z = ±34.65 .. ±39.6), sealing all street alleys while leaving the 3 enterable
+    //    apartment interiors (|z| <= 34.49) and the overhead highway (x ∈ [6,16], y >= 12.6) clear.
+    for (const sign of [-1,1]) {
+      const z=sign*37.15, d=4.9, yaw=sign>0?Math.PI:0;
+      // West of elevated highway
+      addApartment(-25.0,z,62.0,16.4,d,yaw,0xc6bca8,0,true);
+      // Directly underneath elevated highway (capped at 10.4m so highway at 12.67m clears cleanly)
+      addApartment(11.0,z,10.0,10.4,d,yaw,0xb5bbb3,1,false);
+      // East of elevated highway
+      addApartment(36.0,z,40.0,15.8,d,yaw,0xc0b39f,2,true);
+    }
+
+    // 2. East & West apartment walls (x = ±55.6 .. ±63.6) spanning z = -39.6 .. +39.6,
+    //    with integrated railway tunnel portals at z = RAIL.z (-28.65).
+    const railMinZ=RAIL.z-3.15, railMaxZ=RAIL.z+3.15; // [-31.8, -25.5]
+    for (const side of [-1,1]) {
+      const x=side*59.4, w=7.6, yaw=side>0?-T:T;
+      // South corner tower connecting into South row (z = 18 .. 39.6)
+      addApartment(x,28.8,w,17.8,21.6,yaw,0xc7b8a2,0,true);
+      // Mid-south apartment block (z = 4 .. 18). West block uses a 5.0m podium with
+      // upper apartment sky-bridge (y = 11.5..18.2m) and continuous actor-only barrier
+      // across the skyway so actors cannot exit while high lob shots clear cleanly.
+      if (side<0) {
+        addApartment(x,11.0,w,5.0,14.0,yaw,0xb78871,1,false);
+        const skyH=6.7;
+        r.add('box',x,11.5+skyH*.5,11.0,14.0,skyH,w,0xb78871,10,{yaw,label:1});
+        this.obstacle(x,11.5+skyH*.5,11.0,w,skyH,14.0);
+        r.add('box',x,11.5+skyH+.18,11.0,w+.24,.36,14.24,0xb4b3a6,1);
+        this.obstacle(x,14.5,11.0,w,20.0,14.0,false);
+      } else {
+        addApartment(x,11.0,w,15.2,14.0,yaw,0xb78871,1,true);
+      }
+      // Central road-closing apartment block (z = -10 .. 4)
+      addApartment(x,-3.0,w,side<0?13.6:14.8,14.0,yaw,0xaeb8b5,2,true);
+      // North-of-road apartment block reaching up to the train portal (z = -25.5 .. -10)
+      addApartment(x,-17.75,w,16.8,15.5,yaw,0xc9c3af,0,true);
+      // North corner tower beyond the train portal connecting into North row (z = -39.6 .. -31.8)
+      addApartment(x,-35.7,w,18.4,7.8,yaw,0xa6b6bb,3,true);
+
+      // ---- Railway Tunnel Portal integrated into the East/West apartment block ----
+      const portalZ=RAIL.z, portalSpan=railMaxZ-railMinZ;
+      // Solid concrete/apartment ground-floor viaduct base beneath the elevated track (y = 0 .. 5.12)
+      this.solid(x,2.56,portalZ,w,5.12,portalSpan+.2,0x8e958e,13);
+      // Upper apartment stories bridging seamlessly OVER the railway tunnel (y = 10.7 .. 19.0)
+      const bridgeH=8.3;
+      this.solid(x,10.7+bridgeH*.5,portalZ,w,bridgeH,portalSpan+.6,0xc2b9a5,10);
+      r.add('box',x,19.18,portalZ,w+.24,.36,portalSpan+.8,0xb4b3a6,1);
+      this.obstacle(x,25.5,portalZ,w,13,portalSpan+.8,false);
+      // Reinforced concrete portal arch frame, piers, dark tunnel surround, and warning lights
+      const innerFace=side*(59.4-w*.5);
+      for (const pz of [railMinZ+.18,railMaxZ-.18]) {
+        this.solid(x,7.9,pz,w+.12,5.6,.42,0x6e7975,13);
+        r.add('box',innerFace-side*.16,7.9,pz,.34,5.6,.52,0x55635f,4);
+        r.add('box',innerFace-side*.35,6.4,pz,.08,1.1,.28,0xe6b84c,3);
+      }
+      // Portal lintel beam & illuminated 07 LINE tunnel sign facing into the arena
+      r.add('box',innerFace-side*.20,10.82,portalZ,.48,.68,portalSpan+.9,0x495a55,4);
+      r.add('box',innerFace-side*.46,10.82,portalZ,.08,.48,4.1,0x356b60,2);
+      r.label('07 LINE TUNNEL',innerFace-side*.52,10.82,portalZ,3.85,.42,WHITE,yaw);
+      for (const lz of [-2.4,2.4]) r.add('orb',innerFace-side*.46,10.32,portalZ+lz,.22,.22,.22,0xffc766,3);
+      // Actor-only tunnel barrier: lets the elevated train glide through freely while blocking players/NPCs.
+      this.obstacle(side*55.6,7.9,portalZ,1.4,5.5,portalSpan,false);
+    }
   }
 }

@@ -1,18 +1,20 @@
 import {TAU,add,clamp,cross,dot,forward,mix,scale,splatRadius,sub,unit} from './render.js';
 import {SPAWN_X,TEAM,TEAM_INK,randomGenerator} from './world.js';
-import {BASE_TANK,GIGA_TANK,METRO,RAIL,CITY_RADIUS,ZONES,cityExit,floorBounds,giantScale,isCabin,isUnder,localX,sameLevel,zoneOf} from './layout.js';
+import {BASE_TANK,GIGA_TANK,METRO,RAIL,CITY_RADIUS,UNDER_Y,ZONES,cityExit,floorBounds,giantScale,isCabin,isUnder,localX,sameLevel,zoneOf} from './layout.js';
 import {Transit} from './transit.js';
 import {Abilities,drawSquid} from './abilities.js';
 import {Boss} from './boss.js';
 import {drawBossModel} from './boss-model.js';
 import {RAIDER_INK,Raiders,drawRaider} from './raiders.js';
+import {Hazards} from './hazards.js';
 import {drawCabinDoors,drawCabinScenery,drawCabinWindows} from './metro-stage.js';
 import {Tactics} from './tactics.js';
 import {NpcMotion,resetGait,limbJoint} from './npc-motion.js';
 import {NpcPerception} from './npc-perception.js';
+import {HNV1} from './hnv1.js';
 import {stairCrossing,stairEnd,stairFloorY,stairLane,stairNeighborShift,stairRay} from './stairs.js';
 import {actorInRay,collectShapes,traceShapes} from './collision.js';
-import {AUTO_AIM_LOCK,EBOT,INK_EPSILON,OM_HOMING,PAINT_RADIUS_FACTOR,SUPERS,WEAPONS,shotTravel,weaponById} from './weapons.js';
+import {AUTO_AIM_LOCK,CHEATER_WEAPON,EBOT,INK_EPSILON,OM_HOMING,PAINT_RADIUS_FACTOR,SUPERS,WEAPONS,shotTravel,weaponById} from './weapons.js';
 import {SUBWEAPONS,Subweapons,subweaponById} from './subweapons.js';
 import {StageObjects} from './stage-objects.js';
 import {surfacePaintRadius} from './ink.js';
@@ -331,7 +333,7 @@ function respawn(a) {
   a.z=[-2.7,-.88,.94,2.76][a.index%4];
   a.yaw=a.team===0?Math.PI/2:-Math.PI/2;
   a.pitch=-.14;
-  a.hp=a.maxHp=100;
+  a.hp=a.maxHp=a.baseHp??100;
   a.superUntil=0;
   a.activeSpecial=null;
   a.guard=0;
@@ -380,6 +382,7 @@ export class Battle {
     this.mode=mode;
     this.callbacks=callbacks;
     this.timeless=mode==='timeless';
+    this.unlimited=this.timeless || !!options.unlimitedTime;
     this.teamSize=this.timeless || options.teamSize===4?4:8;
     // A seeded match (the offline film) replays exactly from its seed.
     this.seed=Number.isInteger(options.seed)?options.seed:null;
@@ -394,9 +397,10 @@ export class Battle {
     this.subweapons=new Subweapons(this);
     this.boss=new Boss(this);
     this.raiders=new Raiders(this);
+    this.hazards=new Hazards(this);
     this.clock=0;
     this.duration=DURATION;
-    this.left=this.timeless?Infinity:this.duration;
+    this.left=this.unlimited?Infinity:this.duration;
     this.elapsed=0;
     this.countdown=3;
     this.actors=[];
@@ -427,6 +431,24 @@ export class Battle {
     const pool=(random()<.32?this.lowerNav:this.nav).nodes.filter(n=>Math.abs(localX(n.x))<40 && this.world.stand(n.x,n.z,.55));
     const chip=pool[Math.floor(random()*pool.length)];
     this.chip={x:chip.x,y:this.world.floor(chip.x,chip.z).y,z:chip.z,owner:null,yaw:random()*TAU};
+    // Cheater NPC appears once every two matches (50% probability), carrying the
+    // illegally modified オート英馬 II Super with half ink cost and extreme agility/HP.
+    const spawnCheater=options.cheater!==undefined?!!options.cheater:random()<.5;
+    if (spawnCheater && this.actors.length) {
+      const cheater=this.actors[this.actors.length-1];
+      Object.assign(cheater,{
+        isCheater:true,name:'チーター',weapon:CHEATER_WEAPON,
+        baseHp:220,maxHp:220,hp:220,tankMax:240,tank:240,
+        agility:1.85,jumpFactor:1.32,regenFactor:2.2
+      });
+      this.hazards.alert='⚠ チーター出現！違法改造武器「オート英馬 II Super」装備';
+      this.hazards.alertUntil=8.5;
+      this.events.unshift({label:'⚠ チーター出現（オート英馬 II Super）',team:-1,until:8.5});
+    }
+    this.hnv1=new HNV1(this);
+    for (const actor of this.actors) if (!actor.isPlayer) this.hnv1.mind(actor);
+    this.hnv1.mind(this.boss);
+    this.hnv1.mind(this.hazards.goat);
     this.motion=new NpcMotion(this);
     this.perception=new NpcPerception(this);
     this.tactics=new Tactics(this);
@@ -445,6 +467,7 @@ export class Battle {
       hp:EBOT.hp,maxHp:EBOT.hp,baseHp:EBOT.hp,damageFactor:EBOT.damage,paintFactor:EBOT.paint,subId:owner.subId,
       tank:owner.tankMax,tankMax:owner.tankMax,shield:.7,think:0});
     if (saved) Object.assign(clone,saved);
+    this.hnv1.mind(clone);
     this.actors.push(clone);
     return clone;
   }
@@ -607,6 +630,15 @@ export class Battle {
       const t=this.bodyHit(start,end,raider,padding);
       if (t!==null && (!closest || t<closest.t)) closest={actor:raider,t};
     }
+    if (team>=0 && this.hazards) for (const target of this.hazards.targets(start[0])) {
+      const dx=end[0]-start[0], dy=end[1]-start[1], dz=end[2]-start[2], len2=dx*dx+dy*dy+dz*dz;
+      const cy=target.y+(target.isGoat?1.5:target.isSniper?.95:0);
+      const t=len2>1e-8?clamp(((target.x-start[0])*dx+(cy-start[1])*dy+(target.z-start[2])*dz)/len2,0,1):0;
+      const px=start[0]+dx*t-target.x, py=start[1]+dy*t-cy, pz=start[2]+dz*t-target.z;
+      const r=(target.radius??.55)+padding+(target.isGoat?.35:.18);
+      const ry=target.isGoat?2.05+padding:target.isSniper?.95+padding:.52+padding;
+      if (px*px+pz*pz<=r*r && Math.abs(py)<=ry && (!closest || t<closest.t)) closest={actor:target,t};
+    }
     if (this.boss.active && sameLevel(this.boss.x,start[0])) {
       const t=this.bodyHit(start,end,this.boss,padding);
       if (t!==null && (!closest || t<closest.t)) closest={actor:this.boss,t};
@@ -761,6 +793,7 @@ export class Battle {
 
   npc(actor,dt) {
     const sight=this.perception.scan(actor,dt);
+    this.hnv1.tick(actor,dt,sight);
     actor.enemy=sight.visible?sight.enemy:null;
     if (sight.visible && sight.at===this.clock) this.tactics.observe(actor,sight.enemy,sight.foot);
     this.tactics.crew(actor,actor.enemy,dt,sight);
@@ -944,11 +977,12 @@ export class Battle {
     actor.swimming=!actor.giant && grounded && (needsClearance || wantsSwim && (owner===0 || owner===actor.team+1));
     const hostile=grounded && owner && owner!==actor.team+1;
     const resistance=hostile?.88-.037*Math.max(0,(actor.inkPenalty??1)-1):1;
+    const flooded=this.hazards?.underFlood?.active && zoneOf(actor.x)===1 && actor.y<UNDER_Y+this.hazards.underFlood.depth-.1;
     const speed=(actor.giant && !actor.isRaider?1.67:actor.swimming?(owner===actor.team+1?1.98:1.06):1)*resistance*
-      (actor.giant?1:actor.weapon?.weight??1);
+      (actor.giant?1:actor.weapon?.weight??1)*(actor.agility??1)*(flooded?.72:1);
     const x=localX(actor.x),z=actor.z,zone=zoneOf(actor.x);
     if (actor.jumpBuffer>0 && actor.coyote>0 && !needsClearance) {
-      actor.vy=actor.swimming?6.45:6.05;
+      actor.vy=(actor.swimming?6.45:6.05)*(actor.jumpFactor??1);
       actor.swimming=false;
       actor.jumpBuffer=actor.coyote=0;
     }
@@ -1216,6 +1250,7 @@ export class Battle {
       const bend=weapon.swirl?scale(lateral,(this.rng()>.5?1:-1)*weapon.swirl):null;
       const launch=launches[i%launches.length], shot={pos:launch.position.slice(),vel:v,actor,weapon,power,age:0,bend};
       if (tracking) shot.homing={...OM_HOMING};
+      if (weapon.homing) shot.homing={...weapon.homing};
       if (locked) {
         const {turn,cone,reach}=weapon.autoAim;
         shot.homing={turn:turn*(co?weapon.coMode.turn:1),cone,reach,target:locked};
@@ -1230,7 +1265,7 @@ export class Battle {
     actor.tank=Math.max(0,actor.tank-weapon.cost*(locked?weapon.autoAim.ink:1));
     actor.autoAimAt=locked?this.clock:actor.autoAimAt;
     const delay=weapon.delay*(co?weapon.coMode.delay:1);
-    actor.fire=actor.isPlayer?delay:Math.max(.18,delay)+(weapon.charge?.30:.0)+this.rng()*.085;
+    actor.fire=actor.isPlayer?delay:actor.isCheater?delay*.9:Math.max(.18,delay)+(weapon.charge?.30:.0)+this.rng()*.085;
     actor.heat=.51;
     actor.recoil=1;
     actor.muzzleBlocked=launches.every(launch=>!!launch.hit);
@@ -1272,6 +1307,7 @@ export class Battle {
       hit.cabinWindow.damage(amount*.095);
     } else if (hit.train) {
       const amount=force;
+      if (hit.train.train.berserk && this.hazards) this.hazards.hurtTrainBoss(hit.train,amount,shot.actor);
       hit.train.splatter(hit,team,size,shot.structureDamage??amount*.095,shot.structureDamage??amount);
     } else if (hit.stageObject) {
       const damage=shot.structureDamage ?? force;
@@ -1293,7 +1329,7 @@ export class Battle {
     this.burst(add(p,scale(hit.normal,.027)),team,weapon.pellets>1?3:Math.round(6+size*2.4),1.95+size*.74,hit.layer===undefined?0:.009+size*.007);
   }
 
-  damageMetro(x,y,z,radius,amount) {
+  damageMetro(x,y,z,radius,amount,source=null) {
     if (isCabin(x)) return this.cabinTrain(x).damage(amount*.31);
     let lost=0;
     for (const rail of [this.transit,this.metro]) {
@@ -1302,18 +1338,22 @@ export class Battle {
       const nearX=clamp(x,center-9.05,center+9.05), nearZ=clamp(z,line.z+train.lateral-1.6,line.z+train.lateral+1.6);
       if (Math.hypot(x-nearX,z-nearZ)>radius || Math.abs(y-line.y)>4.4) continue;
       const hit=this.traceShot([x,y+.48,z],[nearX,line.y+2.1,nearZ],true);
-      if (!hit || hit.train===rail) lost+=rail.damage(amount*.62);
+      if (!hit || hit.train===rail) {
+        if (rail.train.berserk && this.hazards) lost+=this.hazards.hurtTrainBoss(rail,amount*.62,source);
+        else lost+=rail.damage(amount*.62);
+      }
     }
     return lost;
   }
 
   damage(actor,baseDamage,source,point,cause=null) {
-    const reduced=baseDamage*DAMAGE_SCALE*(source && !source.isPlayer ? .91 : 1);
+    const reduced=cause==='drown'?baseDamage:baseDamage*DAMAGE_SCALE*(source && !source.isPlayer ? .91 : 1);
     // A copy fights on its caster's record.
     const credit=source?.cloneOf ?? source;
-    if (actor.isBoss || actor.isRaider) {
-      const lost=actor.isBoss?this.boss.hurt(reduced):this.raiders.hurt(actor,reduced,credit);
-      if (lost && source) {
+    if (actor.isGoat || actor.isBoss || actor.isRaider || actor.isSniper || actor.isRogueDrone) {
+      const lost=actor.isGoat?this.hazards.hurtGoat(reduced,credit):actor.isBoss?this.boss.hurt(reduced):actor.isRaider?this.raiders.hurt(actor,reduced,credit):
+        actor.isSniper?this.hazards.hurtSniper(actor,reduced,credit):this.hazards.hurtDrone(actor,reduced,credit);
+      if (lost && source && source.team>=0) {
         source.superCharge=Math.min(100,source.superCharge+lost*.25*chargeGain(source));
         credit.dealt=(credit.dealt??0)+lost;
         this.burst(point,source.team,5,2.14);
@@ -1322,14 +1362,14 @@ export class Battle {
       }
       return lost;
     }
-    if (actor.down>0 || actor.shield>0 || actor.lift || actor.ride) return 0;
-    const lost=Math.min(actor.hp,this.abilities.reduce(actor,reduced));
+    if (actor.down>0 || (actor.shield>0 && cause!=='drown') || actor.lift || actor.ride) return 0;
+    const lost=Math.min(actor.hp,cause==='drown'?reduced:this.abilities.reduce(actor,reduced));
     if (!(lost>0)) return 0;
     actor.hp-=lost;
     actor.damageAge=0;
     actor.lastDamageAt=this.clock;
-    if (source) source.superCharge=Math.min(100,source.superCharge+lost*.36*chargeGain(source));
-    if (credit) credit.dealt=(credit.dealt??0)+lost;
+    if (source && source.team>=0) source.superCharge=Math.min(100,source.superCharge+lost*.36*chargeGain(source));
+    if (credit && credit.team>=0) credit.dealt=(credit.dealt??0)+lost;
     if (source?.isPlayer) this.callbacks.sound?.('hit');
     if (actor.isPlayer) this.callbacks.sound?.('damage');
     this.burst(point,source?.team ?? -1,6,2.41);
@@ -1337,25 +1377,25 @@ export class Battle {
       this.callbacks.cue?.('hit',actor,source);
       return lost;
     }
-    const boss=cause==='boss' || !source;
-    actor.down=actor.cloneOf?Infinity:boss?BOSS_RESPAWN_SECONDS:RESPAWN_SECONDS;
-    actor.downBy=boss?'boss':source.isRaider?'raid':'crew';
+    const drown=cause==='drown', trainBoss=cause==='trainBoss', goat=cause==='goat' || !!source?.isGoat;
+    const boss=cause==='boss' || (!source && !drown && !trainBoss && !goat);
+    actor.down=actor.cloneOf?Infinity:(boss || trainBoss || goat)?BOSS_RESPAWN_SECONDS:RESPAWN_SECONDS;
+    actor.downBy=drown?'drown':goat?'goat':trainBoss?'trainBoss':boss?'boss':source.isRaider?'raid':(source.isSniper || source.isRogueDrone)?'hazard':'crew';
     actor.swimming=actor.inkSwimming=actor.climbing=false;
     actor.downs++;
     this.abilities.clearSuper(actor);
     if (actor.cloneOf) actor.maxHp=actor.baseHp??actor.maxHp;
-    if (source) {
+    if (source && source.team>=0) {
       // Splatting a copy is not an elimination: it earns no kill and no EXP.
       if (!actor.cloneOf) credit.kills++;
-      if (source.team>=0) {
-        const {x,y,z}=actor, floor=this.world.floor(x,z);
-        const hit=this.traceShot([x,Math.max(y,floor.y)+.12,z],[x,floor.y-.13,z],true,false);
-        if (hit) this.splat(hit,{actor:source,weapon:WEAPONS[0]},1.43);
-      }
+      const {x,y,z}=actor, floor=this.world.floor(x,z);
+      const hit=this.traceShot([x,Math.max(y,floor.y)+.12,z],[x,floor.y-.13,z],true,false);
+      if (hit) this.splat(hit,{actor:source,weapon:WEAPONS[0]},1.43);
     }
     this.burst([actor.x,actor.y+1.05,actor.z],source?.team ?? -1,actor.cloneOf?12:26,actor.cloneOf?3.1:4.4);
     this.abilities.rings.push({x:actor.x,y:actor.y+.06,z:actor.z,r:2.6,team:Math.max(0,source?.team??actor.team),until:this.clock+.55});
-    this.events.unshift({label:(source?.name ?? this.boss.name)+'  ▸  '+actor.name,team:source?.team ?? -1,until:this.clock+3.4});
+    const killer=drown?'水没・溺死':goat?'破壊神ゴート':trainBoss?(this.hazards?.trainBoss?.name ?? '暴走列車'):(source?.name ?? this.boss.name);
+    this.events.unshift({label:killer+'  ▸  '+actor.name,team:source?.team ?? -1,until:this.clock+3.4});
     this.events.length=Math.min(this.events.length,4);
     if (source?.isPlayer) this.callbacks.sound?.('down');
     this.callbacks.cue?.('down',actor,source);
@@ -1369,7 +1409,7 @@ export class Battle {
     const team=source.team;
     if (lost>0) {
       const mine=source.isPlayer || source.cloneOf?.isPlayer || this.mode==='watch';
-      const finished=target.isBoss || target.isRaider?!target.active:target.down>0;
+      const finished=target.isGoat || target.isBoss || target.isRaider || target.isSniper || target.isRogueDrone?!target.active:target.down>0;
       const kind=mine?finished?2:1:3;
       const prior=this.inkImpacts.find(hit=>hit.at===this.clock && hit.target===target && hit.team===team);
       if (prior) prior.kind=prior.kind===3 || kind===3?Math.min(prior.kind,kind):Math.max(prior.kind??1,kind);
@@ -1564,13 +1604,13 @@ export class Battle {
       dt-=waiting;
       if (dt<=0) return;
     }
-    if (!this.timeless) dt=Math.min(dt,this.left);
+    if (!this.unlimited) dt=Math.min(dt,this.left);
     if (dt<=0) {
       this.finishMatch();
       return;
     }
     this.clock+=dt;
-    if (this.timeless) this.elapsed+=dt;
+    if (this.unlimited) this.elapsed+=dt;
     else {
       this.left=Math.max(0,this.left-dt);
       this.elapsed=this.duration-this.left;
@@ -1616,11 +1656,11 @@ export class Battle {
         if (actor.isPlayer) this.control(actor,input,dt,camera);
         else this.npc(actor,dt);
       }
-      const factor=1-(actor.inkPenalty??0)*.072;
+      const factor=(1-(actor.inkPenalty??0)*.072)*(actor.regenFactor??1);
       const refill=actor.swimming?(actor.inkSwimming?48:18):actor.heat<=0?(actor.isPlayer?13:17):0;
       actor.tank=Math.min(actor.tankMax,actor.tank+refill*dt*factor);
       this.pickupChip(actor);
-      if (actor.damageAge>1.9) {
+      if (actor.damageAge>(actor.isCheater?.9:1.9)) {
         const recovery=actor.swimming?(actor.inkSwimming?28:20):19;
         actor.hp=Math.min(actor.maxHp,actor.hp+recovery*dt*factor);
       }
@@ -1631,11 +1671,12 @@ export class Battle {
     this.retireClones();
     if (!this.timeless) this.boss.update(dt);
     this.raiders.update(dt);
+    this.hazards.update(dt);
     for (const raider of this.raiders.members) if (raider.active) this.pickupChip(raider);
     if (this.mode==='watch' && this.cameraActor().down>0) this.cycle();
     this.paint.advance(dt);
     this.events=this.events.filter(event=>event.until>this.clock);
-    if (!this.timeless && this.left<=0) this.finishMatch();
+    if (!this.unlimited && this.left<=0) this.finishMatch();
   }
 
   finishMatch() {
@@ -1680,6 +1721,7 @@ export class Battle {
     this.subweapons.draw(renderer,viewX);
     this.boss.draw(renderer,viewX);
     this.raiders.draw(renderer,viewX);
+    this.hazards?.draw(renderer,viewX,viewZ);
     const shots=this.shots;
     for (let i=0;i<shots.length;i++) {
       const shot=shots[i], sp=shot.pos;
@@ -1773,12 +1815,13 @@ function gunPose(a,pose,weapon=a.weapon??WEAPONS[0]) {
     const dy=y-1.25,dz=z-.437-recoil;
     return pose.loc(x+pose.sway*.87,1.25+pose.rise*.87+dy*c-dz*s,.437+pose.lean*.87+dy*s+dz*c);
   };
-  const barrel=weapon.id==='charge'?.56:weapon.id==='lob'?.34:weapon.id==='rd2'?.44:weapon.id==='td'?.30:.315;
+  const barrel=weapon.id==='charge'?.56:weapon.id==='lob' || weapon.id==='autoeima' || weapon.id==='autoeima2s'?.34:weapon.id==='rd2'?.44:weapon.id==='td'?.30:.315;
   return {at,pitch,barrel,c,s,recoil,pose};
 }
 
 export function drawCrew(r,a,time,showEffects=true) {
-  const tint=TEAM[a.team], bright=TEAM_INK[a.team];
+  const cheater=!!a.isCheater;
+  const tint=cheater?0x27152e:TEAM[a.team], bright=cheater?0xff267a:TEAM_INK[a.team];
   // Render-only detail: hit detection collects the plain shapes, so the
   // silhouette and every pose stay identical to what shots are tested against.
   const view=r.viewPoint;
@@ -1794,6 +1837,11 @@ export function drawCrew(r,a,time,showEffects=true) {
   if (r.fidelity && showEffects && range<60 && !a.climbing && !(a.airborne ?? Math.abs(a.vy??0)>.48)) {
     _dynLabel.label=.62;
     r.add('shade',a.x,a.y+.016,a.z,a.swimming?1.05:1.25,1,a.swimming?1.35:1.25,0,28,_dynLabel);
+  }
+  if (showEffects && cheater && !a.swimming) {
+    const pulse=.18*Math.sin(time*14);
+    r.add('ripple',a.x,a.y+2.18+pulse*.2,a.z,.76,.03,.76,0xff267a,12,{dynamic:true,label:.22});
+    r.add('ripple',a.x,a.y+.06,a.z,1.55+pulse,.03,1.55+pulse,0xff267a,12,{dynamic:true,label:.35});
   }
   if (showEffects && a.guard>0) {
     const pulse=.15*Math.sin(time*8);
@@ -2030,7 +2078,7 @@ export function drawCrew(r,a,time,showEffects=true) {
     part('box',0,1.13,.40,.57,.12,.14,BOOT,4);
     return;
   }
-  const long=weapon.id==='charge', wide=weapon.id==='fan', heavy=weapon.id==='lob', dual=weapon.id==='dual';
+  const long=weapon.id==='charge', wide=weapon.id==='fan' || weapon.id==='autoeima' || weapon.id==='autoeima2s', heavy=weapon.id==='lob', dual=weapon.id==='dual';
   const quad=weapon.id==='rd2', cannon=weapon.id==='td';
   const barrel=gun.barrel;
   const width=cannon?.37:quad?.34:heavy?.33:wide?.30:.235;
@@ -2092,6 +2140,10 @@ export function drawCrew(r,a,time,showEffects=true) {
     gunPart('bevel',-.415,1.39,.48,.20,.17,.33,0xbad7ca,8);
     for (const sign of [-1,1]) gunPart('box',-.415+sign*.124,1.36,.52,.045,.19,.38,TRIM);
   }
+  if (weapon.id==='autoeima' || weapon.id==='autoeima2s') {
+    gunPart('cylinder',-.415,1.46,.54,.17,.055,.17,GRAPHITE,4);
+    gunPart('orb',-.415,1.495,.54,.11,.085,.11,weapon.id==='autoeima2s'?0xff267a:bright,3);
+  }
   if (showEffects && (a.recoil>.65 && !a.muzzleBlocked || a.charge>.12)) {
     const flash=a.charge>.12?.071+.095*a.charge:cannon?.46:quad?.27:.14;
     for (const side of dual?[-1,1]:[0]) gunPart('orb',-.415+side*.13,1.30,dual?1.063:.785+barrel*.85,flash,flash,flash*1.7,bright,3);
@@ -2102,11 +2154,11 @@ export function drawCrew(r,a,time,showEffects=true) {
 function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor,hit,tint,bright,yaw,aimYaw,showEffects}) {
   const {cy,sy,loc,pace,fore,lateral,airborne,rising,crouch,swing,transfer,rise,sway,lean}=pose;
   const ax=a.x, ay=a.y, az=a.z;
-  const visor=a.team===0?0x4c8c99:0x825650;
+  const visor=a.isCheater?0xff267a:a.team===0?0x4c8c99:0x825650;
   part(soft,0,1.07,0,.64,.72,.44,tint,20,.10);
   part(soft,0,.80,.02,.57,.17,.41,GRAPHITE,21);
-  part('orb',0,1.72,-.01,.66,.6,.62,armor,20,.10);
-  part(soft,0,1.715,.27,.54,.2,.13,visor,8,.068);
+  part('orb',0,1.72,-.01,.66,.6,.62,a.isCheater?0x221528:armor,20,.10);
+  part(soft,0,1.715,.27,.54,.2,.13,visor,a.isCheater?3:8,.068);
   part(soft,0,1.43,.02,.36,.18,.32,GRAPHITE,21);
   const capacity=a.tankMax ?? BASE_TANK, tankHeight=capacity>BASE_TANK?1.11:.79;
   const fill=tankHeight*.70*clamp(a.tank/capacity,0,1);
@@ -2161,7 +2213,7 @@ function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor
     r.beam(loc(0,headY+.2,headZ-.1),loc(0,1.13,.40),.075,.075,GRAPHITE,4,_dyn);
     return;
   }
-  const wid=weapon.id, big=wid==='lob' || wid==='rd2' || wid==='td', barrel=gun.barrel, width=big?.34:wid==='fan'?.30:.235;
+  const wid=weapon.id, big=wid==='lob' || wid==='rd2' || wid==='td', wide=wid==='fan' || wid==='autoeima' || wid==='autoeima2s', barrel=gun.barrel, width=big?.34:wide?.30:.235;
   const gp=gun.pose, gcy=gp.cy, gsy=gp.sy, gc=gun.c, gs=gun.s, grec=gun.recoil;
   const gsway=gp.sway*.87, grise=1.25+gp.rise*.87, glean=.437+gp.lean*.87;
   _dynYP.yaw=aimYaw;
@@ -2175,6 +2227,7 @@ function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor
   gunPart('box',-.415,1.343,.49,width+.02,.12,.41,tint,20);
   gunPart('cylinder',-.415,1.30,.69+barrel*.30,big?.25:.14,barrel,big?.25:.14,TRIM,4,Math.PI/2);
   gunPart('box',-.415,1.205,.359,.125,.207,.17,BOOT,21,-.20);
+  if (wid==='autoeima' || wid==='autoeima2s') gunPart('orb',-.415,1.47,.54,.12,.09,.12,wid==='autoeima2s'?0xff267a:bright,3);
   if (showEffects && (a.recoil>.65 && !a.muzzleBlocked || a.charge>.12)) {
     const flash=a.charge>.12?.071+.095*a.charge:wid==='td'?.46:wid==='rd2'?.27:.14;
     gunPart('orb',-.415,1.30,.785+barrel*.85,flash,flash,flash*1.7,bright,3);

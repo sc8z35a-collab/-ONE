@@ -45,6 +45,7 @@
         </div>
         <div class="hero-toolbar">
           <button id="loadout" class="text-action" type="button"><span aria-hidden="true">◇</span> 武器を選ぶ <b id="active-weapon">シューター</b></button>
+          <button id="time-limit" class="text-action" type="button" aria-pressed="false" title="試合時間（7分 / 無制限）の切替"><span aria-hidden="true">∞</span> 試合時間 <b id="time-limit-state">7分</b></button>
           <button id="how" class="text-action" type="button"><span aria-hidden="true">ⓘ</span> 操作ガイド</button>
           <button id="film" class="text-action" type="button"><span aria-hidden="true">●</span> NPC戦を動画に書き出す</button>
           <span id="career" class="text-action career" title="撃破1回につき30 EXP。試合終了後に加算されます。"><span aria-hidden="true">★</span> EXP <b id="career-exp">0</b> · Lv.<b id="career-level">1</b></span>
@@ -86,8 +87,8 @@
       </header>
       <div id="squads"><div id="cyan-squad"></div><div id="orange-squad"></div></div>
 
-      <div id="boss-hud" hidden aria-label="オオモノイカの体力">
-        <div><b>オオモノイカ</b><span id="boss-phase">第1段階</span><strong id="boss-pct">100%</strong></div>
+      <div id="boss-hud" hidden aria-label="ボスの体力">
+        <div><b id="boss-name">オオモノイカ</b><span id="boss-phase">第1段階</span><strong id="boss-pct">100%</strong></div>
         <div class="boss-track"><i id="boss-bar"></i></div>
       </div>
       <div id="boss-alert" hidden role="status"></div>

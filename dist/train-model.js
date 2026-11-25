@@ -69,7 +69,8 @@ export function drawTrain(r,t,clock,line=RAIL) {
     }
     return result;
   };
-  const stripe=line.cabinX===RAIL.cabinX?STRIPE:0x865768;
+  const berserk=!!t.berserk;
+  const stripe=berserk?0xff3040:line.cabinX===RAIL.cabinX?STRIPE:0x865768;
   const axle=[basis[0],basis[2],rotate(0,-1,0)];
   const front=[rotate(0,0,-1),basis[1],basis[0]];
   const rear=[basis[2],basis[1],rotate(-1,0,0)];
@@ -81,37 +82,42 @@ export function drawTrain(r,t,clock,line=RAIL) {
     r.label(text,...at(x,y,z),width,height,tint,0,0,{dynamic:true,basis:bodyAxes(axes)});
   for (const car of [-1,1]) {
     const c=CAR_CENTERS[car>0?1:0], nose=c+car*4.41, inner=c-car*4.31;
-    piece('bevel',c,.907,0,8.77,.28,2.66,FRAME);
+    piece('bevel',c,.907,0,8.77,.28,2.66,berserk?0x2d1b20:FRAME);
     piece('box',c,1.025,0,8.78,.11,2.61,0x8d9a93);
     for (const seat of [-3.45,0,3.45]) for (const side of [-1,1]) {
       piece('bevel',c+seat,1.344,side*.873,1.35,.132,.525,0x789b91,2);
       piece('bevel',c+seat,1.56,side*1.118,1.36,.403,.195,0x819d92,2);
     }
     for (const post of [-1.65,1.65]) piece('cylinder',c+post,1.99,.34,.039,1.8,.039,STEEL);
-    piece('bevel',c,3.132,0,8.83,.50,2.72,ROOF);
+    piece('bevel',c,3.132,0,8.83,.50,2.72,berserk?0x3a2026:ROOF);
+    if (berserk) {
+      const pulse=Math.sin(clock*18+car)>.0?0xff2838:0xff8826;
+      piece('orb',c,3.45,0,.85,.42,.85,pulse,3);
+      piece('box',c,3.28,0,8.6,.12,.38,0xff3040,3);
+    }
     piece('box',c,2.881,0,8.78,.127,2.62,0xaab4aa);
     for (const side of [-1,1]) piece('box',inner,1.97,side*1.05,.16,1.94,.43,0xaebcb3);
     piece('box',inner,2.87,0,.16,.15,1.68,0xaebcb3);
-    piece('bevel',nose-car*.18,1.43,0,.59,.93,2.63,SILVER);
-    piece('bevel',nose-car*.18,2.94,0,.59,.18,2.63,SILVER);
-    for (const side of [-1,1]) piece('bevel',nose-car*.18,2.34,side*1.18,.59,1.16,.27,SILVER);
-    drawTrainWindow(r,t,'cab:'+car,at(nose+car*.157,2.37,0),2.10,.83,WINDOW,bodyAxes(car===1?front:rear));
+    piece('bevel',nose-car*.18,1.43,0,.59,.93,2.63,berserk?0x4b2a30:SILVER);
+    piece('bevel',nose-car*.18,2.94,0,.59,.18,2.63,berserk?0x4b2a30:SILVER);
+    for (const side of [-1,1]) piece('bevel',nose-car*.18,2.34,side*1.18,.59,1.16,.27,berserk?0x4b2a30:SILVER);
+    drawTrainWindow(r,t,'cab:'+car,at(nose+car*.157,2.37,0),2.10,.83,berserk?0x8a1e28:WINDOW,bodyAxes(car===1?front:rear));
     piece('box',nose+car*.203,2.44,0,.028,.64,.034,0x667774);
-    piece('box',nose+car*.139,1.62,0,.09,.18,2.47,stripe);
+    piece('box',nose+car*.139,1.62,0,.09,.18,2.47,stripe,berserk?3:4);
     piece('bevel',nose+car*.116,1.09,0,.22,.22,2.56,EDGE);
     piece('box',nose+car*.223,.81,0,.24,.17,.42,RUBBER);
-    sideSign(line.integrity?'B1 LOOP':'07 LOCAL',nose+car*.220,2.83,0,1.18,.21,0xeff2de,car===1?front:rear);
+    sideSign(berserk?'RUNAWAY':line.integrity?'B1 LOOP':'07 LOCAL',nose+car*.220,2.83,0,1.18,.21,berserk?0xff4d5a:0xeff2de,car===1?front:rear);
     for (const side of [-1,1]) {
       const z=side*1.323;
-      const light=t.direction===car && t.phase!=='recover'?0xf1e9c5:0xa06452;
+      const light=berserk?0xff2434:t.direction===car && t.phase!=='recover'?0xf1e9c5:0xa06452;
       piece('bevel',nose+car*.209,1.71,side*.93,.10,.23,.34,RUBBER);
       piece('box',nose+car*.268,1.715,side*.93,.031,.142,.227,light,3);
       r.beam(at(nose+car*.213,2.02,side*.62),at(nose+car*.245,2.49,side*.30),.025,.028,RUBBER,4,{dynamic:true});
       piece('box',c,2.914,z,8.74,.054,.067,EDGE);
       piece('box',c,1.108,z,8.71,.103,.052,EDGE);
       for (const [dx,w] of [[-3.40,1.34],[0,2.55],[3.40,1.34]]) {
-        piece('bevel',c+dx,1.516,z,w,.80,.16,SILVER);
-        piece('box',c+dx,1.759,z+side*.087,w,.13,.017,stripe,2);
+        piece('bevel',c+dx,1.516,z,w,.80,.16,berserk?0x462930:SILVER);
+        piece('box',c+dx,1.759,z+side*.087,w,.13,.017,stripe,berserk?3:2);
         piece('box',c+dx,1.655,z+side*.086,w,.041,.018,GOLD,2);
         piece('box',c+dx,2.841,z,w,.10,.145,SILVER);
         piece('box',c+dx,1.969,z,w,.10,.145,SILVER);

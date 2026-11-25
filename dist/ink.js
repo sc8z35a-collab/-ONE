@@ -554,6 +554,48 @@ export class Paint {
     this.touchLayers((1<<this.layers)-1);
   }
 
+  // Washes away ink across the specified layers and optional world-coordinate box
+  // (used by rain, tsunami waves, and underground flooding). Skips dry cells.
+  wash(layerMask,amount,minX=-Infinity,maxX=Infinity,minZ=-Infinity,maxZ=Infinity) {
+    if (this.visualOnly || !(amount>0)) return 0;
+    const w=this.w, h=this.h, ls=this.layerSize, bx=this.boundX, bz=this.boundZ;
+    const cyan=this.cyan, amber=this.amber, flowX=this.flowX, flowZ=this.flowZ;
+    const v0=Number.isFinite(minZ)?Math.max(0,Math.floor(((minZ/bz+1)*.5)*h)):0;
+    const v1=Number.isFinite(maxZ)?Math.min(h-1,Math.ceil(((maxZ/bz+1)*.5)*h)):h-1;
+    if (v0>v1) return 0;
+    let washed=0;
+    for (let layer=0;layer<this.layers;layer++) {
+      if (!(layerMask & (1<<layer))) continue;
+      const origin=inkOrigin(layer), regionBase=REGION_FOR_LAYER[layer]*ls;
+      const u0=Number.isFinite(minX)?Math.max(0,Math.floor((((minX-origin)/bx+1)*.5)*w)):0;
+      const u1=Number.isFinite(maxX)?Math.min(w-1,Math.ceil((((maxX-origin)/bx+1)*.5)*w)):w-1;
+      if (u0>u1) continue;
+      const baseLayer=layer*ls;
+      for (let v=v0;v<=v1;v++) {
+        const rowOff=v*w;
+        for (let u=u0;u<=u1;u++) {
+          const local=rowOff+u, idx=baseLayer+local;
+          const c=cyan[idx], a=amber[idx], depth=c+a;
+          if (depth===0) continue;
+          const next=amount>=1?0:depth-amount;
+          if (next<COVERAGE) {
+            cyan[idx]=0;
+            amber[idx]=0;
+            flowX[regionBase+local]=0;
+            flowZ[regionBase+local]=0;
+          } else {
+            const scale=next/depth;
+            cyan[idx]=c*scale;
+            amber[idx]=a*scale;
+          }
+          this.publish(idx);
+          washed++;
+        }
+      }
+    }
+    return washed;
+  }
+
   index(x,z,layer) {
     const u=Math.floor(((x-inkOrigin(layer))/this.boundX+1)*.5*this.w), v=Math.floor((z/this.boundZ+1)*.5*this.h);
     if (u<0 || u>=this.w || v<0 || v>=this.h) return -1;

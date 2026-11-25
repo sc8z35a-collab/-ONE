@@ -7,9 +7,10 @@ import {Paint} from './ink.js';
 import {CLOUD_PROTOCOL,INK_SIZE,SOCKET_PROTOCOL,applyInkPacket,resetVisualInk} from './ink-wire.js';
 import {METRO,giantHeight,sameLevel,zoneOf} from './layout.js';
 import {Raiders} from './raiders.js';
+import {Hazards} from './hazards.js';
 import {clamp} from './render.js';
 import {Transit} from './transit.js';
-import {weaponById} from './weapons.js';
+import {shotWeaponById,weaponById} from './weapons.js';
 import {Subweapons} from './subweapons.js';
 
 const PATH='/api/inkshift', BUTTONS=['press','jump','super','drone','use','cycle','sub','co'];
@@ -80,7 +81,8 @@ export async function createCloudRoom(options,access,controller=new AbortControl
 
 function makeScene(world,paint,frame) {
   const b=Object.create(Battle.prototype);
-  Object.assign(b,{world,paint,actors:[],crewShapes:new WeakMap(),mode:frame.mode,teamSize:frame.teamSize,timeless:frame.timeless,player:null});
+  Object.assign(b,{world,paint,actors:[],crewShapes:new WeakMap(),mode:frame.mode,teamSize:frame.teamSize,timeless:frame.timeless,
+    unlimited:!!(frame.unlimited ?? frame.timeless),player:null});
   b.transit=new Transit(world);
   b.metro=new Transit(world,null,METRO);
   b.abilities=new Abilities(b);
@@ -88,6 +90,7 @@ function makeScene(world,paint,frame) {
   b.subweapons=new Subweapons(b);
   b.boss=new Boss(b);
   b.raiders=new Raiders(b);
+  b.hazards=new Hazards(b);
   return b;
 }
 
@@ -333,7 +336,8 @@ export class RemoteMatch {
     if (f.total!==undefined) this.paint.total=f.total;
     if (f.zoneCount) this.paint.zoneCount=f.zoneCount;
     if (f.zoneTotal) this.paint.zoneTotal=f.zoneTotal;
-    Object.assign(b,{clock:f.clock,elapsed:f.elapsed,left:b.timeless?Infinity:f.left,countdown:f.countdown,finished:f.finished,
+    if ('unlimited' in f) b.unlimited=!!f.unlimited;
+    Object.assign(b,{clock:f.clock,elapsed:f.elapsed,left:b.unlimited?Infinity:f.left,countdown:f.countdown,finished:f.finished,
       watching:f.watching});
     if (f.events) b.events=f.events;
     if (f.chip) b.chip=f.chip;
@@ -365,7 +369,7 @@ export class RemoteMatch {
         copyMotion(feet,dest.feet,FEET,this.motions,false,['3','7']);
         dest.feet=feet;
       }
-      dest.weapon=weaponById(row.weapon);
+      dest.weapon=shotWeaponById(row.weapon);
       if (row.isPlayer) {
         b.player=dest;
         if (this.pendingLoadout?.weapon===row.weapon && this.pendingLoadout.sub===row.subId) this.pendingLoadout=null;
@@ -397,6 +401,7 @@ export class RemoteMatch {
       return dest;
     });
     Object.assign(b.raiders,f.raiders,{members});
+    if (f.hazards && b.hazards) b.hazards.applySnapshot(f.hazards);
     const previousShots=new Map((snap?[]:b.shots??[]).filter(shot=>Number.isSafeInteger(shot.id)).map(shot=>[shot.id,shot]));
     b.shots=f.shots.map(([x,y,z,vx,vy,vz,team,weaponId,size,id])=>{
       const position=[x,y,z], previous=previousShots.get(id);

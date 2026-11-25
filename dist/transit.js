@@ -42,7 +42,7 @@ function estimateRun(distance,speed,wetness,limit) {
 const freshTrain=(side,line)=>({
   x:side*line.x, stop:side, direction:-side, phase:'dwell', wait:line.dwell, speed:0,
   doorOpen:0, wetness:0, lateral:0, sideSpeed:0, yaw:0, roll:0, lift:0,routePitch:0,
-  risk:0, spray:0, inkColor:0x35bcaa, marks:[], windows:{}, viewDirection:-side
+  risk:0, spray:0, inkColor:0x35bcaa, marks:[], windows:{}, viewDirection:-side, berserk:false
 });
 
 export class Transit {
@@ -84,7 +84,7 @@ export class Transit {
   stopInfo() {
     const next=this.nextStop(), stop=stationAt(next.level,next.side);
     const t=this.train,c=this.connection;
-    const status=this.failed()?'列車を復旧中':c?.waiting?'信号待ち':t.phase==='return'?'復旧運転中':null;
+    const status=t.berserk?'暴走中・敵ボス化':this.failed()?'列車を復旧中':c?.waiting?'信号待ち':t.phase==='return'?'復旧運転中':null;
     const seconds=t.stop?Math.max(0,t.wait):c?CONNECTION_TIME-c.age:this.runSeconds(next.side);
     return {station:stop,seconds:c?.waiting?null:Math.ceil(seconds),docked:!!t.stop,doors:t.doorOpen>.70,status};
   }
@@ -118,7 +118,7 @@ export class Transit {
 
   arrival(fromLevel,fromSide,toLevel,toSide,ready) {
     const t=this.train;
-    if (this.failed() || t.phase==='return' || this.integrity<150 || this.connection?.waiting) return Infinity;
+    if (t.berserk || this.failed() || t.phase==='return' || this.integrity<150 || this.connection?.waiting) return Infinity;
     const next=this.nextStop(), stops=lineStops(this.section), line=this.line;
     // A line never changes level: other levels are reached by the stairs.
     if (fromLevel!==this.section || toLevel!==null && toLevel!==this.section) return Infinity;
@@ -197,7 +197,7 @@ export class Transit {
 
   damage(amount) {
     const t=this.train;
-    if (this.failed() || t.phase==='return' || !(amount>0)) return 0;
+    if (t.berserk || this.failed() || t.phase==='return' || !(amount>0)) return 0;
     const lost=Math.min(amount,this.integrity);
     this.integrity-=lost;
     if (this.integrity<=0) {
@@ -210,6 +210,29 @@ export class Transit {
   step(dt) {
     const t=this.train, line=this.line;
     t.viewDirection=mix(t.viewDirection,t.direction,1-Math.exp(-dt*2.4));
+    if (t.berserk) {
+      t.stop=0;
+      t.doorOpen=0;
+      t.phase='drive';
+      t.wetness=0;
+      t.risk=0;
+      const topSpeed=lineSpeed(this.section)*2.25;
+      t.speed=mix(t.speed,topSpeed,clamp(dt*3.8,0,1));
+      t.roll=Math.sin(this.time*18)*.09;
+      t.lift=Math.abs(Math.sin(this.time*24))*.08;
+      t.lateral=Math.sin(this.time*13)*.12;
+      t.yaw=Math.sin(this.time*15)*.03;
+      if (line.loop) {
+        t.direction=1;
+        t.x=loopWrap(t.x+t.speed*dt);
+      } else {
+        const limit=Math.min(line.x+8,line.edge-10);
+        t.x+=t.direction*t.speed*dt;
+        if (t.x>=limit) {t.x=limit;t.direction=-1;}
+        else if (t.x<=-limit) {t.x=-limit;t.direction=1;}
+      }
+      return;
+    }
     if (t.phase==='connector') {
       const c=this.connection;
       const signal=CONNECTION_TIME-PORTAL_TIME;
@@ -358,6 +381,7 @@ export class Transit {
     const px=actor.x-line.center;
     if (sameLevel(actor.x,line.center) && Math.abs(actor.y-line.platformY)<.55
       && Math.abs(actor.z-line.platformZ)<2.13 && Math.abs(Math.abs(px)-line.x)<8.85) {
+      if (t.berserk) return {kind:'busy',label:'列車暴走中！乗車不可'};
       if (this.failed() || t.phase==='return') return {kind:'busy',label:'列車を復旧中'};
       if (t.stop && t.doorOpen>.70 && t.wait>BOARDING_MARGIN && Math.abs(px-t.x)<8.85) {
         return unavailable ?? {kind:'cabin-board',label:'乗車 · '+stationAt(this.section,t.stop).name};
@@ -492,13 +516,13 @@ export class Transit {
 
   carry(actor,dt) {
     if (isCabin(actor.x)) {
-      if (!sameLevel(actor.x,this.line.cabinX) || !this.failed()) return false;
+      if (!sameLevel(actor.x,this.line.cabinX) || !this.failed() && !this.train.berserk) return false;
       this.unboard(actor,true);
       return true;
     }
     if (this.metro) return false;
     if (actor.ride) {
-      if (this.failed()) this.unboard(actor,true);
+      if (this.failed() || this.train.berserk) this.unboard(actor,true);
       else this.placeRider(actor);
       return true;
     }

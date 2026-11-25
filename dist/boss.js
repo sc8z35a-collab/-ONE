@@ -204,7 +204,7 @@ export class Boss {
 
   update(dt) {
     const b=this.battle;
-    if (!this.spawned && b.duration-b.left>=BOSS_TIME-1e-6) this.spawn();
+    if (!this.spawned && b.elapsed>=BOSS_TIME-1e-6) this.spawn();
     if (!this.active) return;
     const targets=this.targets();
     this.updateAttacks(dt,targets);
@@ -214,6 +214,7 @@ export class Boss {
       return;
     }
     const sight=b.perception.scan(this,dt);
+    b.hnv1?.tick(this,dt,sight);
     this.target=sight.visible?sight.enemy:null;
     const contact=sight.foot && b.clock-sight.at<6?sight.foot:sight.heard;
     if (!contact && (b.clock>this.patrolAt || !this.patrol || distance(this,this.patrol)<3)) {
@@ -231,7 +232,8 @@ export class Boss {
     if (!sight.visible || b.clock<Math.max(this.next,sight.react) || range>38+this.phase*2) return;
     const bearing=Math.atan2(goal.x-this.x,this.z-goal.z);
     if (Math.cos(this.yaw-bearing)<.95) return;
-    const ready=targets.filter(actor=>b.perception.sight(this,actor)).sort((a,c)=>distance(this,a)-distance(this,c));
+    const ready=targets.filter(actor=>b.perception.sight(this,actor)).sort((a,c)=>
+      b.hnv1?b.hnv1.scoreTarget(this,a,this.target)-b.hnv1.scoreTarget(this,c,this.target):distance(this,a)-distance(this,c));
     if (ready.includes(this.target)) this.plan(goal,range,ready);
   }
 

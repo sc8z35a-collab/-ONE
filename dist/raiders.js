@@ -37,12 +37,14 @@ export class Raiders {
         break;
       }
       const y=b.world.floor(p.x,p.z).y;
-      this.members.push({x:p.x,y,z:p.z,team:-1,index:i,isRaider:true,name:'ゼイアン '+String(i+1).padStart(2,'0'),
+      const raider={x:p.x,y,z:p.z,team:-1,index:i,isRaider:true,name:'ゼイアン '+String(i+1).padStart(2,'0'),
         hp:185,maxHp:185,tank:BASE_TANK,tankMax:BASE_TANK,weapon:RAIDER_WEAPON,down:0,active:true,shield:0,
         yaw:this.rng()*TAU,pitch:0,fire:.4,heat:0,recoil:0,superCharge:23+i*9,
         scan:0,giant:false,giantUntil:0,superReady:0,attack:null,nextStrike:0,target:null,
         vx:0,vz:0,vy:0,coyote:0,jumpBuffer:0,steps:0,route:[],radius:.48,height:1.61,kills:0,painted:0,roamAt:0,
-        nextTransit:b.clock+7+this.rng()*13,damageAge:99});
+        nextTransit:b.clock+7+this.rng()*13,damageAge:99};
+      b.hnv1?.mind(raider);
+      this.members.push(raider);
     }
     this.retreatAt=b.elapsed+RAID_STAY;
     this.next=b.elapsed+RAID_INTERVAL;
@@ -167,11 +169,15 @@ export class Raiders {
       const sight=b.perception.scan(a,dt);
       const target=a.target=sight.visible?sight.enemy:null;
       if (!target) {
+        b.hnv1?.tick(a,dt,sight);
         this.patrol(a,dt);
         continue;
       }
-      const point=b.perception.aim(a,sight), d=distance(a,sight.foot), yaw=bearing(a,point);
-      const pitch=clamp(Math.atan2(point[1]-a.y-1.25,Math.max(1,d)),-.52,.46);
+      const hnvPlan=b.hnv1?.raiderEngage(a,target,sight,dt);
+      const point=hnvPlan?hnvPlan.aim:b.perception.aim(a,sight);
+      const d=hnvPlan?hnvPlan.d:distance(a,sight.foot);
+      const yaw=hnvPlan?hnvPlan.yaw:bearing(a,point);
+      const pitch=hnvPlan?hnvPlan.pitch:clamp(Math.atan2(point[1]-a.y-1.25,Math.max(1,d)),-.52,.46);
       if (!a.giant) a.superCharge=Math.min(100,a.superCharge+dt*(d<15?8.7:5.1));
       if (!a.giant && a.superCharge>=100 && b.clock>=a.superReady && !b.bodyBlocked(a,.67,2.25)) {
         a.giant=true;
@@ -192,12 +198,13 @@ export class Raiders {
         b.motion.drive(a,0,0,dt,{look:yaw,pitch});
         continue;
       }
-      if (!a.giant && d>3.4 && d<26 && Math.cos(yaw-a.yaw)>.967 && a.fire<=0 && b.clock>=sight.react) {
-        const spread=.22+d*.027;
-        const target=point.map((p,i)=>i===1?p:p+(this.rng()-.5)*spread);
-        if (muzzleClear(b,a,target)) b.shoot(a,target);
+      if (!a.giant && d>3.4 && d<26 && Math.cos(yaw-a.yaw)>.962 && a.fire<=0 && b.clock>=sight.react) {
+        const spread=hnvPlan?hnvPlan.spread:.22+d*.027;
+        const shotPoint=point.map((p,i)=>i===1?p:p+(this.rng()-.5)*spread);
+        if (muzzleClear(b,a,shotPoint)) b.shoot(a,shotPoint);
       }
-      if (a.giant || d>9.3) this.move(a,a.yaw,a.giant?4.52:3.02,dt,yaw,pitch);
+      if (hnvPlan) this.move(a,hnvPlan.moveYaw,hnvPlan.speed,dt,yaw,pitch);
+      else if (a.giant || d>9.3) this.move(a,a.yaw,a.giant?4.52:3.02,dt,yaw,pitch);
       else if (d<4.05 && !a.giant) this.move(a,a.yaw+Math.PI,1.73,dt,yaw,pitch);
       else this.move(a,a.yaw+(a.index%2?1:-1)*1.11,1.58,dt,yaw,pitch);
     }
