@@ -89,10 +89,15 @@ test('the drone fires one tracking round a second at an opponent in view',()=>{
   assert(foe.hp<100);
 });
 
-test('RD II QUATRO+ fires five heavy rounds, costs a lot of ink and slows its carrier',()=>{
+test('RD II QUATRO+ fires five high-damage heavy rounds rapidly with wide paint, halved cost and boosted mobility',()=>{
   const rd=weaponById('rd2'), jet=weaponById('jet');
   assert.equal(rd.pellets,5);
-  assert(rd.damage*rd.pellets>jet.damage*4 && rd.radius<jet.radius*.5 && rd.cost>jet.cost*8);
+  assert(Math.abs(rd.delay-.22)<1e-9);
+  assert(Math.abs(rd.damage-70.4)<1e-9);
+  assert(Math.abs(rd.cost-.3)<1e-9);
+  assert(Math.abs(rd.radius-10)<1e-9);
+  assert(Math.abs(rd.weight-1.52)<1e-9);
+  assert(rd.damage*rd.pellets>jet.damage*12 && rd.radius>jet.radius && rd.cost<jet.cost*5);
   assert.equal(SUPERS[rd.special].name,'OM BOMB II');
   const walked=weapon=>{
     const {battle:b}=new RoomEngine({...options,weapon:weapon.id}), p=b.player;
@@ -108,6 +113,7 @@ test('RD II QUATRO+ fires five heavy rounds, costs a lot of ink and slows its ca
   Object.assign(p,{x:-44,y:0,z:3,fire:0});
   assert(b.shoot(p,[p.x+8,p.y+1,p.z]));
   assert.equal(b.shots.length,5);
+  assert(Math.abs(p.fire-rd.delay)<1e-9);
   assert.equal(p.tank,150-rd.cost);
 });
 

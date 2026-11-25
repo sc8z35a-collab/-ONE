@@ -41,8 +41,8 @@ export const WEAPONS = [
     speed:80.3,gravity:5.5,range:39,damage:43,cost:4.5,delay:.316,radius:1.01,depth:.051,pellets:1,spread:.004,arc:0,size:.16},
   {id:'roller',name:'ストリートローラー',role:'帯状の塗り・近距離',detail:'短押しで扇状に振る。長押ししながら前進すると床を転がして塗る。消費はシューターの1.1倍。',special:'slam',
     speed:28,gravity:12,range:11,damage:33,cost:2.695,delay:.43,radius:1.04,depth:.052,pellets:5,spread:.48,arc:.06,size:.24,roller:true},
-  {id:'rd2',name:'RD II QUATRO＋',role:'5連重弾・高火力',detail:'5発の重弾を束ねて撃つ。威力は絶大だが塗りは狭く、重さで移動が遅くなり、インク消費も激しい。',special:'om2',
-    speed:72,gravity:6.6,range:30,damage:44,cost:24,delay:.66,radius:.42,depth:.030,pellets:5,spread:.034,arc:0,size:.19,weight:.76},
+  {id:'rd2',name:'RD II QUATRO＋',role:'5連重弾・高速高火力',detail:'5発の重弾を束ねて高速連射する。圧倒的な火力と広い塗り範囲、高い機動力を備える。',special:'om2',
+    speed:72,gravity:6.6,range:30,damage:70.4,cost:.6,delay:.22,radius:10/PAINT_RADIUS_FACTOR,depth:.030,pellets:5,spread:.034,arc:0,size:.19,weight:1.52},
   {id:'td',name:'TD',role:'衝撃砲・広範囲',detail:'前方へインクを爆発させる衝撃砲。1発ずつだが扇形を一気に塗り、範囲内の敵を吹き飛ばす。',special:'ebot',
     speed:40,gravity:9,range:10.5,damage:132,cost:15,delay:1.05,radius:1.25,depth:.050,pellets:1,spread:0,arc:0,size:.40,blast:{reach:10.5,half:.56}},
   // Two-round pistols. Fired at a locked-on enemy, the rounds follow it (see
