@@ -434,6 +434,7 @@ export class RemoteMatch {
     }
     b.abilities.drones=f.drones;
     if (f.stage) b.stage.restore(f.stage);
+    if (f.vehicles && b.vehicles) b.vehicles.applySnapshot(f.vehicles);
     b.abilities.rings=f.rings;
     b.abilities.advanced.effects=f.effects;
     for (const key of f.sounds) this.sound?.(key);
@@ -457,7 +458,7 @@ export class RemoteMatch {
       this.zoneMismatch=0;
       this.jumped=true;
     };
-    if (snap || row.down>0 || row.ride || row.lift || row.slam) {jump();return;}
+    if (snap || row.down>0 || row.ride || row.lift || row.slam || row.inCar) {jump();return;}
     const sent=this.sentAt?.get(this.ack), past=sent===undefined?null:this.predictedAt(sent+LEAD_MS);
     if (!past) return;
     if (zoneOf(row.x)!==zoneOf(past.x)) {

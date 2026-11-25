@@ -12,7 +12,7 @@ const meters=new Set(['tank','charge','superCharge','hp']);
 const timers=new Set(['down','shield','superUntil','droneReady','subReady','doorReady','revealUntil']);
 const cut=(value,round)=>Number.isFinite(value)?round(value*1000)/1000:value;
 const actorView=(a,close=true)=>{
-  const special={isPlayer:!!a.isPlayer,isCheater:!!a.isCheater,weapon:a.weapon?.id,drone:!!a.drone,ride:!!a.ride,lift:a.lift?{left:q(a.lift.left)}:null,
+  const special={isPlayer:!!a.isPlayer,isCheater:!!a.isCheater,inCar:!!a.car,weapon:a.weapon?.id,drone:!!a.drone,ride:!!a.ride,lift:a.lift?{left:q(a.lift.left)}:null,
     slam:!!a.slam,beaming:!!a.beaming,bodyYaw:q(a.bodyYaw??a.yaw),feet:close && a.feet?v(a.feet):null,clone:!!a.cloneOf,
     brace:a.brace??0,peek:a.peek??0,readyPose:a.readyPose??0,flare:a.flare??0,poseBank:a.poseBank??0};
   return AVATAR_FIELDS.map(key=>{
@@ -46,6 +46,7 @@ export function frameOf(b,zone,fullInk,sounds,mergeStairs=false) {
       attacks:nearby(boss.x)?boss.attacks.map(({hit,...attack})=>attack):[]},
     raiders:{next:q(raiders.next),wave:raiders.wave,alert:raiders.alert,alertUntil:q(raiders.alertUntil),members:raiders.live().map(actor=>actorView(actor,nearby(actor.x)))},
     hazards:b.hazards?b.hazards.snapshot(zone,mergeStairs):null,
+    vehicles:b.vehicles?b.vehicles.snapshot(zone,mergeStairs):[],
     shots:b.shots.filter(s=>nearby(s.pos[0])).slice(-90).map(s=>[...v(s.pos),...v(s.vel),s.actor.team,s.weapon.id,s.weapon.size,s.id]),
     drops:b.drops.filter(d=>nearby(d.p[0])).slice(-66).map(dropView),
     inkImpacts:b.inkImpacts.filter(hit=>nearby(hit.p[0])).map(hit=>[...v(hit.p),hit.team,q(hit.at),hit.normal,hit.kind??0]),

@@ -1045,6 +1045,15 @@ function drawMap() {
       miniCtx.fillStyle=train.berserk?'#ff2838':['derailed','recover','return'].includes(train.phase)?'#fb9a75':'#fff0c6';
       miniCtx.fillRect(px(train.x)-5,pz(line.z+train.lateral)-1.8,10,3.6);
     }
+    if (level===0 && battle.vehicles?.cars?.length) {
+      for (const car of battle.vehicles.cars) {
+        if (!car.alive) continue;
+        const cx=px(car.x), cz=pz(car.z);
+        miniCtx.fillStyle=car.stain>=.5?(car.stainTeam===0?'#10d8be':'#ff6c33'):
+          car.driver?(car.driver.team===0?'#6ef5e3':'#ffb07a'):'#d4d9cf';
+        miniCtx.fillRect(cx-3,cz-2,6,4);
+      }
+    }
     if (level===0 && battle.boss.active) {
       miniCtx.fillStyle='#d091e8';
       miniCtx.beginPath();
@@ -1188,8 +1197,8 @@ function updateAbilities(p) {
   $('transit-action').hidden=!option;
   $('transit-action').disabled=option?.kind==='busy';
   $('transit-label').textContent=option?.label ?? '';
-  $('transit-action').setAttribute('aria-label',option?.label ?? '列車に乗る・降りる');
-  const inTransit=!!p.ride || !!p.lift;
+  $('transit-action').setAttribute('aria-label',option?.label ?? '列車・車に乗る・降りる');
+  const inTransit=!!p.ride || !!p.lift || !!p.car || !!p.inCar;
   $('reticle').hidden=inTransit;
   game.classList.toggle('in-transit',inTransit);
 }
@@ -1289,12 +1298,15 @@ function updateHud() {
     updateAbilities(p);
     const floor=world.support(p.x,p.y,p.z);
     const own=p.y<=floor.y+.12 && battle.surfaceInk(p,floor)===p.team+1;
-    $('touch-swim').classList.toggle('available',own && p.down<=0 && !p.ride && !p.lift);
+    $('touch-swim').classList.toggle('available',own && p.down<=0 && !p.ride && !p.lift && !p.car);
     $('charge-bar').style.transform='scaleX('+p.charge+')';
     $('reticle').style.setProperty('--charge',p.charge);
-    setText('meter-tip',p.climbing?'インク壁を登っています':p.swimming?(p.inkSwimming?'自インク · 高速回復':'イカ状態 · ゆっくり回復'):
+    const drivenCar=p.car ?? (p.inCar?battle.vehicles?.cars?.find(c=>c.driver===p):null);
+    const carTip=drivenCar?(drivenCar.stain>=.7?'⚠ 敵インク汚染 '+Math.round(drivenCar.stain*100)+'% · 爆発危険！ [E] 脱出':
+      '運転中 · WASDで操作 / Spaceでドリフト / [E] 降りる'+(drivenCar.stain>.02?' · 敵インク '+Math.round(drivenCar.stain*100)+'%':'')):null;
+    setText('meter-tip',carTip ?? (p.climbing?'インク壁を登っています':p.swimming?(p.inkSwimming?'自インク · 高速回復':'イカ状態 · ゆっくり回復'):
       p.inkPenalty?'敵インク · 移動と回復低下':p.charge>.03?(p.charge>=1?'最大チャージ · 離して発射':'チャージ中'):
-      readout.empty?'インク不足':p.rolling?'ローラーで塗装中':p.weapon.roller?'短押しで振る · 長押し＋前進で転がす':own?'自インクで高速回復':'未塗装の床でも潜水できます');
+      readout.empty?'インク不足':p.rolling?'ローラーで塗装中':p.weapon.roller?'短押しで振る · 長押し＋前進で転がす':own?'自インクで高速回復':'未塗装の床でも潜水できます'));
   } else {
     setText('viewing',watchingAerial()?'地上の全景':view.name+' · '+(view.intent || ZONES[level].name));
   }
@@ -1304,6 +1316,8 @@ function updateHud() {
     const downNote=p.downBy==='goat'?'破壊神ゴートに蹂躙された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
       p.downBy==='boss'?'オオモノイカに倒された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
       p.downBy==='trainBoss'?'暴走列車に撃破された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
+      p.downBy==='carBomb'?'車の爆発に巻き込まれた · 復帰まで '+RESPAWN_SECONDS+'秒':
+      p.downBy==='car'?'車に轢き倒された · 復帰まで '+RESPAWN_SECONDS+'秒':
       p.downBy==='drown'?'水没して溺死した · 復帰まで '+RESPAWN_SECONDS+'秒':
       p.downBy==='hazard'?'襲撃イベントに倒された · 復帰まで '+RESPAWN_SECONDS+'秒':
       '復帰まで '+RESPAWN_SECONDS+'秒';
@@ -1378,6 +1392,9 @@ function cameraFor(dt) {
     const change=Math.atan2(Math.sin(actor.yaw-watchYaw),Math.cos(actor.yaw-watchYaw));
     watchYaw+=change*(1-Math.exp(-dt*4.1));
     watchPitch+=(clamp(actor.pitch-.075,-.49,.24)-watchPitch)*(1-Math.exp(-dt*5));
+  } else if (actor.car && Math.abs(actor.car.speed)>1.2) {
+    const targetYaw=actor.car.yaw;
+    yaw+=Math.atan2(Math.sin(targetYaw-yaw),Math.cos(targetYaw-yaw))*(1-Math.exp(-dt*2.8));
   }
   viewHeight=mix(viewHeight,actor.y,1-Math.exp(-dt*14));
   const pose=crewView(battle,actor,{

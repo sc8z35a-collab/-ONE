@@ -34,7 +34,7 @@ export class NpcPerception {
     for (let i=0;i<count;i++) {
       const h=i===0?body:i===1?body+(b.isBoss?.72:.44):body*.56;
       const point=[b.x,b.y+h,b.z];
-      if (!this.battle.traceShot(eye,point,true) && !this.battle.subweapons.block(eye,point,a.team)) return point;
+      if (!this.battle.traceShot(eye,point,true,true,0,b.car??null) && !this.battle.subweapons.block(eye,point,a.team)) return point;
     }
     return null;
   }

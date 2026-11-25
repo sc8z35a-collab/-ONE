@@ -134,6 +134,7 @@ export function checkpointOf(b) {
     boss:{...fields(b.boss),cast:clone(b.boss.cast),attacks:clone(b.boss.attacks)},bossTarget:reference(b,b.boss.target),
     raiders:{...fields(b.raiders),members:b.raiders.members.map(actor)},
     hazards:b.hazards?b.hazards.checkpoint():null,
+    vehicles:b.vehicles?b.vehicles.checkpoint():null,
     decals:clone(b.decals),drops:clone(b.drops),events:clone(b.events),
     inkImpacts:b.inkImpacts.map(({target,...impact})=>({...clone(impact),target:reference(b,target)})),
     inkTime:b.paint.time,battleSeed:b.rng.state(),raidSeed:b.raiders.rng.state(),
@@ -219,6 +220,7 @@ export function restoreCheckpoint(b,stored) {
   }
   Object.assign(b.raiders,data.raiders);
   if (b.hazards && data.hazards) b.hazards.restoreCheckpoint(data.hazards);
+  if (b.vehicles && data.vehicles) b.vehicles.restoreCheckpoint(data.vehicles);
   if (Number.isInteger(data.battleSeed)) b.rng=randomGenerator(data.battleSeed);
   if (Number.isInteger(data.raidSeed)) b.raiders.rng=randomGenerator(data.raidSeed);
   for (const a of b.raiders.members) {

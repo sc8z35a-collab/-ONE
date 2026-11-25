@@ -17,6 +17,7 @@ import {actorInRay,collectShapes,traceShapes} from './collision.js';
 import {AUTO_AIM_LOCK,CHEATER_WEAPON,EBOT,INK_EPSILON,OM_HOMING,PAINT_RADIUS_FACTOR,SUPERS,WEAPONS,shotTravel,weaponById} from './weapons.js';
 import {SUBWEAPONS,Subweapons,subweaponById} from './subweapons.js';
 import {StageObjects} from './stage-objects.js';
+import {Vehicles} from './vehicles.js';
 import {surfacePaintRadius} from './ink.js';
 import {wallRunoff} from './ink-fluid.js';
 
@@ -339,7 +340,7 @@ function respawn(a) {
   a.guard=0;
   a.rangeFactor=1;
   a.giant=a.beaming=false;
-  a.slam=a.ride=a.lift=null;
+  a.slam=a.ride=a.lift=a.car=null;
   a.radius=a.height=undefined;
   a.travelGoal=null;
   a.doorReady=0;
@@ -379,6 +380,7 @@ export class Battle {
     this.world=world;
     this.paint=paint;
     this.stage=new StageObjects(world);
+    this.vehicles=new Vehicles(this);
     this.mode=mode;
     this.callbacks=callbacks;
     this.timeless=mode==='timeless';
@@ -568,11 +570,13 @@ export class Battle {
   }
 
   transportOption(actor) {
-    return this.transportService(actor)?.option ?? null;
+    if (actor?.car) return this.vehicles?.option(actor) ?? null;
+    return this.transportService(actor)?.option ?? this.vehicles?.option(actor) ?? null;
   }
 
   useTransport(actor) {
-    return this.transportService(actor)?.rail.use(actor) ?? false;
+    if (actor?.car) return this.vehicles?.use(actor) ?? false;
+    return this.transportService(actor)?.rail.use(actor) || (this.vehicles?.use(actor) ?? false);
   }
 
   carryTransit(actor,dt) {
@@ -621,7 +625,7 @@ export class Battle {
     }
     let closest=null;
     for (const actor of this.actors) {
-      if (actor.team===team || actor.down>0 || actor.shield>0 || actor.lift || actor.ride || !sameLevel(actor.x,start[0])) continue;
+      if (actor.team===team || actor.down>0 || actor.shield>0 || actor.lift || actor.ride || actor.car || !sameLevel(actor.x,start[0])) continue;
       const t=this.bodyHit(start,end,actor,padding);
       if (t!==null && (!closest || t<closest.t)) closest={actor,t};
     }
@@ -646,17 +650,19 @@ export class Battle {
     return closest;
   }
 
-  traceShot(start,end,precise=false,joined=true,clearance=0) {
+  traceShot(start,end,precise=false,joined=true,clearance=0,ignoreCar=null) {
     const seam=precise && joined && stairRay(start,end);
     if (seam) {
-      const early=seam.t>0 && this.traceShot(start,seam.point,true,false,clearance);
+      const early=seam.t>0 && this.traceShot(start,seam.point,true,false,clearance,ignoreCar);
       if (early) return {...early,t:early.t*seam.t};
-      const offset=[seam.shift,0,0], late=seam.t<1 && this.traceShot(add(seam.point,offset),add(end,offset),true,false,clearance);
+      const offset=[seam.shift,0,0], late=seam.t<1 && this.traceShot(add(seam.point,offset),add(end,offset),true,false,clearance,ignoreCar);
       return late?{...late,t:seam.t+(1-seam.t)*late.t,shift:seam.shift}:null;
     }
     let best=precise?this.world.traceExact(start,end,clearance):this.world.trace(start,end);
     const object=this.stage.trace(start,end,clearance,best?.t);
     if (object && (!best || object.t<best.t)) best=object;
+    const car=this.vehicles?.trace(start,end,clearance,best?.t,ignoreCar);
+    if (car && (!best || car.t<best.t)) best=car;
     const zone=zoneOf(start[0]);
     if (zone>=2) {
       if (sameLevel(start[0],end[0])) {
@@ -911,9 +917,9 @@ export class Battle {
 
   stepActor(actor,dx,dz,boarding=false) {
     const bx=actor.x, by=actor.y, bz=actor.z;
-    const motion=this.motion, stage=this.stage, isP=actor.isPlayer;
+    const motion=this.motion, stage=this.stage, vehicles=this.vehicles, isP=actor.isPlayer;
     this.world.step(actor,dx,dz,(x,y,z,radius,height)=>
-      !stage.blocked(x,y,z,radius,height) && stage.canEnter(actor,x,y,z) &&
+      !stage.blocked(x,y,z,radius,height) && !vehicles?.blocked(x,y,z,radius,height,actor.car) && stage.canEnter(actor,x,y,z) &&
       (isP || motion.roomFor(actor,x,y,z,radius,height)));
     if (boarding && isP && !actor.predicted) {
       const before={x:bx,y:by,z:bz};
@@ -931,6 +937,7 @@ export class Battle {
   bodyBlocked(actor,radius,height) {
     return this.world.blocked(actor.x,actor.y+.018,actor.z,radius,height) ||
       this.stage.blocked(actor.x,actor.y+.018,actor.z,radius,height) ||
+      !!this.vehicles?.blocked(actor.x,actor.y+.018,actor.z,radius,height,actor.car) ||
       this.transit.blocksActor(actor,radius,height) ||
       this.metro.blocksActor(actor,radius,height);
   }
@@ -950,7 +957,8 @@ export class Battle {
   }
 
   actorSupport(actor) {
-    const floor=this.stage.support(actor.x,actor.y,actor.z,this.world.support(actor.x,actor.y,actor.z));
+    let floor=this.stage.support(actor.x,actor.y,actor.z,this.world.support(actor.x,actor.y,actor.z));
+    if (this.vehicles) floor=this.vehicles.support(actor.x,actor.y,actor.z,floor);
     const roof=this.trainContact(actor,actor.y+.10,actor.y-.10);
     return roof?.normal[1]>.54 && roof.position[1]>floor.y?{...floor,y:roof.position[1],raised:true}:floor;
   }
@@ -1309,6 +1317,9 @@ export class Battle {
       const amount=force;
       if (hit.train.train.berserk && this.hazards) this.hazards.hurtTrainBoss(hit.train,amount,shot.actor);
       hit.train.splatter(hit,team,size,shot.structureDamage??amount*.095,shot.structureDamage??amount);
+    } else if (hit.vehicle) {
+      const damage=shot.structureDamage ?? force;
+      this.vehicles?.damageCar(hit.vehicle,damage,shot.actor,p);
     } else if (hit.stageObject) {
       const damage=shot.structureDamage ?? force;
       this.stage.strike(hit.stageObject,damage,this.clock,team);
@@ -1362,7 +1373,7 @@ export class Battle {
       }
       return lost;
     }
-    if (actor.down>0 || (actor.shield>0 && cause!=='drown') || actor.lift || actor.ride) return 0;
+    if (actor.down>0 || (actor.shield>0 && cause!=='drown' && cause!=='carBomb') || actor.lift || actor.ride) return 0;
     const lost=Math.min(actor.hp,cause==='drown'?reduced:this.abilities.reduce(actor,reduced));
     if (!(lost>0)) return 0;
     actor.hp-=lost;
@@ -1377,24 +1388,27 @@ export class Battle {
       this.callbacks.cue?.('hit',actor,source);
       return lost;
     }
+    if (actor.car) this.vehicles?.exit(actor,true);
     const drown=cause==='drown', trainBoss=cause==='trainBoss', goat=cause==='goat' || !!source?.isGoat;
-    const boss=cause==='boss' || (!source && !drown && !trainBoss && !goat);
+    const carRam=cause==='car', carBomb=cause==='carBomb';
+    const boss=cause==='boss' || (!source && !drown && !trainBoss && !goat && !carRam && !carBomb);
     actor.down=actor.cloneOf?Infinity:(boss || trainBoss || goat)?BOSS_RESPAWN_SECONDS:RESPAWN_SECONDS;
-    actor.downBy=drown?'drown':goat?'goat':trainBoss?'trainBoss':boss?'boss':source.isRaider?'raid':(source.isSniper || source.isRogueDrone)?'hazard':'crew';
+    actor.downBy=drown?'drown':goat?'goat':trainBoss?'trainBoss':carBomb?'carBomb':carRam?'car':boss?'boss':source?.isRaider?'raid':(source?.isSniper || source?.isRogueDrone)?'hazard':'crew';
     actor.swimming=actor.inkSwimming=actor.climbing=false;
     actor.downs++;
     this.abilities.clearSuper(actor);
     if (actor.cloneOf) actor.maxHp=actor.baseHp??actor.maxHp;
     if (source && source.team>=0) {
       // Splatting a copy is not an elimination: it earns no kill and no EXP.
-      if (!actor.cloneOf) credit.kills++;
+      if (!actor.cloneOf && actor!==source) credit.kills++;
       const {x,y,z}=actor, floor=this.world.floor(x,z);
       const hit=this.traceShot([x,Math.max(y,floor.y)+.12,z],[x,floor.y-.13,z],true,false);
       if (hit) this.splat(hit,{actor:source,weapon:WEAPONS[0]},1.43);
     }
     this.burst([actor.x,actor.y+1.05,actor.z],source?.team ?? -1,actor.cloneOf?12:26,actor.cloneOf?3.1:4.4);
     this.abilities.rings.push({x:actor.x,y:actor.y+.06,z:actor.z,r:2.6,team:Math.max(0,source?.team??actor.team),until:this.clock+.55});
-    const killer=drown?'水没・溺死':goat?'破壊神ゴート':trainBoss?(this.hazards?.trainBoss?.name ?? '暴走列車'):(source?.name ?? this.boss.name);
+    const killer=drown?'水没・溺死':goat?'破壊神ゴート':trainBoss?(this.hazards?.trainBoss?.name ?? '暴走列車'):
+      carBomb?(source?source.name+' [車爆破]':'車の爆発'):carRam?(source?source.name+' [車]':'車'):(source?.name ?? this.boss.name);
     this.events.unshift({label:killer+'  ▸  '+actor.name,team:source?.team ?? -1,until:this.clock+3.4});
     this.events.length=Math.min(this.events.length,4);
     if (source?.isPlayer) this.callbacks.sound?.('down');
@@ -1636,15 +1650,17 @@ export class Battle {
       actor.shield=Math.max(0,actor.shield-dt);
       actor.recoil=Math.max(0,actor.recoil-dt*8.3);
       actor.damageAge+=dt;
-      this.inkPressure(actor,dt);
+      if (!actor.car) this.inkPressure(actor,dt);
       this.abilities.credit(actor);
       let crossed=false;
       if (actor.isPlayer) {
         actor.yaw=input.yaw;
         actor.pitch=input.pitch;
         if (input.use) crossed=this.useTransport(actor);
-        if (input.super) this.abilities.activate(actor);
-        if (input.drone) this.abilities.summon(actor);
+        if (!actor.car) {
+          if (input.super) this.abilities.activate(actor);
+          if (input.drone) this.abilities.summon(actor);
+        }
       }
       if (actor.revealUntil>this.clock && actor.revealTeam>=0) {
         // A marked crew member is common knowledge for the team that tagged it.
@@ -1653,7 +1669,9 @@ export class Battle {
       const carried=this.carryTransit(actor,dt);
       const occupied=this.abilities.updateActor(actor,dt);
       if (!carried && !occupied && !crossed) {
-        if (actor.isPlayer) this.control(actor,input,dt,camera);
+        if (actor.car) {
+          if (actor.isPlayer) this.vehicles.drive(actor,input,dt);
+        } else if (actor.isPlayer) this.control(actor,input,dt,camera);
         else this.npc(actor,dt);
       }
       const factor=(1-(actor.inkPenalty??0)*.072)*(actor.regenFactor??1);
@@ -1665,6 +1683,7 @@ export class Battle {
         actor.hp=Math.min(actor.maxHp,actor.hp+recovery*dt*factor);
       }
     }
+    this.vehicles?.update(dt);
     this.updateShots(dt);
     this.subweapons.update(dt);
     this.abilities.update(dt);
@@ -1698,6 +1717,7 @@ export class Battle {
     const zone=zoneOf(viewX);
     const visualClock=this.clock+(this.impactAgeOffset??0);
     this.stage.draw(renderer,viewX,visualClock);
+    this.vehicles?.draw(renderer,viewX,viewZ,visualClock);
     if (zone<2) for (const rail of [this.transit,this.metro]) if (rail.visibleIn(zone)) rail.draw(renderer);
     if (zone>=2) drawCabinScenery(renderer,this.cabinTrain(viewX));
     const chip=this.chip;
@@ -1713,7 +1733,7 @@ export class Battle {
     const actors=this.actors, actorLim=reach===Infinity?Infinity:(reach+6)*(reach+6);
     for (let i=0;i<actors.length;i++) {
       const actor=actors[i];
-      if (actor===hideCrew || actor.down>0 || actor.ride || !sameLevel(actor.x,viewX)) continue;
+      if (actor===hideCrew || actor.down>0 || actor.ride || actor.car || actor.inCar || !sameLevel(actor.x,viewX)) continue;
       if (actorLim!==Infinity) {const dx=actor.x-viewX, dz=actor.z-viewZ; if (dx*dx+dz*dz>=actorLim) continue;}
       drawCrew(renderer,actor,visualClock);
     }

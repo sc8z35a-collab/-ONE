@@ -23,7 +23,9 @@ export function muzzleClear(b,a,target,power=1) {
     for (let step=1;step<=count;step++) {
       const t=step/count, end=tip.map((value,i)=>value+d[i]*t+(i===1?rise*t*(1-t):0));
       if (allies.some(other=>b.bodyHit(start,end,other,spreadPadding)!==null)) return false;
-      if (obstructed(b.traceShot(start,end,true)) || obstructed(b.subweapons.block(start,end,a.team))) {
+      const wall=b.traceShot(start,end,true);
+      const vehicleTarget=wall?.vehicle && wall.vehicle.ownerTeam!==a.team;
+      if ((!vehicleTarget && obstructed(wall)) || obstructed(b.subweapons.block(start,end,a.team))) {
         blocked=true;
         break;
       }

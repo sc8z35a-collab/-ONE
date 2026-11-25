@@ -160,6 +160,7 @@ export class Abilities {
     const b=this.battle;
     b.damageMetro(x,y,z,radius,damage);
     b.stage.damageArea(b,actor,x,y,z,radius,damage);
+    b.vehicles?.damageArea(x,y,z,radius,damage,actor);
     const origin=[x,y+.28,z], shift=stairNeighborShift(x,z,radius);
     const targets=this.enemies(actor,x);
     if (shift) targets.push(...this.enemies(actor,x+shift));

@@ -19,18 +19,19 @@ export function crewView(battle,actor,{yaw=actor.yaw,pitch=actor.pitch,height=ac
     const across=Math.abs(z-stair.stair.z);
     enclosed=ease((progress+1.30)/1.62)*(1-ease((across-1.24)/1.51));
   }
+  const inCar=!!(actor.car || actor.inCar);
   const direction=forward(yaw), side=[-direction[2],0,direction[0]];
-  const pivot=[x,height+1.27,z];
+  const pivot=[x,height+(inCar?1.65:1.27),z];
   const low=[x,height+.39,z];
-  const ceiling=battle.traceShot(low,pivot,true,false);
+  const ceiling=battle.traceShot(low,pivot,true,false,0,actor.car??null);
   if (ceiling?.normal[1]<-.35) pivot[1]=Math.max(low[1],ceiling.position[1]-CAMERA_CLEARANCE-.04);
-  // A slightly wider view than over-the-shoulder: more of the fight in frame.
-  const back=mix(watch?5.1:4.45,2.18,enclosed);
-  const offset=mix(watch?.8:.7,.42,enclosed);
-  const up=mix(watch?1.6:1.3,.57,enclosed);
+  // A slightly wider view than over-the-shoulder: more of the fight in frame (wider still when driving a car).
+  const back=inCar?7.2:mix(watch?5.1:4.45,2.18,enclosed);
+  const offset=inCar?0:mix(watch?.8:.7,.42,enclosed);
+  const up=inCar?2.35:mix(watch?1.6:1.3,.57,enclosed);
   const boom=add(scale(direction,-back),add(scale(side,offset),[0,up,0]));
   const length=Math.hypot(...boom);
-  const hit=battle.traceShot(pivot,add(pivot,boom),true,false,CAMERA_CLEARANCE);
+  const hit=battle.traceShot(pivot,add(pivot,boom),true,false,CAMERA_CLEARANCE,actor.car??null);
   const allowed=hit?clamp(hit.t-.09/length,0,1):1;
   let amount=Math.min(allowed,reach);
   if (cabin) {
@@ -58,7 +59,7 @@ export function serverCamera(battle,actor,input) {
   const eye=input?.eye;
   if (!eye || zoneOf(eye[0])!==zoneOf(pose.eye[0]) ||
       Math.hypot(eye[0]-pose.eye[0],eye[1]-pose.eye[1],eye[2]-pose.eye[2])>EYE_TRUST ||
-      battle.traceShot(pose.eye,eye,true)) return pose;
+      battle.traceShot(pose.eye,eye,true,true,0,actor.car??null)) return pose;
   return {...pose,eye,target:add(eye,scale(forward(input.yaw,input.pitch),17))};
 }
 
@@ -66,4 +67,4 @@ export const AVATAR_FIELDS=['team','index','name','isPlayer','weapon','drone','r
   'steps','tank','tankMax','hp','maxHp','down','shield','recoil','damageAge','guard','giant','swimming','charge','superCharge',
   'superUntil','droneReady','rangeFactor','kills','downs','painted','cabinVisits','active','attack','inkSwimming','climbing','inkPenalty','intent','climbNormal','airborne','landing','rolling','subId','subReady','doorReady','muzzleBlocked',
   'slam','beaming','lastDamageAt','activeSpecial','bodyYaw','poseBank','feet','brace','peek','readyPose','flare',
-  'dealt','supers','subs','revealUntil','revealTeam','downBy','clone','apartmentVisits','coMode','isCheater'];
+  'dealt','supers','subs','revealUntil','revealTeam','downBy','clone','apartmentVisits','coMode','isCheater','inCar'];

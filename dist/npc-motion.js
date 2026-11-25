@@ -164,6 +164,7 @@ export class NpcMotion {
       probe.y=floor.y;
       if (b.world.blocked(probe.x,probe.y+.028,probe.z,r,h) ||
           b.stage.blocked(probe.x,probe.y+.028,probe.z,r,h) ||
+          b.vehicles?.blocked(probe.x,probe.y+.028,probe.z,r,h,a.car) ||
           !b.stage.canEnter(a,probe.x,probe.y,probe.z) ||
           b.transit.blocksActor(probe) || b.metro.blocksActor(probe)) return false;
     }

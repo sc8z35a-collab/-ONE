@@ -559,6 +559,28 @@ export class HNV1 {
       }
     }
 
+    // 6) ONCOMING DRIVEN CAR EVASION: jump/sidestep out of the path of speeding cars!
+    if (level===0 && b.vehicles?.cars?.length) {
+      const cars=b.vehicles.cars;
+      for (let i=0;i<cars.length;i++) {
+        const car=cars[i];
+        if (!car.alive || !car.driver || car.driver.team===actor.team || Math.abs(car.speed)<4.2) continue;
+        const rx=actor.x-car.x, rz=actor.z-car.z, d=Math.hypot(rx,rz);
+        if (d>15 || d<.5) continue;
+        const fx=Math.sin(car.yaw)*Math.sign(car.speed), fz=-Math.cos(car.yaw)*Math.sign(car.speed);
+        const ahead=rx*fx+rz*fz, lateral=rx*(-fz)+rz*fx;
+        if (ahead>0 && ahead<14 && Math.abs(lateral)<car.d+1.45) {
+          const side=lateral>=0?1:-1;
+          const juke={x:actor.x-fz*side*3.6,z:actor.z+fx*side*3.6};
+          if (b.motion.segment(actor,juke.x,juke.z)) {
+            actor.intent='HNV1: 突進する車を回避';
+            b.steer(actor,juke,dt,6.0,false,{look:bearingTo(actor,[car.x,car.y+1,car.z]),ready:1,jump:!actor.airborne,emergency:true});
+            return true;
+          }
+        }
+      }
+    }
+
     return false;
   }
 

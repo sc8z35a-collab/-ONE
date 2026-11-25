@@ -86,6 +86,7 @@ export class World {
     this.homes=scene?.homes ?? [];
     this.elevated=scene?.elevated ?? [];
     this.objects=scene?.objects ?? [];
+    this.vehicleDefs=scene?.vehicles ?? [];
     this.rng=randomGenerator(784301);
     if (scene) {
       this.loadParts(this.r,scene.parts);
@@ -591,50 +592,7 @@ export class World {
   }
 
   vehicle(x,z,tint,style=0,dir=1) {
-    const r=this.r,w=style===2?4.90:4.38, d=style===2?1.96:1.70;
-    const trim=0x959f9e, rubber=0x293438, glass=0x405e68;
-    const p=(type,dx,y,dz,sx,sy,sz,c,k=2,opts={})=>r.add(type,x+dx*dir,y,z+dz*dir,sx,sy,sz,c,k,opts);
-    this.obstacle(x,.76,z,w,1.48,d+.14);
-    p('box',0,.39,0,w-.16,.28,d-.06,rubber,4);
-    p('bevel',0,.65,0,w-.04,.45,d,tint,4);
-    p('bevel',.40,.875,0,w-.86,.25,d-.10,tint,4);
-    p('box',w/2-.57,.79,0,1.06,.20,d-.08,tint,4);
-    p('box',-w/2+.54,.83,0,1.04,.27,d-.06,tint,2);
-    for (const sign of [-1,1]) {
-      p('box',sign*(w/2-.04),.46,0,.19,.17,d+.09,trim,4);
-      p('box',sign*(w/2-.04),.66,0,.13,.25,d-.10,0x505b58,4);
-      p('box',sign*(w/2+.06),.66,0,.021,.12,.33,0xddded3,0);
-      for (const oz of [-.57,.57]) {
-        p('box',sign*(w/2+.03),.735,oz,.045,.155,.31,sign>0?0xf5eacc:0xb33c2b,3);
-        p('box',sign*(w/2+.06),.735,oz+.14,.04,.155,.08,0xe5a83b,2);
-      }
-      for (const ox of [-w*.315,w*.303]) {
-        p('cylinder',ox,.38,sign*(d/2+.015),.71,.24,.71,rubber,2,{pitch:T});
-        p('cylinder',ox,.38,sign*(d/2+.151),.49,.05,.49,0x6b7777,4,{pitch:T});
-        p('cylinder',ox,.38,sign*(d/2+.183),.34,.026,.34,0xc3c7bf,4,{pitch:T});
-        for (let j=0;j<5;j++) {
-          const a=j/5*TAU;
-          p('cylinder',ox+Math.sin(a)*.094,.38+Math.cos(a)*.094,sign*(d/2+.20),.037,.02,.037,0x757d78,4,{pitch:T});
-        }
-      }
-      p('box',-.06,1.10,sign*(d/2-.12),1.66,.45,.05,glass,8);
-      p('box',-.81,1.12,sign*(d/2-.12),.084,.50,.08,tint,4);
-      p('box',-.13,1.14,sign*(d/2-.105),.073,.46,.07,tint,4);
-      p('box',.73,1.12,sign*(d/2-.12),.088,.50,.08,tint,4);
-      p('box',.57,.91,sign*(d/2-.025),.34,.049,.07,trim,4);
-      p('box',.78,1.08,sign*(d/2+.13),.23,.16,.22,0x667774,4);
-      p('box',0,.51,sign*(d/2+.03),1.72,.037,.038,0xa3b0a8,4);
-    }
-    p('bevel',-.07,1.39,0,1.65,.115,d-.22,tint,4);
-    p('box',.76,1.15,0,d-.20,.50,.076,glass,8,{yaw:T,pitch:.42*dir});
-    p('box',-.92,1.17,0,d-.24,.48,.08,glass,8,{yaw:T,pitch:-.35*dir});
-    if (style===1) {
-      p('box',-w/2+.57,.955,0,1.10,.12,d-.12,0x8c978a,4);
-      for (const sign of [-1,1]) p('box',-w/2+.55,1.08,sign*(d/2-.09),1.2,.22,.12,tint,2);
-    } else if (style===2) {
-      p('box',-w/2+.76,1.16,0,1.47,.83,d-.07,0xd7d4bc,2);
-      for (let i=0;i<5;i++) p('box',-w/2+.18+i*.28,1.22,d/2,.055,.68,.06,0xbebcab,2);
-    }
+    this.vehicleDefs.push({id:'car-'+this.vehicleDefs.length,x,z,tint,style,dir});
   }
 
   shop(x,z,sign,w,h,d,tint,label,style,wear) {

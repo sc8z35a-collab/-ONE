@@ -609,5 +609,71 @@ test('HNV1 foundation engine powers every NPC type with human archetypes, predic
   assert.equal(bot.intent,'HNV1: 破壊神ゴートの8本腕を回避');
 });
 
+test('map cars are drivable, paint own ink while driving, ram/run over enemies, dye with enemy ink when attacked, and explode for massive AoE damage',()=>{
+  const engine=new RoomEngine({...options,cheater:false}), b=engine.battle, p=b.player;
+  const enemy=b.actors.find(a=>a.team===1), ally=b.actors.find(a=>a.team===p.team && a!==p);
+  b.countdown=0;
+  alone(b,p,enemy,ally);
+  assert(b.vehicles && b.vehicles.cars.length>=13,'all map cars spawned dynamically');
+
+  // Pick a street car and board it via transportOption / useTransport ([E]).
+  const car=b.vehicles.cars.find(c=>Math.abs(c.x+17.85)<1 && Math.abs(c.z+3.80)<1) ?? b.vehicles.cars[0];
+  assert(car.alive && car.stain===0 && !car.driver);
+  Object.assign(p,{x:car.x,y:car.y,z:car.z+2.2,down:0,shield:0});
+  assert.equal(b.transportOption(p)?.kind,'car-enter');
+  assert(b.useTransport(p));
+  assert.equal(p.car,car);
+  assert.equal(car.driver,p);
+  assert.equal(car.ownerTeam,p.team);
+  assert.equal(b.transportOption(p)?.kind,'car-exit');
+
+  // Drive freely forward & steer -> paints own ink along the road!
+  b.paint.reset();
+  const startX=car.x, startZ=car.z;
+  for (let i=0;i<30;i++) {
+    b.clock+=.04;
+    b.vehicles.drive(p,{x:.25,z:1,jump:false},.04);
+  }
+  assert(Math.hypot(car.x-startX,car.z-startZ)>4,'car drove freely across the street');
+  assert(b.paint.zoneCount[0][p.team]>0 && p.painted>0,'driving paints the ground with driver ink');
+
+  // Ram / run over an enemy directly ahead at speed!
+  const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
+  Object.assign(enemy,{x:car.x+fx*4.5,y:car.y,z:car.z+fz*4.5,hp:100,shield:0,down:0});
+  car.speed=14;
+  for (let i=0;i<16 && enemy.down<=0;i++) {
+    b.clock+=.04;
+    b.vehicles.drive(p,{x:0,z:1,jump:false},.04);
+  }
+  assert(enemy.down>0 && enemy.downBy==='car','speeding car runs over and eliminates enemy');
+
+  // Checkpoint cold restore preserves car position, driver & stain!
+  const restored=new RoomEngine({...options,cheater:false},new Map(Object.entries(engine.checkpoint()))).battle;
+  const rc=restored.vehicles.byId(car.id);
+  assert(rc && rc.alive && rc.driver===restored.player && restored.player.car===rc);
+
+  // Allied shots do not destroy own team's driven car.
+  const hpBeforeAlly=car.hp;
+  b.vehicles.damageCar(car,80,ally,[car.x,car.y+1,car.z]);
+  assert.equal(car.hp,hpBeforeAlly,'allied shots do not destroy driven car');
+
+  // Real enemy projectiles hit the car hull and dye it in the enemy's ink color!
+  Object.assign(enemy,{x:car.x,y:car.y,z:car.z+7,hp:100,shield:0,down:0,tank:140,fire:0,yaw:0});
+  b.shots.length=0;
+  assert(b.shoot(enemy,[car.x,car.y+.8,car.z]));
+  for (let i=0;i<24 && b.shots.length;i++) {b.clock+=1/60;b.updateShots(1/60);}
+  assert(car.alive && car.stain>0 && car.stainTeam===enemy.team,'enemy shot dyed the car in enemy ink');
+
+  // Place nearby ally & driver around the car, then finish dyeing it to 100% -> MASSIVE EXPLOSION!
+  Object.assign(ally,{x:car.x+3.5,y:car.y,z:car.z,hp:100,shield:0,down:0});
+  p.hp=100; p.shield=0;
+  b.vehicles.damageCar(car,car.maxHp,enemy,[car.x,car.y+1,car.z]);
+  assert(!car.alive && car.stain===1 && !p.car,'car explodes once completely dyed in enemy ink');
+  assert(p.down>0 && p.downBy==='carBomb','driver takes massive explosion damage');
+  assert(ally.down>0 && ally.downBy==='carBomb','nearby fighter takes heavy explosion damage');
+  assert(b.paint.zoneCount[0][enemy.team]>0,'explosion splatters enemy ink crater');
+});
+
+
 
 
