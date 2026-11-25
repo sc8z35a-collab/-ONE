@@ -4,12 +4,14 @@ import {RoomEngine} from './room-engine.js';
 import {BOSS_RESPAWN_SECONDS,EXP_PER_KILL,RESPAWN_SECONDS} from '../dist/battle.js';
 import {bankResults,levelOf,loadCareer,matchResults,mostActive} from '../dist/progress.js';
 import {DRONE_WEAPON,CHEATER_WEAPON,EBOT,GOAT_WEAPON,NPC_WEAPONS,ROGUE_DRONE_WEAPON,SNIPER_WEAPON,SUPERS,WEAPONS,weaponById} from '../dist/weapons.js';
-import {RAIL,UNDER_X,UNDER_Y} from '../dist/layout.js';
+import {CABIN_X,RAIL,UNDER_X,UNDER_Y} from '../dist/layout.js';
 import {GOAT_ARMS} from '../dist/hazards.js';
 import {HNV1_GAIN,HNV1_VERSION} from '../dist/hnv1.js';
 import {optionsFor} from './edge.js';
 import {SCENE_FRAGMENT,LITE_FRAGMENT} from '../dist/render-shaders.js';
 import {SURFACES,SURFACE_SHEETS,sheetPrompt} from '../dist/surfaces.js';
+import {Renderer,STRIDE,packInstance} from '../dist/render.js';
+import {surfaceForJS,writeSurfaceSlots} from '../dist/surface-solver.js';
 
 const options={mode:'play',weapon:'jet',teamSize:4};
 const still={x:0,z:0,yaw:Math.PI/2,pitch:-.14};
@@ -793,6 +795,113 @@ test('upgraded vehicle dynamics engine, hit VFX, projectiles, and all 16 bespoke
   assert(rFull.draws.length>rLite.draws.length,'full renderer emits extra upgraded hit VFX, projectile & vehicle details over lite mode');
   assert(rFull.draws.some(d=>d.shape==='shade' && d.mat===28),'vehicles cast grounded contact AO shadows');
   assert(rFull.draws.some(d=>d.shape==='ring' && d.mat===3),'homing & precision projectiles emit glowing lock/Mach rings');
+});
+
+test('lossless optimization parity: writeSurfaceSlots fast paths, packInstance trig short-circuits, and inFrustum VFX culling preserve exact output',()=>{
+  const f32=Math.fround, fract32=x=>f32(x-Math.floor(x));
+  const seedFor=(x,y,z)=>{
+    let qx=fract32(f32(f32(x)*f32(.1031))), qy=fract32(f32(f32(y)*f32(.1030))), qz=fract32(f32(f32(z)*f32(.0973)));
+    const c=f32(33.33), d=f32(f32(qx*f32(qy+c))+f32(qy*f32(qz+c))+f32(qz*f32(qx+c)));
+    qx=f32(qx+d); qy=f32(qy+d); qz=f32(qz+d);
+    return fract32(f32(f32(qx+qy)*qz));
+  };
+  const buf=new Float32Array(STRIDE);
+  const colors=[0x181c20,0x446688,0xcfd6d2,0xe6e7dc,0xd85a38,0x3ca060,0xff267a];
+  const zones=[{x:12,y:1.5,z:-10,under:false,cabin:false},{x:UNDER_X+8,y:UNDER_Y+1.2,z:-8,under:true,cabin:false},{x:CABIN_X+4,y:1.2,z:0,under:false,cabin:true}];
+  const sizes=[[0.04,0.05,0.22],[0.5,1.8,0.4],[3.5,0.25,2.4],[1.8,0.9,1.2]];
+  // Exhaustively verify all fast-path kinds (8, 14, 18, 20, 21, 29, 0, 3, 22, 23, 26, 30, 31) against surfaceForJS!
+  for (const kind of [0,3,8,14,18,20,21,22,23,26,29,30,31]) {
+    for (const col of colors) for (const z of zones) for (const [sx,sy,sz] of sizes) for (const shape of [0,1,2,3]) {
+      packInstance(buf,0,z.x,z.y,z.z,sx,sy,sz,col,kind,{},shape,false);
+      const r=buf[16], g=buf[17], b=buf[18], seed=seedFor(buf[12],buf[13],buf[14]);
+      const fx=f32(sx), fy=f32(sy), fz=f32(sz);
+      const floorY=z.cabin?0:z.under?UNDER_Y:0;
+      const top=surfaceForJS(kind,r,g,b,true,false,shape===2,seed,fx,fy,fz,shape,z.under,z.cabin,0,buf[13]+fy*.5-floorY);
+      const side=surfaceForJS(kind,r,g,b,false,false,false,seed,fx,fy,fz,shape,z.under,z.cabin,0,buf[13]-floorY);
+      const bot=surfaceForJS(kind,r,g,b,false,true,false,seed,fx,fy,fz,shape,z.under,z.cabin,0,buf[13]-fy*.5-floorY);
+      assert.deepEqual([buf[3],buf[7],buf[11]],[top,side,bot],`surface slot mismatch kind=${kind} col=${col.toString(16)} shape=${shape}`);
+    }
+  }
+
+  // Verify packInstance trig fast paths match general Euler rotation exactly.
+  const b0=new Float32Array(STRIDE), b1=new Float32Array(STRIDE);
+  packInstance(b0,0,1,2,3,4,5,6,0x112233,20,{yaw:0,pitch:0},1,true);
+  packInstance(b1,0,1,2,3,4,5,6,0x112233,20,{basis:[[1,0,0],[0,1,0],[0,0,1]]},1,true);
+  for (let i=0;i<STRIDE;i++) assert(Math.abs(b0[i]-b1[i])<1e-6,'identity fast path matches basis at '+i);
+  const yaw=1.234;
+  packInstance(b0,0,1,2,3,4,5,6,0x112233,20,{yaw,pitch:0},1,true);
+  packInstance(b1,0,1,2,3,4,5,6,0x112233,20,{yaw,pitch:1e-12},1,true);
+  for (let i=0;i<STRIDE;i++) assert(Math.abs(b0[i]-b1[i])<1e-6,'yaw-only fast path matches general at '+i);
+
+  // Verify Renderer.prototype.prepareView + inFrustum accepts in-view points and rejects strictly behind-camera points.
+  const cam={eye:[0,2,10],target:[0,2,0]};
+  const dummy={_viewPlanes:[[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]],_hasViewPlanes:false,drawingAdjacent:false,overview:false};
+  Renderer.prototype.prepareView.call(dummy,cam,16/9);
+  assert(Renderer.prototype.inFrustum.call(dummy,0,2,-5,1),'point directly in front of camera is in frustum');
+  assert(!Renderer.prototype.inFrustum.call(dummy,0,2,25,1),'point strictly behind camera is culled');
+});
+
+test('deep motion & animation pass: swimming squid, crew hair/flinch/hose, vehicle wipers/DRS/sparks, Goat claws, Snipers, 4-rotor Drones & Boss render cleanly',()=>{
+  const engine=new RoomEngine({mode:'play',weapon:'autoeima',teamSize:4,cheater:true}), b=engine.battle, p=b.player;
+  b.countdown=0;
+
+  // Activate EVERY animated system simultaneously for a full stress & animation check!
+  b.hazards.startRain(12);
+  b.hazards.spawnSnipers(3);
+  b.hazards.spawnRogueDrones(3);
+  const goat=b.hazards.spawnGoat(60);
+  b.boss.spawn();
+  for (const s of b.hazards.snipers) {s.aim=.8; s.recoil=.7; s.flash=b.clock; s.targetPos=[0,1,-16];}
+  for (const d of b.hazards.rogueDrones) {d.flash=b.clock;}
+
+  // Put one actor in ink-swimming squid state, player taking hit flinch + firing, and giant squid super!
+  const swimmer=b.actors.find(a=>a!==p && a.team===0);
+  Object.assign(swimmer,{x:2,y:0,z:-14,vx:5,vz:0,swimming:true,inkSwimming:true,down:0});
+  Object.assign(p,{x:0,y:0,z:-16,vx:3,vz:2,recoil:.85,heat:.75,damageAge:.08,landing:.4,down:0,tank:110,tankMax:140});
+  const giant=b.actors.find(a=>a.team===1);
+  Object.assign(giant,{x:-4,y:0,z:-14,giant:true,down:0});
+
+  // Drive a GT Coupe with drifting + braking + rain wipers + stain steam!
+  const coupe=b.vehicles.cars.find(c=>c.style===0);
+  Object.assign(coupe,{x:6,y:0,z:-16,speed:14,steer:.35,drifting:true,driftAngle:.22,driftCharge:.65,braking:true,boostFlame:.45,stain:.78,stainTeam:1,driver:p});
+
+  // Pack every single draw call through real packInstance() (zero-alloc path with seal()!) across multiple animation frames!
+  const packBuf=new Float32Array(STRIDE);
+  let primCount=0;
+  const benchRenderer={
+    lite:false, ultra:false, fidelity:true, viewPoint:[0,2.4,-6],
+    seal() {},
+    add(shape,x,y,z,w,h,d,tint,kind=0,opts={}) {
+      assert(Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z),'finite pos on '+shape);
+      assert(Number.isFinite(w) && Number.isFinite(h) && Number.isFinite(d),'finite size on '+shape);
+      packInstance(packBuf,0,x,y,z,w,h,d,tint,kind,opts,shape==='box'?1:shape==='bevel'?3:0,true);
+      assert(Number.isFinite(packBuf[0]) && Number.isFinite(packBuf[12]),'finite packed matrix');
+      primCount++;
+    },
+    beam(a,c,w,d,tint,kind=0,opts={}) {
+      Renderer.prototype.beam.call(this,a,c,w,d,tint,kind,opts);
+    },
+    label() {}
+  };
+
+  // Cycle Goat through all 3 animated attacks (smash, whirl, barrage) + step clocks cleanly.
+  const casts=[
+    {kind:'smash',x:goat.x,z:goat.z,start:b.clock,at:b.clock+.5,end:b.clock+1.1,done:false,points:Array.from({length:8},(_,i)=>[i*2-7,0,-15])},
+    {kind:'whirl',x:goat.x,z:goat.z,start:b.clock,at:b.clock+.4,end:b.clock+1.1,done:false,radius:12,yaw:0},
+    {kind:'barrage',x:goat.x,z:goat.z,start:b.clock,at:b.clock+.4,end:b.clock+1.0,done:false,yaw:0}
+  ];
+  const t0=performance.now();
+  for (let f=0;f<18;f++) {
+    b.clock+=1/60;
+    goat.cast=casts[f%3];
+    p.weapon=WEAPONS[f%WEAPONS.length];
+    p.charge=p.weapon.charge?.95:0;
+    p.rolling=!!p.weapon.roller;
+    b.draw(benchRenderer,0,-6,null,2.6);
+  }
+  const elapsedMs=performance.now()-t0;
+  assert(primCount>15000,'full combat stress scene emitted rich 3D detail ('+primCount+' packed instances in '+elapsedMs.toFixed(1)+'ms)');
+  assert(elapsedMs<2500,'zero-alloc packing maintains high CPU throughput ('+elapsedMs.toFixed(1)+'ms for 18 dense frames)');
 });
 
 

@@ -786,155 +786,301 @@ export class Hazards {
   drawGoat(r,now) {
     const g=this.goat;
     if (!g.active) return;
+    const lite=!!r.lite || !!r.ultra;
     const yaw=Math.PI-g.yaw, cy=Math.cos(yaw), sy=Math.sin(yaw);
-    const at=(lx,ly,lz)=>[g.x+lx*cy+lz*sy,g.y+ly,g.z-lx*sy+lz*cy];
-    const dark=0x1c1424, armor=0x2d1d38, gold=0xe5b84b, crimson=0xff2442;
-    const floor=this.battle.world.floor(g.x,g.z).y;
-    // Ominous levitation shadow & glowing sigil directly on the ground underneath
-    r.add('ripple',g.x,floor+.06,g.z,6.2+Math.sin(now*6)*.6,.04,6.2+Math.sin(now*6)*.6,crimson,12,{dynamic:true,label:(now*.8)%1});
-    // Floating obsidian torso, divine mantle, and glowing core
-    r.add('bevel',g.x,g.y+1.45,g.z,1.95,2.2,1.35,dark,4,{dynamic:true,yaw});
-    r.add('taper',g.x,g.y+.15,g.z,1.75,1.8,1.25,armor,4,{dynamic:true,yaw});
-    r.add('orb',...at(0,1.65,.68),.68,.88,.34,crimson,3,{dynamic:true,yaw});
-    r.add('bevel',...at(0,2.35,0),2.2,.36,1.45,gold,4,{dynamic:true,yaw});
-    // Horned Goat Deity Head & Blazing Crimson Eyes
-    r.add('orb',...at(0,3.15,.10),1.15,1.15,1.35,0xefe7d6,4,{dynamic:true,yaw});
-    r.add('bevel',...at(0,2.85,.68),.58,.46,.65,0xdcd2bd,4,{dynamic:true,yaw});
-    for (const sign of [-1,1]) {
-      r.add('orb',...at(sign*.34,3.26,.65),.28,.16,.18,crimson,3,{dynamic:true,yaw});
-      // Sweeping curved twin goat horns
-      const h0=at(sign*.38,3.62,.05), h1=at(sign*.95,4.28,-.35), h2=at(sign*1.28,4.05,-1.15);
-      r.beam(h0,h1,.26,.20,gold,4,{dynamic:true});
-      r.beam(h1,h2,.19,.10,0x452b18,4,{dynamic:true});
+    const gx=g.x, gy=g.y, gz=g.z;
+    const breath=1+Math.sin(now*3.8)*.045;
+    const cast=g.cast;
+    const bodyTilt=cast?.kind==='whirl'?.24:cast?.kind==='smash'?-.14:Math.sin(now*2.1)*.06;
+    const dark=0x1c1424, armor=0x2d1d38, gold=0xe5b84b, crimson=0xff2442, hotGold=0xffe680;
+    const floor=this.battle.world.floor(gx,gz).y;
+    const setAt=(dst,lx,ly,lz)=>{dst[0]=gx+lx*cy+lz*sy; dst[1]=gy+ly; dst[2]=gz-lx*sy+lz*cy;};
+    _hzDynYP.yaw=yaw; _hzDynYP.pitch=bodyTilt;
+    const put=(type,lx,ly,lz,w,h,d,col,mat=4,pitch=bodyTilt)=>{
+      _hzDynYP.pitch=pitch;
+      r.add(type,gx+lx*cy+lz*sy,gy+ly,gz-lx*sy+lz*cy,w,h,d,col,mat,_hzDynYP);
+    };
+
+    // Ominous dual levitation sigil & dark AO contact shadow directly beneath Goat
+    _hzDynLabel.label=(now*.8)%1;
+    r.add('ripple',gx,floor+.06,gz,6.4+Math.sin(now*6)*.65,.04,6.4+Math.sin(now*6)*.65,crimson,12,_hzDynLabel);
+    if (!lite) {
+      _hzDynLabel.label=((now*.8)+.5)%1;
+      r.add('ripple',gx,floor+.09,gz,4.2+Math.cos(now*5)*.45,.04,4.2+Math.cos(now*5)*.45,gold,12,_hzDynLabel);
+      _hzDynLabel.label=.70;
+      r.add('shade',gx,floor+.02,gz,4.6,1,4.6,0,28,_hzDynLabel);
     }
-    // Floating golden-crimson halo ring orbiting behind back
+
+    // Floating obsidian torso, sculpted rib-armor, divine mantle collar, pulsing crimson heart core & flowing cloak ribbons!
+    put('bevel',0,1.45,0,1.98*breath,2.24,1.38*breath,dark,4);
+    put('taper',0,.15,0,1.78,1.82,1.28,armor,4);
+    const heartPulse=1+Math.sin(now*(cast?14:6))*.14;
+    put('orb',0,1.65,.68,.70*heartPulse,.92*heartPulse,.36,cast?hotGold:crimson,3);
+    put('bevel',0,2.38,0,2.30,.38,1.52,gold,4);
+    if (!lite) {
+      // Sculpted obsidian chest ribs + 3 flowing void cloak ribbons whipping behind Goat!
+      for (let rb=0;rb<3;rb++) put('bevel',0,1.15+rb*.38,.66,1.55-rb*.12,.11,.16,gold,4);
+      for (let c=-1;c<=1;c++) {
+        const wave=Math.sin(now*4.6+c*1.3)*.28;
+        put('bevel',c*.65,.45,-.82+wave*.25,.42,1.95,.10,c===0?armor:dark,4,.22+wave*.35);
+        put('bevel',c*.72,-.55,-1.08+wave*.55,.32,1.15,.08,crimson,3,.42+wave*.55);
+      }
+    }
+
+    // Horned Goat Deity Skull-Helm, Articulated Jaw, Sweeping Twin Horns & Blazing Crimson Eyes
+    put('orb',0,3.15,.10,1.18,1.18,1.38,0xefe7d6,4,bodyTilt*.6);
+    put('bevel',0,2.85,.68,.60,.48,.68,0xdcd2bd,4,bodyTilt*.6);
+    if (!lite) put('bevel',0,3.72,.28,.16,.44,.52,gold,4,-.15); // forehead crown crest
+    for (let s=-1;s<=1;s+=2) {
+      put('orb',s*.34,3.26,.65,.30,.18,.20,cast?hotGold:crimson,3,bodyTilt*.6);
+      setAt(_hzA,s*.38,3.62,.05); setAt(_hzB,s*.95,4.28,-.35); setAt(_hzC,s*1.28,4.05,-1.15);
+      r.beam(_hzA,_hzB,.26,.20,gold,4,_hzDyn);
+      r.beam(_hzB,_hzC,.19,.10,0x452b18,4,_hzDyn);
+      if (!lite) r.add('orb',_hzC[0],_hzC[1],_hzC[2],.18,.18,.18,crimson,3,_hzDyn);
+    }
+
+    // Counter-rotating fractured obsidian-gold halo ring & hovering deity sigil orbs behind back!
     for (let i=0;i<8;i++) {
-      const a=now*1.8+i*TAU/8;
-      r.add('orb',...at(Math.cos(a)*2.6,2.1+Math.sin(a)*2.6,-.85),.32,.32,.32,i%2?gold:crimson,3,{dynamic:true});
+      const a=now*1.85+i*TAU/8;
+      const hx=Math.cos(a)*2.65, hy=2.15+Math.sin(a)*2.65;
+      setAt(_hzA,hx,hy,-.88);
+      r.add('orb',_hzA[0],_hzA[1],_hzA[2],.34,.34,.34,i%2?gold:crimson,3,_hzDyn);
+      if (!lite && i%2===0) {
+        const a2=-now*2.4+i*TAU/8;
+        setAt(_hzB,Math.cos(a2)*3.35,2.15+Math.sin(a2)*3.35,-1.05);
+        _hzDynYP.yaw=yaw+a2; _hzDynYP.pitch=a2*.5;
+        r.add('bevel',_hzB[0],_hzB[1],_hzB[2],.24,.52,.12,dark,4,_hzDynYP);
+      }
     }
-    // 8 Articulated Divine Arms radiating in 4 pairs around Goat!
-    const cast=g.cast, links=r.lite?3:5;
+
+    // 8 Articulated Divine Arms with Pauldrons, Bracer Rings, Glowing Palms & 3-Claw Fingers!
+    const links=lite?3:5;
+    const pts=links===5?_hzPts6:_hzPts4;
     for (let i=0;i<GOAT_ARMS;i++) {
-      const side=i%2===0?-1:1, tier=Math.floor(i/2);
-      const shoulder=at(side*(1.05+tier*.14),2.35-tier*.45,-.12);
-      let tip;
+      const side=i%2===0?-1:1, tier=i>>1;
+      setAt(pts[0],side*(1.08+tier*.14),2.38-tier*.45,-.12);
+      const sx0=pts[0][0], sy0=pts[0][1], sz0=pts[0][2];
+      // Ornate gold shoulder pauldron per arm!
+      if (!lite) r.add('bevel',sx0,sy0+.06,sz0,.56,.42,.56,tier%2?gold:armor,4,_hzDynYP);
+      let tx, ty, tz;
       if (cast?.kind==='smash' && cast.points?.[i]) {
-        const p=cast.points[i];
+        const pt=cast.points[i];
         const prog=clamp((now-cast.start)/Math.max(.05,cast.at-cast.start),0,1);
-        const strike=now>=cast.at?1:prog*.55;
-        tip=[shoulder[0]+(p[0]-shoulder[0])*strike,shoulder[1]+(p[1]+.35-shoulder[1])*strike,shoulder[2]+(p[2]-shoulder[2])*strike];
-        if (!cast.done) r.add('hazard',p[0],p[1]+.05,p[2],6.6,1,6.6,crimson,24,{dynamic:true,label:prog});
+        // Dramatic skyward wind-up coil, then lightning-fast downward slam!
+        const strike=now>=cast.at?1:prog*prog*.42;
+        const coilLift=now<cast.at?Math.sin(prog*Math.PI)*3.4:0;
+        tx=sx0+(pt[0]-sx0)*strike;
+        ty=sy0+(pt[1]+.35-sy0)*strike+coilLift;
+        tz=sz0+(pt[2]-sz0)*strike;
+        if (!cast.done) {
+          _hzDynLabel.label=prog;
+          r.add('hazard',pt[0],pt[1]+.05,pt[2],6.6,1,6.6,crimson,24,_hzDynLabel);
+        }
       } else if (cast?.kind==='whirl') {
-        const spin=now*11+i*TAU/GOAT_ARMS, reach=10.5;
-        tip=[g.x+Math.cos(spin)*reach,g.y+.6,g.z+Math.sin(spin)*reach];
+        const spin=now*12.5+i*TAU/GOAT_ARMS, reach=10.8;
+        tx=gx+Math.cos(spin)*reach; ty=gy+.55+Math.sin(spin*2)*.45; tz=gz+Math.sin(spin)*reach;
+      } else if (cast?.kind==='barrage') {
+        const prog=clamp((now-cast.start)/Math.max(.05,cast.at-cast.start),0,1);
+        const ang=i*TAU/GOAT_ARMS, rad=3.2-prog*.8;
+        setAt(_hzA,Math.cos(ang)*rad,2.2+Math.sin(ang)*1.4,1.9+prog*1.1);
+        tx=_hzA[0]; ty=_hzA[1]; tz=_hzA[2];
       } else {
-        const wave=now*3.4+i*.85;
+        const wave=now*3.5+i*.85;
         const spread=(1.6+tier*.38)*Math.PI/8;
-        const lx=side*(2.6+Math.sin(wave)*.55+tier*.32);
-        const ly=2.8-tier*.65+Math.cos(wave*1.3)*.45;
-        const lz=1.45+Math.sin(wave*.8+spread)*.75;
-        tip=at(lx,ly,lz);
+        setAt(_hzA,side*(2.65+Math.sin(wave)*.6+tier*.32),2.85-tier*.65+Math.cos(wave*1.3)*.5,1.48+Math.sin(wave*.8+spread)*.8);
+        tx=_hzA[0]; ty=_hzA[1]; tz=_hzA[2];
       }
-      const pts=[shoulder];
       for (let j=1;j<links;j++) {
-        const t=j/links, arch=Math.sin(t*Math.PI)*(1.25+(i%2)*.4);
-        pts.push([
-          shoulder[0]+(tip[0]-shoulder[0])*t+side*cy*arch*.35,
-          shoulder[1]+(tip[1]-shoulder[1])*t+arch*.85,
-          shoulder[2]+(tip[2]-shoulder[2])*t-side*sy*arch*.35
-        ]);
+        const t=j/links, arch=Math.sin(t*Math.PI)*(1.30+(i%2)*.42);
+        const pDst=pts[j];
+        pDst[0]=sx0+(tx-sx0)*t+side*cy*arch*.36;
+        pDst[1]=sy0+(ty-sy0)*t+arch*.88;
+        pDst[2]=sz0+(tz-sz0)*t-side*sy*arch*.36;
       }
-      pts.push(tip);
-      drawTentacle(r,pts,.36,dark,gold);
-      r.add('orb',tip[0],tip[1],tip[2],.55,.55,.55,cast?crimson:gold,3,{dynamic:true});
+      pts[links][0]=tx; pts[links][1]=ty; pts[links][2]=tz;
+      drawTentacle(r,pts,.38,dark,gold,lite?0:crimson);
+      // Glowing palm sigil + golden wrist bracer ring + 3 articulated claw fingers!
+      const palmS=cast?.kind==='barrage'?.72:.56;
+      r.add('orb',tx,ty,tz,palmS,palmS,palmS,cast?crimson:gold,3,_hzDyn);
+      if (!lite) {
+        const wrist=pts[links-1];
+        r.add('ring',wrist[0],wrist[1],wrist[2],.48,.07,.48,gold,4,_hzDyn);
+        const clawSpread=cast?.kind==='barrage'?.44:.30;
+        const dx=tx-wrist[0], dy=ty-wrist[1], dz=tz-wrist[2];
+        const inv=1/Math.max(.01,Math.hypot(dx,dy,dz));
+        const fx=dx*inv, fy=dy*inv, fz=dz*inv;
+        for (let c=-1;c<=1;c++) {
+          const cx=tx+fx*.55+c*cy*clawSpread, cy2=ty+fy*.55+(c===0?.24:-.12), cz=tz+fz*.55-c*sy*clawSpread;
+          _hzA[0]=tx; _hzA[1]=ty; _hzA[2]=tz;
+          _hzB[0]=cx; _hzB[1]=cy2; _hzB[2]=cz;
+          r.beam(_hzA,_hzB,.11,.08,gold,4,_hzDyn);
+        }
+      }
     }
   }
 
-  // ---- 3D Rendering ----
+  // ---- 3D Rendering (High Craft + Zero-Allocation + Frustum Culled VFX) ----
   draw(r,viewX,viewZ) {
     const now=this.battle.clock+(this.battle.impactAgeOffset??0);
     const zone=zoneOf(viewX);
-    // 1. Apartment Snipers + Laser Sights
+    const lite=!!r.lite || !!r.ultra;
+    const hasFrustum=typeof r.inFrustum==='function';
+
+    // 1. Apartment Snipers (Crouched Tactical Stance, Recoil Kickback, Scope Glint & Pulsing Laser Sight!)
     if (zone===0) {
-      for (const s of this.snipers) {
+      for (let i=0;i<this.snipers.length;i++) {
+        const s=this.snipers[i];
         if (!s.active) continue;
         const yaw=Math.PI-s.yaw;
-        r.add('bevel',s.x,s.y+.52,s.z,.58,.82,.42,0x2a222d,4,{dynamic:true,yaw});
-        r.add('orb',s.x,s.y+1.26,s.z,.48,.48,.48,0x342838,4,{dynamic:true,yaw});
-        // Glowing red sniper visor
-        const [fx,,fz]=forward(s.yaw);
-        r.add('orb',s.x+fx*.20,s.y+1.28,s.z+fz*.20,.26,.14,.16,0xff2438,3,{dynamic:true,yaw});
-        // Long sniper rifle
-        const muzzle=[s.x+fx*1.15,s.y+1.18+Math.sin(s.pitch)*.8,s.z+fz*1.15];
-        r.beam([s.x+fx*.15,s.y+1.16,s.z+fz*.15],muzzle,.09,.09,0x1d2529,4,{dynamic:true});
-        // Laser sight telegraph when aiming at a fighter
-        if (s.targetPos && s.aim>.08) {
-          const pulse=.025+.025*Math.sin(now*28);
-          r.beam(muzzle,s.targetPos,pulse,pulse,0xff2438,3,{dynamic:true});
+        const breath=Math.sin(now*3.6+s.id)*.022;
+        const kick=(s.recoil??0)*.18;
+        const fx=Math.sin(s.yaw), fz=-Math.cos(s.yaw);
+        const rx=Math.cos(s.yaw), rz=Math.sin(s.yaw);
+        _hzDynYP.yaw=yaw; _hzDynYP.pitch=-kick*.4;
+        r.add('bevel',s.x,s.y+.50+breath,s.z,.60,.82,.44,0x2a222d,20,_hzDynYP);
+        if (!lite) {
+          // Tactical sniper hood cloak & armored chest rig
+          r.add('bevel',s.x-fx*.12,s.y+.54+breath,s.z-fz*.12,.68,.78,.28,0x1a1520,21,_hzDynYP);
+          r.add('bevel',s.x+fx*.20,s.y+.68+breath,s.z+fz*.20,.38,.28,.12,0x45354c,20,_hzDynYP);
         }
-        if (now-(s.flash??-9)<.15) {
-          r.add('orb',muzzle[0],muzzle[1],muzzle[2],.42,.42,.42,0xffb060,3,{dynamic:true});
+        _hzDynYP.pitch=0;
+        r.add('orb',s.x,s.y+1.26+breath,s.z,.49,.49,.49,0x342838,20,_hzDynYP);
+        r.add('orb',s.x+fx*.21,s.y+1.28+breath,s.z+fz*.21,.28,.14,.16,0xff2438,3,_hzDynYP);
+        // Long fluted anti-materiel sniper rifle with kickback + glinting scope!
+        const sp=Math.sin(s.pitch);
+        _hzA[0]=s.x+fx*(.15-kick); _hzA[1]=s.y+1.16+breath; _hzA[2]=s.z+fz*(.15-kick);
+        _hzB[0]=s.x+fx*(1.22-kick); _hzB[1]=s.y+1.18+breath+sp*.82; _hzB[2]=s.z+fz*(1.22-kick);
+        r.beam(_hzA,_hzB,.095,.095,0x1d2529,4,_hzDyn);
+        if (!lite) {
+          // High-magnification scope + lens glint + muzzle brake
+          r.add('cylinder',s.x+fx*(.48-kick),s.y+1.30+breath+sp*.22,s.z+fz*(.48-kick),.09,.32,.09,0x2c363b,4,_hzDynYP);
+          r.add('orb',s.x+fx*(.66-kick),s.y+1.30+breath+sp*.30,s.z+fz*(.66-kick),.08,.08,.08,s.aim>.1?0xff5870:0x9ee6df,3,_hzDyn);
+          r.add('box',_hzB[0],_hzB[1],_hzB[2],.14,.14,.14,0x151a1e,4,_hzDynYP);
+          // Bipod legs braced on parapet
+          _hzC[0]=s.x+fx*.75+rx*.16; _hzC[1]=s.y+.72; _hzC[2]=s.z+fz*.75+rz*.16;
+          r.beam(_hzA,_hzC,.035,.035,0x2c363b,4,_hzDyn);
+        }
+        if (s.targetPos && s.aim>.08) {
+          const pulse=.026+.026*Math.sin(now*30);
+          r.beam(_hzB,s.targetPos,pulse,pulse,0xff2438,3,_hzDyn);
+        }
+        if (now-(s.flash??-9)<.16) {
+          r.add('orb',_hzB[0],_hzB[1],_hzB[2],.46,.46,.46,0xffb060,3,_hzDyn);
+          if (!lite) r.add('ring',_hzB[0],_hzB[1],_hzB[2],.72,.06,.72,0xff4458,3,_hzDynYP);
         }
       }
     }
-    // 2. Hostile Rogue Drones
-    for (const d of this.rogueDrones) {
+
+    // 2. Hostile Rogue Drones (Banking Tilted Chassis, 4 Spinning Rotor Blades + Glow Discs & Scan Cone!)
+    for (let i=0;i<this.rogueDrones.length;i++) {
+      const d=this.rogueDrones[i];
       if (!d.active || !sameLevel(d.x,viewX)) continue;
-      const bob=Math.sin(now*9+d.id)*.11, y=d.y+bob;
-      r.add('bevel',d.x,y,d.z,.76,.32,.58,0x271e2c,4,{dynamic:true,yaw:d.yaw});
-      r.add('orb',d.x,y-.17,d.z,.33,.28,.31,0xff2846,3,{dynamic:true});
-      for (const side of [-1,1]) {
-        const rx=d.x+Math.cos(d.yaw)*side*.54, rz=d.z+Math.sin(d.yaw)*side*.54;
-        r.beam([d.x,y,d.z],[rx,y,rz],.08,.09,0x3c2c44,4,{dynamic:true});
-        r.add('cylinder',rx,y+.12,rz,.42,.06,.42,0xd83258,3,{dynamic:true});
+      const bob=Math.sin(now*9.2+d.id)*.12, y=d.y+bob;
+      const bankPitch=Math.sin(now*4.5+d.id)*.16+((now-(d.flash??-9))<.16?-.22:0);
+      const cy=Math.cos(d.yaw), sy=Math.sin(d.yaw);
+      _hzDynYP.yaw=d.yaw; _hzDynYP.pitch=bankPitch;
+      r.add('bevel',d.x,y,d.z,.80,.32,.62,0x271e2c,20,_hzDynYP);
+      r.add('orb',d.x,y-.18,d.z,.34,.28,.32,0xff2846,3,_hzDyn);
+      if (!lite) {
+        // Armored dorsal fin + glowing crimson threat ring beneath scanner eye!
+        r.add('bevel',d.x,y+.22,d.z,.18,.14,.44,0x3c2c44,4,_hzDynYP);
+        _hzDynLabel.label=(now*2.2+d.id*.3)%1;
+        r.add('ripple',d.x,y-.32,d.z,.85,.03,.85,0xff2846,12,_hzDynLabel);
+      }
+      // 4 angled quad-rotor arms with spinning rotor blades!
+      const bladeSpin=now*34+d.id*1.7;
+      for (let rxS=-1;rxS<=1;rxS+=2) for (let rzS=-1;rzS<=1;rzS+=2) {
+        const lx=rxS*.52, lz=rzS*.38;
+        const px=d.x+lx*cy+lz*sy, pz=d.z-lx*sy+lz*cy;
+        _hzA[0]=d.x; _hzA[1]=y; _hzA[2]=d.z;
+        _hzB[0]=px; _hzB[1]=y+.06; _hzB[2]=pz;
+        r.beam(_hzA,_hzB,.07,.07,0x3c2c44,4,_hzDyn);
+        r.add('cylinder',px,y+.13,pz,.40,.045,.40,0xd83258,3,_hzDyn);
+        if (!lite) {
+          _hzDynYaw.yaw=bladeSpin*(rxS*rzS);
+          r.add('box',px,y+.16,pz,.42,.018,.055,0xf0dce4,4,_hzDynYaw);
+        }
       }
       if (now-(d.flash??-9)<.16) {
-        r.add('orb',d.x,y-.22,d.z,.42,.42,.42,0xffd088,3,{dynamic:true});
+        r.add('orb',d.x,y-.24,d.z,.46,.46,.46,0xffd088,3,_hzDyn);
       }
     }
-    // 3. Rain Streaks & Ripples (surface only)
+
+    // 3. Rain Streaks & Ripples (Precomputed Static Seeds + Frustum Culled!)
     if (this.rain.active && zone===0) {
       const count=r.ultra?18:r.lite?32:56;
       for (let i=0;i<count;i++) {
-        const h1=Math.sin(i*12.9898)*43758.5453, f1=h1-Math.floor(h1);
-        const h2=Math.sin(i*78.233)*43758.5453, f2=h2-Math.floor(h2);
+        const f1=RAIN_SEEDS[i*2], f2=RAIN_SEEDS[i*2+1];
         const rx=viewX+(f1-.5)*34, rz=viewZ+(f2-.5)*34;
         const cycle=(now*2.8+f1*3.7+f2*5.1)%1;
         const ry=16*(1-cycle);
-        r.beam([rx,ry,rz],[rx+.18,ry+1.45,rz],.024,.024,0x9fd2f0,3,{dynamic:true});
-        if (cycle>.92) r.add('ripple',rx,.04,rz,.95,.02,.95,0x8cc9ec,12,{dynamic:true,label:(cycle-.92)/.08});
+        if (hasFrustum && !r.inFrustum(rx,ry,rz,1.8)) continue;
+        _hzA[0]=rx; _hzA[1]=ry; _hzA[2]=rz;
+        _hzB[0]=rx+.18; _hzB[1]=ry+1.45; _hzB[2]=rz;
+        r.beam(_hzA,_hzB,.024,.024,0x9fd2f0,3,_hzDyn);
+        if (cycle>.92) {
+          _hzDynLabel.label=(cycle-.92)/.08;
+          r.add('ripple',rx,.04,rz,.95,.02,.95,0x8cc9ec,12,_hzDynLabel);
+        }
       }
     }
-    // 4. Tsunami Wave Wall (surface)
+
+    // 4. Tsunami Wave Wall & Surging Spray Crest (surface)
     if (this.tsunami.phase==='wave' && zone===0) {
       const ts=this.tsunami, h=ts.height, x=ts.x;
-      // Main translucent rushing wall of water
-      r.add('curtain',x+ts.width*.45,h*.5,0,76,h,1,0x1f8fb8,16,{dynamic:true,yaw:Math.PI/2,label:.82});
-      r.add('curtain',x,h*.48,0,76,h*.95,1,0x146c94,16,{dynamic:true,yaw:Math.PI/2,label:.65});
-      r.add('box',x-ts.width*.1,h*.36,0,ts.width*.72,h*.72,72,0x177ba4,9,{dynamic:true});
-      // Foaming crest along top of wave
+      _hzDynCurtain.label=.82;
+      r.add('curtain',x+ts.width*.45,h*.5,0,76,h,1,0x1f8fb8,16,_hzDynCurtain);
+      _hzDynCurtain.label=.65;
+      r.add('curtain',x,h*.48,0,76,h*.95,1,0x146c94,16,_hzDynCurtain);
+      r.add('box',x-ts.width*.1,h*.36,0,ts.width*.72,h*.72,72,0x177ba4,9,_hzDyn);
       for (let z=-32;z<=32;z+=8) {
-        const crest=Math.sin(now*10+z)*.28;
-        r.add('orb',x+ts.width*.38,h+.1+crest,z,2.8,1.5,9.2,0xd8f3ff,3,{dynamic:true});
+        const crest=Math.sin(now*10+z)*.32;
+        r.add('orb',x+ts.width*.38,h+.12+crest,z,2.9,1.55,9.2,0xd8f3ff,3,_hzDyn);
+        if (!lite) {
+          const sp=(now*3.5+z*.13)%1;
+          r.add('orb',x+ts.width*.52+sp*2.4,h*.85+Math.sin(sp*Math.PI)*1.1,z+Math.sin(now*6+z)*1.5,.65*(1-sp),.65*(1-sp),.65*(1-sp),0xeaf8ff,3,_hzDyn);
+        }
       }
     }
+
     // 5. Underground Flood Water Surface (B1)
     if (this.underFlood.active && this.underFlood.depth>.05 && zone===1) {
       const wy=UNDER_Y+this.underFlood.depth, cx=ZONES[1].x;
-      r.add('box',cx,UNDER_Y+this.underFlood.depth*.5,0,126,this.underFlood.depth,90,0x166d91,9,{dynamic:true});
-      // Shimmering water surface ripples
+      r.add('box',cx,UNDER_Y+this.underFlood.depth*.5,0,126,this.underFlood.depth,90,0x166d91,9,_hzDyn);
       const step=r.lite?16:11;
       for (let ox=-48;ox<=48;ox+=step) for (let oz=-32;oz<=32;oz+=step) {
-        const phase=(now*.6+(ox+oz)*.03)%1;
-        r.add('ripple',cx+ox,wy+.04,oz,4.5,.03,4.5,0x8ed8f2,12,{dynamic:true,label:phase});
+        if (hasFrustum && !r.inFrustum(cx+ox,wy,oz,4.8)) continue;
+        _hzDynLabel.label=(now*.6+(ox+oz)*.03)%1;
+        r.add('ripple',cx+ox,wy+.04,oz,4.5,.03,4.5,0x8ed8f2,12,_hzDynLabel);
       }
     }
+
     // 6. Runaway Train Boss Aura
     if (this.trainBoss.active && sameLevel(this.trainBoss.x,viewX)) {
-      const pulse=(now*2.2)%1;
-      r.add('ripple',this.trainBoss.x,this.trainBoss.y+.35,this.trainBoss.z,14,.06,14,0xff3040,12,{dynamic:true,label:pulse});
+      _hzDynLabel.label=(now*2.2)%1;
+      r.add('ripple',this.trainBoss.x,this.trainBoss.y+.35,this.trainBoss.z,14,.06,14,0xff3040,12,_hzDynLabel);
     }
+
     // 7. God of Destruction Goat (破壊神ゴート)
     if (zone===0 && this.goat.active) this.drawGoat(r,now);
   }
 }
+
+const _hzDyn={dynamic:true};
+const _hzDynYaw={dynamic:true,yaw:0};
+const _hzDynYP={dynamic:true,yaw:0,pitch:0};
+const _hzDynLabel={dynamic:true,label:0};
+const _hzDynCurtain={dynamic:true,yaw:Math.PI/2,label:.82};
+const _hzA=[0,0,0], _hzB=[0,0,0], _hzC=[0,0,0];
+const _hzPts6=[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]];
+const _hzPts4=[[0,0,0],[0,0,0],[0,0,0],[0,0,0]];
+const RAIN_SEEDS=(()=>{
+  const out=new Float32Array(56*2);
+  for (let i=0;i<56;i++) {
+    const h1=Math.sin(i*12.9898)*43758.5453;
+    const h2=Math.sin(i*78.233)*43758.5453;
+    out[i*2]=h1-Math.floor(h1);
+    out[i*2+1]=h2-Math.floor(h2);
+  }
+  return out;
+})();

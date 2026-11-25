@@ -383,8 +383,15 @@ export function packInstance(out,o,x,y,z,w,h,d,tint,kind,opts=EMPTY,shape=0,ensu
     }
   } else {
     const yaw=opts.yaw||0, pitch=opts.pitch||0;
-    const c1=Math.cos(yaw),s1=Math.sin(yaw),c2=Math.cos(pitch),s2=Math.sin(pitch);
-    ax=c1;ay=0;az=-s1;bx=s1*s2;by=c2;bz=c1*s2;cx=s1*c2;cy=-s2;cz=c1*c2;
+    if (!yaw && !pitch) {
+      ax=1;ay=0;az=0;bx=0;by=1;bz=0;cx=0;cy=0;cz=1;
+    } else if (!pitch) {
+      const c1=Math.cos(yaw),s1=Math.sin(yaw);
+      ax=c1;ay=0;az=-s1;bx=0;by=1;bz=0;cx=s1;cy=0;cz=c1;
+    } else {
+      const c1=Math.cos(yaw),s1=Math.sin(yaw),c2=Math.cos(pitch),s2=Math.sin(pitch);
+      ax=c1;ay=0;az=-s1;bx=s1*s2;by=c2;bz=c1*s2;cx=s1*c2;cy=-s2;cz=c1*c2;
+    }
   }
   out[o]=ax*w;out[o+1]=ay*w;out[o+2]=az*w;out[o+3]=-1;
   out[o+4]=bx*h;out[o+5]=by*h;out[o+6]=bz*h;out[o+7]=-1;
@@ -399,14 +406,22 @@ export function labelIndex(name) {
   return LABEL_INDEX.get(name) ?? -1;
 }
 
-function frustum(m) {
-  const planes=[];
-  for (const [i,s] of [[0,1],[0,-1],[1,1],[1,-1],[2,1],[2,-1]]) {
+const FRUSTUM_SPEC=[[0,1],[0,-1],[1,1],[1,-1],[2,1],[2,-1]];
+function makePlanes() {
+  return [[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0],[0,0,0,0]];
+}
+function frustumInto(m,planes) {
+  for (let p=0;p<6;p++) {
+    const i=FRUSTUM_SPEC[p][0], s=FRUSTUM_SPEC[p][1];
     const a=m[3]+s*m[i], b=m[7]+s*m[4+i], c=m[11]+s*m[8+i], d=m[15]+s*m[12+i];
-    const l=Math.hypot(a,b,c)||1;
-    planes.push([a/l,b/l,c/l,d/l]);
+    const inv=1/(Math.hypot(a,b,c)||1);
+    const dst=planes[p];
+    dst[0]=a*inv; dst[1]=b*inv; dst[2]=c*inv; dst[3]=d*inv;
   }
   return planes;
+}
+function frustum(m) {
+  return frustumInto(m,makePlanes());
 }
 
 function boxVisible(planes,min,max,ox) {
@@ -418,11 +433,19 @@ function boxVisible(planes,min,max,ox) {
   return true;
 }
 
-function boxDistance(e,min,max,ox) {
+function boxDistanceSq(e,min,max,ox) {
   const dx=Math.max(min[0]+ox-e[0],0,e[0]-max[0]-ox);
   const dy=Math.max(min[1]-e[1],0,e[1]-max[1]);
   const dz=Math.max(min[2]-e[2],0,e[2]-max[2]);
-  return Math.sqrt(dx*dx+dy*dy+dz*dz);
+  return dx*dx+dy*dy+dz*dz;
+}
+
+function sphereInPlanes(planes,x,y,z,r) {
+  for (let i=0;i<6;i++) {
+    const p=planes[i];
+    if (p[0]*x+p[1]*y+p[2]*z+p[3]<-r) return false;
+  }
+  return true;
 }
 
 function morton(x,z) {
@@ -637,11 +660,40 @@ export class Renderer {
     const high=renderMeshes(), low=lodMeshes();
     this.vaos={};
     this.batches={};
+    this.batchEntries=[];
+    this.shadowBatches=[];
+    this.archBatches=[];
+    this.closedBatches=[];
+    this.alphaBatches=[];
+    this.nonAlphaBatches=[];
     for (const name of Object.keys(high)) {
-      this.vaos[name]={hi:this.makeVAO(high[name]),lo:this.makeVAO(low[name])};
-      this.batches[name]=Object.fromEntries([...ZONE_BATCHES,'dynamic','dynamicLo','adjacent'].map(key=>[key,
-        {data:new Float32Array(key==='dynamic' || key==='dynamicLo' || key==='adjacent'?STRIDE*64:0),length:0,count:0,buffer:gl.createBuffer(),capacity:0,chunks:[]}]));
+      const vaos={hi:this.makeVAO(high[name]),lo:this.makeVAO(low[name])};
+      this.vaos[name]=vaos;
+      const pair=Object.fromEntries([...ZONE_BATCHES,'dynamic','dynamicLo','adjacent'].map(key=>[key,
+        {data:new Float32Array(key==='dynamic' || key==='dynamicLo' || key==='adjacent'?STRIDE*128:0),length:0,count:0,buffer:gl.createBuffer(),capacity:0,chunks:[],buckets:null}]));
+      pair.closed=CULL_MESHES.has(name);
+      pair.symmetric=SYMMETRIC_CULL.has(name);
+      pair.shapeId=SHAPE_IDS[name]??0;
+      pair.isBevel=name==='bevel';
+      pair.isAlpha=TRANSPARENT_MESHES.has(name);
+      pair.isDecal=DECAL_MESHES.has(name);
+      this.batches[name]=pair;
+      const entry={type:name,pair,vaos,closed:pair.closed,shapeId:pair.shapeId,isBevel:pair.isBevel,isAlpha:pair.isAlpha,isDecal:pair.isDecal};
+      this.batchEntries.push(entry);
+      if (!pair.isAlpha && !pair.isDecal) this.shadowBatches.push(entry);
+      if (pair.closed) {
+        this.closedBatches.push(entry);
+        if (name!=='ramp') this.archBatches.push(entry);
+      }
+      if (pair.isAlpha) this.alphaBatches.push(entry);
+      else this.nonAlphaBatches.push(entry);
     }
+    this._planes=makePlanes();
+    this._shadowPlanes=makePlanes();
+    this._mirrorPlanes=makePlanes();
+    this._viewPlanes=makePlanes();
+    this._hasViewPlanes=false;
+    this._boundVao=null;
     this.frame = 0;
     this.inkTime = -1;
     gl.clearDepth(1);
@@ -1190,16 +1242,35 @@ export class Renderer {
     return this.frameAverage?1000/this.frameAverage:0;
   }
 
+  // Computes the current frame's camera frustum before dynamic scene submission
+  // so non-shadow-casting VFX (droplets, decals, ripples, sparks, rain) outside
+  // the view frustum skip CPU packing and GPU upload with zero visible loss.
+  prepareView(camera,aspect) {
+    if (!camera || camera.overview || !(aspect>0)) {
+      this._hasViewPlanes=false;
+      return;
+    }
+    const vp=multiply(perspective(aspect),view(camera.eye,camera.target));
+    frustumInto(vp,this._viewPlanes);
+    this._hasViewPlanes=true;
+  }
+
+  inFrustum(x,y,z,r=1) {
+    if (!this._hasViewPlanes || this.drawingAdjacent || this.overview) return true;
+    return sphereInPlanes(this._viewPlanes,x,y,z,r);
+  }
+
   add(type,x,y,z,w,h,d,tint,kind = 0,opts = EMPTY) {
     const pair=this.batches[type];
     if (!pair) return;
     let batch;
     if (opts.dynamic) {
       if (this.drawingAdjacent) batch=pair.adjacent;
-      else if (CULL_MESHES.has(type)) {
+      else if (pair.closed) {
         let useLo=this.lite;
         if (!useLo && this.viewPoint) {
-          const dx=x-this.viewPoint[0], dy=y-this.viewPoint[1], dz=z-this.viewPoint[2];
+          const vp=this.viewPoint;
+          const dx=x-vp[0], dy=y-vp[1], dz=z-vp[2];
           if (dx*dx+dy*dy+dz*dz>400) useLo=true;
         }
         batch=useLo?pair.dynamicLo:pair.dynamic;
@@ -1210,7 +1281,7 @@ export class Renderer {
       grown.set(batch.data.subarray(0,batch.length));
       batch.data=grown;
     }
-    packInstance(batch.data,batch.length,x,y,z,w,h,d,tint,kind,opts,SHAPE_IDS[type]??0,SYMMETRIC_CULL.has(type));
+    packInstance(batch.data,batch.length,x,y,z,w,h,d,tint,kind,opts,pair.shapeId,pair.symmetric);
     batch.length+=STRIDE;
   }
 
@@ -1247,8 +1318,9 @@ export class Renderer {
 
   seal() {
     this.occluder?.clear();
-    for (const [type,pair] of Object.entries(this.batches)) {
-      ZONE_BATCHES.forEach((key,zone)=>this.sealStatic(type,pair[key],zone));
+    for (let i=0;i<this.batchEntries.length;i++) {
+      const {type,pair}=this.batchEntries[i];
+      for (let zone=0;zone<ZONE_BATCHES.length;zone++) this.sealStatic(type,pair[ZONE_BATCHES[zone]],zone);
     }
   }
 
@@ -1258,6 +1330,7 @@ export class Renderer {
   sealStatic(type,batch,zone) {
     const gl=this.gl, count=batch.length/STRIDE, source=batch.data;
     batch.chunks=[];
+    batch.buckets=null;
     batch.count=count;
     if (!count) return;
     const origin=ZONES[zone].x, keys=new Uint32Array(count), radius=new Float32Array(count);
@@ -1343,7 +1416,28 @@ export class Renderer {
         if (hi>chunk.max[axis]) chunk.max[axis]=hi;
       }
     }
-    for (const c of batch.chunks) c.aboveMirror=c.min[1]>=.04;
+    // Pre-partition chunks by immutable pass filter so drawStatic scans ONLY matching chunks.
+    const buckets={all:batch.chunks,opaque:[],opaqueHi:[],opaqueLo:[],archHi:[],archLo:[],fullHi:[],fullLo:[],cutout:[],shadow:[],mirrorOpaque:[],mirrorClip:[]};
+    for (let i=0;i<batch.chunks.length;i++) {
+      const c=batch.chunks[i];
+      c.aboveMirror=c.min[1]>=.04;
+      if (!c.noShadow) buckets.shadow.push(c);
+      if (c.cutout) {
+        buckets.cutout.push(c);
+      } else {
+        buckets.opaque.push(c);
+        if (c.tier>=2) {
+          buckets.opaqueHi.push(c);
+          if (c.archSimple) buckets.archHi.push(c); else buckets.fullHi.push(c);
+        } else {
+          buckets.opaqueLo.push(c);
+          if (c.archSimple) buckets.archLo.push(c); else buckets.fullLo.push(c);
+        }
+        if (c.aboveMirror) buckets.mirrorOpaque.push(c);
+      }
+      if (c.max[1]>=.04 && (!c.aboveMirror || c.cutout)) buckets.mirrorClip.push(c);
+    }
+    batch.buckets=buckets;
     gl.bindBuffer(gl.ARRAY_BUFFER,batch.buffer);
     gl.bufferData(gl.ARRAY_BUFFER,data,gl.STATIC_DRAW);
     batch.capacity=data.byteLength;
@@ -1365,7 +1459,8 @@ export class Renderer {
   }
 
   clearDynamic() {
-    for (const pair of Object.values(this.batches)) {
+    for (let i=0;i<this.batchEntries.length;i++) {
+      const pair=this.batchEntries[i].pair;
       pair.dynamic.length=0;
       pair.dynamicLo.length=0;
       pair.adjacent.length=0;
@@ -1374,7 +1469,10 @@ export class Renderer {
 
   drawRange(vao,buffer,start,count) {
     const gl=this.gl;
-    gl.bindVertexArray(vao.vao);
+    if (this._boundVao!==vao.vao) {
+      gl.bindVertexArray(vao.vao);
+      this._boundVao=vao.vao;
+    }
     if (vao.buffer!==buffer || vao.start!==start) {
       gl.bindBuffer(gl.ARRAY_BUFFER,buffer);
       const base=start*STRIDE*4;
@@ -1387,9 +1485,13 @@ export class Renderer {
 
   drawStatic(type,batch,planes,eye,offset,settings,filter='all',shapeLoc=null,useOcc=false) {
     if (!batch.count) return;
+    const chunks=batch.buckets?batch.buckets[filter]:batch.chunks;
+    if (!chunks || !chunks.length) return;
     const vaos=this.vaos[type];
     const isBevel=type==='bevel';
     const lodDist=isBevel?(settings.bevelLodDist??settings.lodDist):settings.lodDist;
+    const lodDist2=lodDist*lodDist;
+    const cull=settings.cull;
     const tierDist=settings.tierDist;
     const gl=this.gl;
     const occ=useOcc && offset===0 && this.occluder?.active?this.occluder:null;
@@ -1401,27 +1503,16 @@ export class Renderer {
       if (isBevel && shapeLoc) gl.uniform1i(shapeLoc,lod?1:3);
       this.drawRange(lod?vaos.lo:vaos.hi,batch.buffer,start,end-start);
     };
-    const chunks=batch.chunks;
     for (let i=0;i<chunks.length;i++) {
       const chunk=chunks[i];
-      if (filter==='opaqueHi' && (chunk.cutout || chunk.tier<2)) continue;
-      if (filter==='opaqueLo' && (chunk.cutout || chunk.tier>=2)) continue;
-      if (filter==='archHi' && (chunk.cutout || !chunk.archSimple || chunk.tier<2)) continue;
-      if (filter==='archLo' && (chunk.cutout || !chunk.archSimple || chunk.tier>=2)) continue;
-      if (filter==='fullHi' && (chunk.cutout || chunk.archSimple || chunk.tier<2)) continue;
-      if (filter==='fullLo' && (chunk.cutout || chunk.archSimple || chunk.tier>=2)) continue;
-      if (filter==='opaque' && chunk.cutout) continue;
-      if (filter==='cutout' && !chunk.cutout) continue;
-      if (filter==='shadow' && chunk.noShadow) continue;
-      if (filter==='mirrorOpaque' && (!chunk.aboveMirror || chunk.cutout)) continue;
-      if (filter==='mirrorClip' && (chunk.max[1]<.04 || (chunk.aboveMirror && !chunk.cutout))) continue;
       const limit=tierDist?tierDist[chunk.tier]:Infinity;
       if (limit<=0) continue;
       if (!boxVisible(planes,chunk.min,chunk.max,offset)) continue;
-      const distance=boxDistance(eye,chunk.min,chunk.max,offset);
-      if (distance>settings.cull || distance>limit) continue;
+      const d2=boxDistanceSq(eye,chunk.min,chunk.max,offset);
+      const cut=limit<cull?limit:cull;
+      if (cut!==Infinity && d2>cut*cut) continue;
       if (occ && !occ.isBoxVisible(chunk.min,chunk.max,0)) continue;
-      const want=distance>lodDist?1:0;
+      const want=d2>lodDist2?1:0;
       if (want===lod && chunk.start===end) end=chunk.start+chunk.count;
       else {
         flush();
@@ -1452,6 +1543,8 @@ export class Renderer {
     gl.cullFace(gl.BACK);
     gl.enable(gl.POLYGON_OFFSET_FILL);
     gl.polygonOffset(1.15,2);
+    this._boundVao=null;
+    const shadowBatches=this.shadowBatches;
     for (const [i,cascade] of this.cascades.entries()) {
       if (cascade.matrix && i>0) {
         const moved=Math.hypot(camera.eye[0]-cascade.eyeX,camera.eye[2]-cascade.eyeZ);
@@ -1469,10 +1562,10 @@ export class Renderer {
       gl.viewport(0,0,cascade.size,cascade.size);
       gl.clear(gl.DEPTH_BUFFER_BIT);
       gl.uniformMatrix4fv(this.shadowUniform,false,cascade.matrix);
-      const planes=frustum(cascade.matrix);
+      const planes=frustumInto(cascade.matrix,this._shadowPlanes);
       const settings=i?SHADOW_C1:SHADOW_C0;
-      for (const [type,pair] of Object.entries(this.batches)) {
-        if (TRANSPARENT_MESHES.has(type) || DECAL_MESHES.has(type)) continue;
+      for (let b=0;b<shadowBatches.length;b++) {
+        const {type,pair}=shadowBatches[b];
         this.drawStatic(type,pair.static,planes,camera.eye,0,settings,'shadow');
         this.drawDynamic(type,pair.dynamic,true);
         this.drawDynamic(type,pair.dynamicLo,true);
@@ -1518,7 +1611,15 @@ export class Renderer {
     const mirrorW=Math.max(1,Math.round(w*.35)), mirrorH=Math.max(1,Math.round(h*.35));
     this.reflections=needMirror && this.prepareMirror(mirrorW,mirrorH);
     this.hdr=!this.lite && this.preparePost(w,h);
-    for (const pair of Object.values(this.batches)) {
+    if (this.batchEntries) {
+      for (let i=0;i<this.batchEntries.length;i++) {
+        const pair=this.batchEntries[i].pair;
+        this.upload(pair.dynamic);
+        this.upload(pair.dynamicLo);
+        if (this.mergeStairs) this.upload(pair.adjacent);
+        else pair.adjacent.count=0;
+      }
+    } else for (const pair of Object.values(this.batches)) {
       this.upload(pair.dynamic);
       this.upload(pair.dynamicLo);
       if (this.mergeStairs) this.upload(pair.adjacent);
@@ -1569,6 +1670,7 @@ export class Renderer {
     this.pass(w,h,direction,right,up,camera.eye,this.vp,paint,clock,false);
     if (this.hdr) this.runPost(w,h,clock);
     gl.bindVertexArray(null);
+    this._boundVao=null;
   }
 
   // Dedicated ultra-light planar reflection pass (no shadows, no detail/bump
@@ -1587,8 +1689,10 @@ export class Renderer {
     gl.cullFace(gl.FRONT);
     gl.activeTexture(gl.TEXTURE0+UNIT.env);
     gl.bindTexture(gl.TEXTURE_2D,this.envTexture);
-    const planes=frustum(vp);
+    this._boundVao=null;
+    const planes=frustumInto(vp,this._mirrorPlanes);
     const settings=MIRROR_DRAW;
+    const shadowBatches=this.shadowBatches;
     const setCommon=(prog,u)=>{
       gl.useProgram(prog);
       gl.uniformMatrix4fv(u.uVP,false,vp);
@@ -1602,14 +1706,14 @@ export class Renderer {
     };
     // Sub-pass 1: buildings completely above the mirror plane (zero-discard Early-Z).
     setCommon(this.sceneMirrorOpaque,this.umo);
-    for (const [type,pair] of Object.entries(this.batches)) {
-      if (TRANSPARENT_MESHES.has(type) || DECAL_MESHES.has(type)) continue;
+    for (let i=0;i<shadowBatches.length;i++) {
+      const {type,pair}=shadowBatches[i];
       this.drawStatic(type,pair.static,planes,eye,0,settings,'mirrorOpaque');
     }
     // Sub-pass 2: geometry straddling y = 0.037 + dynamic objects.
     setCommon(this.sceneMirror,this.um);
-    for (const [type,pair] of Object.entries(this.batches)) {
-      if (TRANSPARENT_MESHES.has(type) || DECAL_MESHES.has(type)) continue;
+    for (let i=0;i<shadowBatches.length;i++) {
+      const {type,pair}=shadowBatches[i];
       this.drawStatic(type,pair.static,planes,eye,0,settings,'mirrorClip');
       this.drawDynamic(type,pair.dynamic,true);
       this.drawDynamic(type,pair.dynamicLo,true);
@@ -1624,6 +1728,7 @@ export class Renderer {
     gl.uniform3fv(s.uForward,direction);
     gl.uniform2f(s.uField,f*w/h,f);
     gl.bindVertexArray(this.empty);
+    this._boundVao=null;
     gl.drawArrays(gl.TRIANGLES,0,3);
     gl.depthMask(true);
     gl.cullFace(gl.BACK);
@@ -1705,9 +1810,9 @@ export class Renderer {
   }
 
   drawArchStage(eye,planes,settings,filter,useOcc) {
-    const batchKey=ZONE_BATCHES[this.viewZone];
-    for (const [type,pair] of Object.entries(this.batches)) {
-      if (!CULL_MESHES.has(type) || type==='ramp') continue;
+    const batchKey=ZONE_BATCHES[this.viewZone], archBatches=this.archBatches;
+    for (let i=0;i<archBatches.length;i++) {
+      const {type,pair}=archBatches[i];
       this.drawStatic(type,pair[batchKey],planes,eye,0,settings,filter,null,useOcc);
     }
   }
@@ -1728,12 +1833,15 @@ export class Renderer {
     gl.depthFunc(gl.LEQUAL);
     gl.enable(gl.CULL_FACE);
     gl.cullFace(gl.BACK);
-    for (const level of views) {
+    const closedBatches=this.closedBatches;
+    for (let v=0;v<views.length;v++) {
+      const level=views[v];
       const offset=ZONES[zone].x-ZONES[level].x;
+      const batchKey=ZONE_BATCHES[level];
       gl.uniform1f(du.uDrawOffset,offset);
-      for (const [type,pair] of Object.entries(this.batches)) {
-        if (!CULL_MESHES.has(type)) continue;
-        this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,'opaqueHi',null,useOcc);
+      for (let i=0;i<closedBatches.length;i++) {
+        const {type,pair}=closedBatches[i];
+        this.drawStatic(type,pair[batchKey],planes,eye,offset,settings,'opaqueHi',null,useOcc);
       }
     }
     gl.colorMask(true,true,true,true);
@@ -1767,7 +1875,8 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D,this.envTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.detail);
     gl.bindTexture(gl.TEXTURE_2D,this.detail);
-    const planes=frustum(vp);
+    this._boundVao=null;
+    const planes=frustumInto(vp,this._planes);
     const settings=this.drawSettings(false);
     const useOcc=this.viewZone===0 && !this.overview && !this.mergeStairs && !!this.occluder;
     if (useOcc) this.occluder.build(vp,eye,planes);
@@ -1848,6 +1957,7 @@ export class Renderer {
       gl.uniform1f(s.uExposure,this.exposure());
       gl.depthMask(false);
       gl.bindVertexArray(this.empty);
+      this._boundVao=null;
       gl.drawArrays(gl.TRIANGLES,0,3);
       gl.depthMask(true);
       gl.useProgram(this.scene);
@@ -1891,7 +2001,8 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.inkTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.atlas);
     gl.bindTexture(gl.TEXTURE_2D,this.atlas);
-    const planes=frustum(vp);
+    this._boundVao=null;
+    const planes=frustumInto(vp,this._planes);
     const useOcc=this.viewZone===0 && !this.overview && !this.mergeStairs && !!this.occluder;
     if (useOcc) this.occluder.build(vp,eye,planes);
     else if (this.occluder) this.occluder.active=false;
@@ -1946,6 +2057,7 @@ export class Renderer {
       gl.uniform1f(s.uInterior,this.interior);
       gl.depthMask(false);
       gl.bindVertexArray(this.empty);
+      this._boundVao=null;
       gl.drawArrays(gl.TRIANGLES,0,3);
       gl.depthMask(true);
       gl.useProgram(this.sceneLite);
@@ -1975,7 +2087,7 @@ export class Renderer {
   drawSceneStage(eye,planes,settings,stage,useOcc=false) {
     const gl=this.gl, zone=this.viewZone, u=this.active ?? this.u;
     const merged=this.mergeStairs;
-    const views=merged?[[zone,'dynamic'],[1-zone,'adjacent']]:[[zone,'dynamic']];
+    const viewCount=merged?2:1;
     gl.uniform1i(u.uMergeStairs,merged?1:0);
     if (stage==='alpha') {
       gl.enable(gl.BLEND);
@@ -1985,42 +2097,56 @@ export class Renderer {
     }
     const isHiOpaque=stage==='opaqueHi' || stage==='fullHi';
     const isLoOpaque=stage==='opaqueLo' || stage==='fullLo';
-    for (const [level,dynamicKey] of views) {
+    const list=stage==='alpha'?this.alphaBatches:(isHiOpaque || isLoOpaque)?this.closedBatches:this.nonAlphaBatches;
+    let lastShape=-1, cullState=-1;
+    for (let v=0;v<viewCount;v++) {
+      const level=v===0?zone:1-zone;
+      const dynamicKey=v===0?'dynamic':'adjacent';
+      const batchKey=ZONE_BATCHES[level];
       const offset=ZONES[zone].x-ZONES[level].x;
       gl.uniform1f(u.uDrawOffset,offset);
       if (u.uZoneX) gl.uniform1f(u.uZoneX,ZONES[level].x);
       gl.uniform3f(u.uEye,eye[0]-offset,eye[1],eye[2]);
       if (u.uShadowOn) gl.uniform1i(u.uShadowOn,this.effects && level===0?1:0);
       if (u.uReflectOn) gl.uniform1i(u.uReflectOn,this.reflections && level===0?1:0);
-      for (const [type,pair] of Object.entries(this.batches)) {
-        const isAlpha=TRANSPARENT_MESHES.has(type);
-        const isClosed=CULL_MESHES.has(type);
+      for (let i=0;i<list.length;i++) {
+        const {type,pair,closed,shapeId,isBevel}=list[i];
+        const staticBatch=pair[batchKey];
         if (stage==='alpha') {
-          if (!isAlpha) continue;
-          gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
-          this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,'all',u.uShape,useOcc);
-          this.drawDynamic(type,pair[dynamicKey],this.ultra,u.uShape);
+          const dyn=pair[dynamicKey];
+          if (!staticBatch.count && !dyn.count) continue;
+          if (shapeId!==lastShape) {gl.uniform1i(u.uShape,shapeId); lastShape=shapeId;}
+          this.drawStatic(type,staticBatch,planes,eye,offset,settings,'all',u.uShape,useOcc);
+          this.drawDynamic(type,dyn,this.ultra,u.uShape);
         } else if (isHiOpaque) {
-          if (!isClosed) continue;
-          gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
-          this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,stage,u.uShape,useOcc);
+          const b=staticBatch.buckets?staticBatch.buckets[stage]:staticBatch.chunks;
+          if (!staticBatch.count || !b || !b.length) continue;
+          if (shapeId!==lastShape || isBevel) {gl.uniform1i(u.uShape,shapeId); lastShape=isBevel?-1:shapeId;}
+          this.drawStatic(type,staticBatch,planes,eye,offset,settings,stage,u.uShape,useOcc);
         } else if (isLoOpaque) {
-          if (!isClosed) continue;
-          gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
-          this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,stage,u.uShape,useOcc);
-          this.drawDynamic(type,pair[dynamicKey],this.lite,u.uShape);
-          if (dynamicKey==='dynamic') this.drawDynamic(type,pair.dynamicLo,true,u.uShape);
+          const dyn=pair[dynamicKey], dynLo=dynamicKey==='dynamic'?pair.dynamicLo:null;
+          const b=staticBatch.buckets?staticBatch.buckets[stage]:staticBatch.chunks;
+          const hasStatic=staticBatch.count && b && b.length;
+          if (!hasStatic && !dyn.count && !(dynLo && dynLo.count)) continue;
+          if (shapeId!==lastShape || isBevel) {gl.uniform1i(u.uShape,shapeId); lastShape=isBevel?-1:shapeId;}
+          if (hasStatic) this.drawStatic(type,staticBatch,planes,eye,offset,settings,stage,u.uShape,useOcc);
+          if (dyn.count) this.drawDynamic(type,dyn,this.lite,u.uShape);
+          if (dynLo && dynLo.count) this.drawDynamic(type,dynLo,true,u.uShape);
         } else {
           // Cutout chunks of closed meshes + non-closed opaque decals (splat, tri).
-          if (isAlpha) continue;
-          gl.uniform1i(u.uShape,SHAPE_IDS[type]??0);
-          if (isClosed) {
-            gl.enable(gl.CULL_FACE);
-            this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,'cutout',u.uShape,useOcc);
+          if (closed) {
+            const b=staticBatch.buckets?staticBatch.buckets.cutout:staticBatch.chunks;
+            if (!staticBatch.count || !b || !b.length) continue;
+            if (shapeId!==lastShape || isBevel) {gl.uniform1i(u.uShape,shapeId); lastShape=isBevel?-1:shapeId;}
+            if (cullState!==1) {gl.enable(gl.CULL_FACE); cullState=1;}
+            this.drawStatic(type,staticBatch,planes,eye,offset,settings,'cutout',u.uShape,useOcc);
           } else {
-            gl.disable(gl.CULL_FACE);
-            this.drawStatic(type,pair[ZONE_BATCHES[level]],planes,eye,offset,settings,'all',u.uShape,useOcc);
-            this.drawDynamic(type,pair[dynamicKey],this.lite,u.uShape);
+            const dyn=pair[dynamicKey];
+            if (!staticBatch.count && !dyn.count) continue;
+            if (shapeId!==lastShape) {gl.uniform1i(u.uShape,shapeId); lastShape=shapeId;}
+            if (cullState!==0) {gl.disable(gl.CULL_FACE); cullState=0;}
+            this.drawStatic(type,staticBatch,planes,eye,offset,settings,'all',u.uShape,useOcc);
+            this.drawDynamic(type,dyn,this.lite,u.uShape);
           }
         }
       }

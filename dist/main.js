@@ -1440,13 +1440,27 @@ function cameraFor(dt) {
   cameraReach=pose.reach ?? 1;
   if (dt>0 && cameraShake>0) cameraShake=Math.max(0,cameraShake-dt*3.4);
   if (battle.player) {
+    let ex=pose.eye[0], ey=pose.eye[1], ez=pose.eye[2];
+    let tx=pose.target[0], ty=pose.target[1], tz=pose.target[2];
+    let moved=false;
+    // Tactile vehicle turbo pull-back & jump-landing vertical spring dip!
+    const boostPull=(actor.car?.boostFlame ?? 0)*.52;
+    if (boostPull>.005) {
+      const dx=ex-tx, dy=ey-ty, dz=ez-tz, inv=1/Math.max(.01,Math.hypot(dx,dy,dz));
+      ex+=dx*inv*boostPull; ey+=dy*inv*boostPull*.35; ez+=dz*inv*boostPull;
+      moved=true;
+    }
+    const landDip=(actor.landing ?? 0)*.11;
+    if (landDip>.003) {ey-=landDip; ty-=landDip*.5; moved=true;}
     const shake=Math.min(1,cameraShake+(actor.car?.impactShake ?? 0)*.45);
     if (shake>.004) {
       const amp=shake*shake*.18, t=activeClock*52;
       const sx=Math.sin(t*1.17)*amp, sy=Math.cos(t*1.63)*amp*.75, sz=Math.sin(t*.89+1.3)*amp;
-      pose.eye=[pose.eye[0]+sx,pose.eye[1]+sy,pose.eye[2]+sz];
-      pose.target=[pose.target[0]+sx*.55,pose.target[1]+sy*.55,pose.target[2]+sz*.55];
+      ex+=sx; ey+=sy; ez+=sz;
+      tx+=sx*.55; ty+=sy*.55; tz+=sz*.55;
+      moved=true;
     }
+    if (moved) {pose.eye=[ex,ey,ez]; pose.target=[tx,ty,tz];}
   }
   return pose;
 }
@@ -1693,6 +1707,7 @@ function frame(now) {
   damageFlash.style.opacity=String(Math.pow(clamp(1-damageAge/.49,0,1),1.35));
   renderer.clearDynamic();
   renderer.viewPoint=camera.eye;
+  renderer.prepareView?.(camera,width/Math.max(1,height));
   if (battle) {
     const nearCrew=camera.nearCrew?battle.cameraActor():null;
     battle.draw(renderer,camera.eye[0],camera.eye[2],nearCrew,camera.eye[1],camera.stair);

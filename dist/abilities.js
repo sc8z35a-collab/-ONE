@@ -11,38 +11,55 @@ const DRONE_LIFETIME=23;
 // The drone fires one tracking round a second at the nearest opponent it can see.
 export const DRONE_FIRE_INTERVAL=1;
 
+const _sqDynYP={dynamic:true,yaw:0,pitch:0};
+const _sqPts6=[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]];
+const _sqPts4=[[0,0,0],[0,0,0],[0,0,0],[0,0,0]];
+
 export function drawSquid(r,a,time,tint,eyeTint,scale) {
   const yaw=Math.PI-a.yaw, sy=Math.sin(yaw), cy=Math.cos(yaw);
-  const at=(x,y,z)=>[a.x+(x*cy+z*sy)*scale,a.y+y*scale,a.z+(-x*sy+z*cy)*scale];
-  const part=(type,x,y,z,w,h,d,color,kind=9,pitch=0)=>
-    r.add(type,...at(x,y,z),w*scale,h*scale,d*scale,color,kind,{dynamic:true,yaw,pitch});
-  const sway=Math.sin(time*4.8);
-  part('orb',0,.87,-.15,1.20,1.43,1.28,tint);
-  part('cone',0,1.43,-.24,1.10,1.18,1.12,tint,9,-.08);
+  const ax=a.x, ay=a.y, az=a.z, lite=!!r.lite;
+  const setAt=(dst,x,y,z)=>{dst[0]=ax+(x*cy+z*sy)*scale; dst[1]=ay+y*scale; dst[2]=az+(-x*sy+z*cy)*scale;};
+  _sqDynYP.yaw=yaw;
+  const part=(type,x,y,z,w,h,d,color,kind=9,pitch=0)=>{
+    _sqDynYP.pitch=pitch;
+    r.add(type,ax+(x*cy+z*sy)*scale,ay+y*scale,az+(-x*sy+z*cy)*scale,w*scale,h*scale,d*scale,color,kind,_sqDynYP);
+  };
+  const sway=Math.sin(time*4.8), breath=1+Math.sin(time*5.4)*.045;
+  const speed=Math.hypot(a.vx??0,a.vz??0), flap=Math.sin(time*(6.5+speed*.5))*(.18+clamp(speed*.04,0,.22));
+  part('orb',0,.87,-.15,1.20*breath,1.43,1.28*breath,tint);
+  part('cone',0,1.43,-.24,1.10*breath,1.18,1.12*breath,tint,9,-.08);
+  if (!lite) {
+    // Glowing mantle crest rings & crown energy ridge
+    part('ring',0,1.28,-.20,1.12,.06,1.14,eyeTint,3,-.08);
+    part('bevel',0,1.88,-.28,.12,.45,.52,eyeTint,3,-.18);
+  }
   for (const sign of [-1,1]) {
-    part('orb',sign*.48,1.42,-.39,.36,.59,.18,tint,9,sign*.34);
+    part('orb',sign*(.48+flap*.14),1.42,-.39,.36,.59,.18,tint,9,sign*(.34+flap));
     part('orb',sign*.44,.20,.68+.09*sway,.24,.22,.69,tint,9,.22);
   }
   part('orb',0,1.08,.45,.99,.57,.44,0x354448,4);
   for (const sign of [-1,1]) {
     part('orb',sign*.26,1.13,.65,.34,.27,.11,eyeTint,3);
     part('orb',sign*.25,1.13,.718,.12,.22,.055,0x252e32,4);
-    part('orb',sign*.54,.59,-.08,.39,.72,.42,tint,9,-sign*.3);
+    part('orb',sign*.54,.59,-.08,.39,.72,.42,tint,9,-sign*(.3+flap*.4));
   }
+  const links=lite?3:5;
+  const pts=links===5?_sqPts6:_sqPts4;
   for (let i=0;i<8;i++) {
-    const angle=i*TAU/8, points=[];
-    const links=r.lite?3:5;
+    const angle=i*TAU/8;
     for (let j=0;j<=links;j++) {
-      const t=j/links, arc=angle+Math.sin(time*5.3+i+t*2)*t*.23;
-      const reach=.30+t*.69;
-      points.push(at(Math.cos(arc)*reach,.20+.20*(1-t)+Math.sin(time*6.7+i)*t*.037,Math.sin(arc)*reach));
+      const t=j/links, arc=angle+Math.sin(time*5.3+i+t*2.4)*t*.26;
+      const reach=.30+t*.72;
+      setAt(pts[j],Math.cos(arc)*reach,.20+.20*(1-t)+Math.sin(time*6.7+i+t*2)*t*.055,Math.sin(arc)*reach);
     }
-    drawTentacle(r,points,.27*scale,tint,eyeTint);
+    drawTentacle(r,pts,.27*scale,tint,eyeTint,lite?0:eyeTint);
   }
   for (const sign of [-1,1]) {
-    const points=[at(sign*.26,.56,.36),at(sign*.47,.24,.80),
-      at(sign*(.56+sway*.05),.12,1.12),at(sign*.47,.21,1.34)];
-    drawTentacle(r,points,.22*scale,tint,eyeTint);
+    setAt(_sqPts4[0],sign*.26,.56,.36);
+    setAt(_sqPts4[1],sign*.47,.24,.80);
+    setAt(_sqPts4[2],sign*(.56+sway*.07),.12+.04*Math.cos(time*5.8),1.14);
+    setAt(_sqPts4[3],sign*(.47+sway*.11),.21+.05*Math.sin(time*6.4),1.38);
+    drawTentacle(r,_sqPts4,.22*scale,tint,eyeTint,lite?0:eyeTint);
   }
 }
 

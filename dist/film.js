@@ -315,6 +315,7 @@ export class Film {
         right=unit(cross(sub(pose.target,pose.eye),[0,1,0]));
         renderer.clearDynamic();
         renderer.viewPoint=pose.eye;
+        renderer.prepareView?.(pose,width/Math.max(1,height));
         battle.draw(renderer,pose.eye[0],pose.eye[2],pose.nearCrew?star:null,pose.eye[1],pose.stair);
         renderer.draw(pose,paint,battle.clock);
         ctx.drawImage(canvas,0,0,width,height);

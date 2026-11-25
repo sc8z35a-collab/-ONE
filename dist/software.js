@@ -75,6 +75,8 @@ export class SoftwareRenderer {
   }
   label(...args) { Renderer.prototype.label.call(this,...args); }
   beam(...args) { Renderer.prototype.beam.call(this,...args); }
+  prepareView() {}
+  inFrustum() { return true; }
   clearDynamic() {
     for (const pair of Object.values(this.batches)) {
       pair.dynamic.list.length=0;

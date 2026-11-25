@@ -26,7 +26,7 @@ const angleDiff=(a,b)=>Math.atan2(Math.sin(b-a),Math.cos(b-a));
 
 // Builds a full 3D orthonormal basis [fwd, up, right] for a sprung vehicle chassis
 // incorporating heading (yaw + drift slip), acceleration/brake/slope pitch, and cornering roll.
-function chassisBasis(yaw,pitch,roll) {
+function chassisBasisInto(yaw,pitch,roll,out) {
   const fx0=Math.sin(yaw), fz0=-Math.cos(yaw);
   const rx0=Math.cos(yaw), rz0=Math.sin(yaw);
   const cp=Math.cos(pitch), sp=Math.sin(pitch);
@@ -37,8 +37,22 @@ function chassisBasis(yaw,pitch,roll) {
   // Apply roll around forward axis (positive roll tilts roof toward right)
   const ux=ux0*cr+rx0*sr, uy=uy0*cr, uz=uz0*cr+rz0*sr;
   const rx=rx0*cr-ux0*sr, ry=-uy0*sr, rz=rz0*cr-uz0*sr;
-  return [[fx,fy,fz],[ux,uy,uz],[rx,ry,rz]];
+  const b0=out[0], b1=out[1], b2=out[2];
+  b0[0]=fx; b0[1]=fy; b0[2]=fz;
+  b1[0]=ux; b1[1]=uy; b1[2]=uz;
+  b2[0]=rx; b2[1]=ry; b2[2]=rz;
+  return out;
 }
+
+const _vBasis=[[0,0,0],[0,0,0],[0,0,0]], _vOpts={dynamic:true,basis:_vBasis};
+const _vAuxBasis=[[0,0,0],[0,0,0],[0,0,0]], _vAuxOpts={dynamic:true,basis:_vAuxBasis};
+const _vExBasis=[[0,0,0],[0,0,0],[0,0,0]], _vExOpts={dynamic:true,basis:_vExBasis};
+const _vWBasis=[[0,0,0],[0,0,0],[0,0,0]], _vWOpts={dynamic:true,basis:_vWBasis};
+const _vABasis=[[0,0,0],[0,0,0],[0,0,0]], _vAOpts={dynamic:true,basis:_vABasis};
+const _vShadeOpts={dynamic:true,yaw:0,label:.72};
+const _vRipOpts={dynamic:true,label:0};
+const _vDebOpts={dynamic:true,yaw:0,pitch:0};
+const _vDyn={dynamic:true};
 
 // Ray vs oriented bounding box in car-local space (local X = forward, local Z = right, local Y = up).
 function rayCar(car,start,end,clearance=0,limit=1) {
@@ -700,30 +714,35 @@ export class Vehicles {
     this.ramHits.clear();
   }
 
-  // ---- High-Craft Dynamic 3D Vehicle Rendering ----
+  // ---- High-Craft Dynamic 3D Vehicle Rendering (Zero-Alloc Hot Path) ----
   draw(r,viewX,viewZ,clock) {
     if (zoneOf(viewX)!==0) return;
     const reach=r.reach??Infinity, lim2=reach===Infinity?Infinity:(reach+12)*(reach+12);
-    for (let i=0;i<this.cars.length;i++) {
-      const car=this.cars[i];
-      if (lim2!==Infinity) {
-        const dx=car.x-viewX, dz=car.z-viewZ;
-        if (dx*dx+dz*dz>lim2) continue;
-      }
+    const raining=!!this.battle.hazards?.rain?.active;
+    const hasFrustum=typeof r.inFrustum==='function';
+    const cars=this.cars;
+    for (let i=0;i<cars.length;i++) {
+      const car=cars[i];
+      const dx=car.x-viewX, dz=car.z-viewZ, d2=dx*dx+dz*dz;
+      if (lim2!==Infinity && d2>lim2) continue;
       if (!car.alive) {
         const age=clock-car.explodedAt;
-        if (age>=0 && age<1.55) drawExplosionDebris(r,car,age);
+        if (age>=0 && age<1.55) {
+          if (!hasFrustum || r.inFrustum(car.x,car.y+1.8,car.z,CAR_EXPLOSION_RADIUS+2)) {
+            drawExplosionDebris(r,car,age);
+          }
+        }
         continue;
       }
-      const dist=Math.hypot(car.x-viewX,car.z-viewZ);
-      drawVehicle(r,car,clock,dist);
+      drawVehicle(r,car,clock,Math.sqrt(d2),raining,hasFrustum);
     }
   }
 }
 
-function drawVehicle(r,car,clock,dist=10) {
+function drawVehicle(r,car,clock,dist=10,raining=false,hasFrustum=false) {
   const {x,y,z,yaw,w,d,style,baseTint,stain,stainTeam,driver,hitFlash}=car;
-  const hi=!r.lite && !r.ultra && dist<38;
+  const hi=!r.lite && !r.ultra && dist<42;
+  const inView=!hasFrustum || r.inFrustum(x,y+1,z,w+2.4);
   const inkColor=INK_COLORS[stainTeam>=0?stainTeam:1] ?? INK_COLORS[1];
   const flash=clock-hitFlash<.10?.38:0;
   const warnPulse=stain>=.72 && Math.sin(clock*22)>0?.26:0;
@@ -733,213 +752,297 @@ function drawVehicle(r,car,clock,dist=10) {
   const trim=0x9ba6a4, chrome=0xcfd6d2, darkMetal=0x2c363b, rubber=0x1e2629, glass=driver?0x4c7e8f:0x36525c;
   const bodyMat=20; // Metallic armor clearcoat sheen for automotive lacquer!
 
-  // Soft grounded AO contact shadow beneath the car!
+  // Soft grounded AO contact shadow beneath the car (skipped cleanly when off-screen!)
   const visualYaw=yaw+(car.driftAngle??0);
-  const ry=visualYaw-T;
-  r.add('shade',x,y+.018,z,w*1.12,1,d*1.28,0,28,{dynamic:true,yaw:ry,label:.72});
+  if (inView) {
+    _vShadeOpts.yaw=visualYaw-T;
+    r.add('shade',x,y+.018,z,w*1.14,1,d*1.30,0,28,_vShadeOpts);
+  }
 
   // Full 3D sprung chassis coordinate frame (yaw+drift, pitch squat/dive, cornering roll, engine idle hum)
-  const idleVib=driver?Math.sin(clock*(32+(car.rpm??900)*.008))*.0045:0;
-  const shake=(car.impactShake??0)*Math.sin(clock*58)*.045;
+  const idleVib=driver?Math.sin(clock*(32+(car.rpm??900)*.008))*.0048:0;
+  const shake=(car.impactShake??0)*Math.sin(clock*58)*.048;
   const bodyLift=(car.susY??0)+idleVib;
-  const basis=chassisBasis(visualYaw,(car.pitch??0)+shake*.4,(car.roll??0)+shake);
-  const [bf,bu,br]=basis;
-  const at=(dx,dy,dz)=>[
-    x+bf[0]*dx+bu[0]*(dy+bodyLift)+br[0]*dz,
-    y+bf[1]*dx+bu[1]*(dy+bodyLift)+br[1]*dz,
-    z+bf[2]*dx+bu[2]*(dy+bodyLift)+br[2]*dz
-  ];
-  const opts={dynamic:true,basis};
-  const p=(type,dx,dy,dz,sx,sy,sz,c,k=bodyMat)=>r.add(type,...at(dx,dy,dz),sx,sy,sz,c,k,opts);
+  const cPitch=(car.pitch??0)+shake*.4, cRoll=(car.roll??0)+shake;
+  chassisBasisInto(visualYaw,cPitch,cRoll,_vBasis);
+  const bf=_vBasis[0], bu=_vBasis[1], br=_vBasis[2];
+  const bf0=bf[0], bf1=bf[1], bf2=bf[2];
+  const bu0=bu[0], bu1=bu[1], bu2=bu[2];
+  const br0=br[0], br1=br[1], br2=br[2];
+  const p=(type,dx,dy,dz,sx,sy,sz,c,k=bodyMat)=>{
+    const ly=dy+bodyLift;
+    r.add(type,x+bf0*dx+bu0*ly+br0*dz,y+bf1*dx+bu1*ly+br1*dz,z+bf2*dx+bu2*ly+br2*dz,sx,sy,sz,c,k,_vOpts);
+  };
+  const pAux=(type,dx,dy,dz,sx,sy,sz,c,k,o)=>{
+    const ly=dy+bodyLift;
+    r.add(type,x+bf0*dx+bu0*ly+br0*dz,y+bf1*dx+bu1*ly+br1*dz,z+bf2*dx+bu2*ly+br2*dz,sx,sy,sz,c,k,o);
+  };
 
-  // ---- 1. Sculpted Chassis, Hood, Fenders & Underbody ----
+  // ---- 1. Sculpted Chassis, Hood, Fenders, Side Intakes & Underbody ----
   p('box',0,.38,0,w-.16,.24,d-.08,darkMetal,4);
   p('bevel',0,.64,0,w-.04,.44,d,bodyTint,bodyMat);
   p('bevel',.38,.87,0,w-.86,.24,d-.12,bodyTint,bodyMat);
-  // Sculpted front hood + twin recessed air intake vents (GT / pickup detail)
   p('bevel',w/2-.60,.82,0,1.14,.18,d-.12,bodyTint,bodyMat);
   if (hi) {
-    for (const side of [-1,1]) p('box',w/2-.62,.925,side*.28,.46,.026,.22,darkMetal,4);
+    for (let s=-1;s<=1;s+=2) {
+      p('box',w/2-.62,.925,s*.28,.46,.026,.22,darkMetal,4); // hood vents
+      p('box',-.42,.66,s*(d/2+.018),.48,.16,.03,0x192124,4); // side aero brake ducts
+    }
   }
-  // Rear deck / trunk
   p('bevel',-w/2+.56,.85,0,1.06,.24,d-.10,bodyTint,bodyMat);
 
-  // ---- 2. Front Fascia, Slatted Grille, Bumpers, Headlights, Taillights, Exhausts ----
-  // Front & rear bumpers + front aero splitter / rear diffuser
+  // ---- 2. Front Fascia, Slatted Grille, Tow Hooks, Bumpers, LED Headlights, Turn Signals & Exhausts ----
   p('bevel',w/2-.04,.43,0,.22,.16,d+.10,darkMetal,4);
   p('box',w/2+.05,.32,0,.16,.055,d+.04,rubber,21); // front chin splitter
   p('bevel',-w/2+.04,.44,0,.22,.17,d+.10,darkMetal,4);
   p('box',-w/2-.04,.33,0,.12,.08,d*.76,0x1d2528,4); // rear diffuser
-  // Front slatted grille & metallic badge emblem
   p('box',w/2-.01,.63,0,.12,.22,d-.48,0x1d2629,4);
   if (hi) {
-    for (const gy of [.57,.63,.69]) p('box',w/2+.055,gy,0,.02,.018,d-.54,chrome,4);
+    p('box',w/2+.055,.57,0,.02,.018,d-.54,chrome,4);
+    p('box',w/2+.055,.63,0,.02,.018,d-.54,chrome,4);
+    p('box',w/2+.055,.69,0,.02,.018,d-.54,chrome,4);
     p('orb',w/2+.07,.64,0,.04,.07,.10,chrome,4);
+    // Front forged tow hook loop
+    p('ring',w/2+.12,.38,-.44,.09,.028,.09,0xe63b32,4);
   }
-  // License plates front & rear
-  for (const sign of [-1,1]) p('box',sign*(w/2+.065),.48,0,.022,.13,.38,0xe6e7dc,0);
+  p('box',-(w/2+.065),.48,0,.022,.13,.38,0xe6e7dc,0);
+  p('box',w/2+.065,.48,0,.022,.13,.38,0xe6e7dc,0);
 
-  // LED Headlights, Turn Signals, Brake Lights, Reverse Lamps
+  // LED Headlights, DRL Eyebrows, Sequential Steering Turn Signals, Brake & Reverse Lamps!
   const headBright=driver?0xfffce0:0xede3c4;
   const brakeActive=!!car.braking;
   const reverseActive=car.speed<-.35;
   const tailColor=brakeActive?0xff2218:driver?0xd63626:0x8e2c22;
-  for (const oz of [-.56,.56]) {
-    // Front headlight housing + bright inner LED strip
+  const blinkOn=driver && Math.sin(clock*13)>0;
+  const steerDir=car.steer??0;
+  const teamColor=driver?(TEAM_INK[driver.team] ?? 0xffffff):0xffffff;
+  for (let s=-1;s<=1;s+=2) {
+    const oz=s*.56;
+    const turningThisSide=blinkOn && (s<0?steerDir<-.14:steerDir>.14);
     p('bevel',w/2+.01,.73,oz,.09,.17,.36,darkMetal,4);
     p('box',w/2+.055,.74,oz,.035,.12,.28,headBright,3);
-    p('box',w/2+.06,.66,oz,.03,.032,.26,0xffbe42,3);
-    // Subtle road headlight glow cones when driven!
-    if (driver && hi) {
-      p('orb',w/2+.55,.55,oz,.65,.34,.55,0xfff6d2,3);
-    }
-    // Rear taillight housing + blazing brake bar + white reverse lamp
+    p('box',w/2+.06,.66,oz,.03,.034,.26,turningThisSide?0xffb820:0x9e7830,turningThisSide?3:4);
+    if (hi) p('box',w/2+.058,.81,oz,.026,.022,.32,driver?0xffffff:0xdce8e6,3); // crisp DRL eyebrow
+    if (driver && hi && inView) p('orb',w/2+.55,.55,oz,.65,.34,.55,0xfff6d2,3);
     p('bevel',-w/2-.01,.74,oz,.08,.17,.38,darkMetal,4);
     p('box',-w/2-.052,.75,oz,.036,.12,.30,tailColor,3);
+    if (turningThisSide) p('box',-w/2-.058,.75,s*.74,.034,.11,.08,0xffb820,3);
     if (reverseActive) p('box',-w/2-.058,.66,oz*.72,.03,.05,.12,0xffffff,3);
   }
-  // Twin chrome exhaust tailpipes + dynamic acceleration/shift turbo flames!
-  for (const ez of [-.42,.42]) {
-    const exBase=[bu,bf,br];
-    r.add('cylinder',...at(-w/2-.08,.33,ez),.10,.22,.10,chrome,4,{dynamic:true,basis:exBase});
-    r.add('cylinder',...at(-w/2-.18,.33,ez),.07,.04,.07,0x101416,4,{dynamic:true,basis:exBase});
-    if (driver && ((car.boostFlame??0)>0 || (car.throttle>.5 && car.speed>2))) {
-      const fLen=(car.boostFlame??0)>0?.42+.18*Math.sin(clock*48):.18+.06*Math.sin(clock*36);
-      const flameColor=(car.boostFlame??0)>0?0x66e8ff:0xffa83c;
-      r.add('cone',...at(-w/2-.22-fLen*.4,.33,ez),.11,fLen,.11,flameColor,3,{dynamic:true,basis:[bu,[-bf[0],-bf[1],-bf[2]],br]});
-      if ((car.boostFlame??0)>0) {
-        r.add('orb',...at(-w/2-.24,.33,ez),.12,.12,.12,0xffffff,3,opts);
+  // Center high-mount 3rd brake light strip on rear roof edge when braking!
+  if (brakeActive) p('box',-w/2+.98,1.38,0,.04,.045,.66,0xff2218,3);
+
+  // Twin Chrome Exhaust Tailpipes + Pulsing Turbo Flames + Backfire Shock-Rings!
+  _vExBasis[0][0]=bu0; _vExBasis[0][1]=bu1; _vExBasis[0][2]=bu2;
+  _vExBasis[1][0]=bf0; _vExBasis[1][1]=bf1; _vExBasis[1][2]=bf2;
+  _vExBasis[2][0]=br0; _vExBasis[2][1]=br1; _vExBasis[2][2]=br2;
+  const bfFlame=car.boostFlame??0;
+  for (let s=-1;s<=1;s+=2) {
+    const ez=s*.42;
+    pAux('cylinder',-w/2-.08,.33,ez,.10,.22,.10,chrome,4,_vExOpts);
+    pAux('cylinder',-w/2-.18,.33,ez,.07,.04,.07,0x101416,4,_vExOpts);
+    if (driver && inView && (bfFlame>0 || (car.throttle>.5 && car.speed>2))) {
+      const fLen=bfFlame>0?.48+.20*Math.sin(clock*52):.20+.07*Math.sin(clock*38);
+      const flameColor=bfFlame>0?0x66e8ff:0xffa83c;
+      _vAuxBasis[0][0]=bu0; _vAuxBasis[0][1]=bu1; _vAuxBasis[0][2]=bu2;
+      _vAuxBasis[1][0]=-bf0; _vAuxBasis[1][1]=-bf1; _vAuxBasis[1][2]=-bf2;
+      _vAuxBasis[2][0]=br0; _vAuxBasis[2][1]=br1; _vAuxBasis[2][2]=br2;
+      pAux('cone',-w/2-.22-fLen*.4,.33,ez,.12,fLen,.12,flameColor,3,_vAuxOpts);
+      if (bfFlame>0) {
+        p('orb',-w/2-.24,.33,ez,.13,.13,.13,0xffffff,3);
+        if (hi) {
+          // Expanding plasma backfire shock-ring popping out of tailpipe!
+          const rp=(clock*9+s*.3)%1;
+          const rSize=.14+rp*.26;
+          pAux('ring',-w/2-.24-rp*.55,.33,ez,rSize,.028,rSize,0x7cf0ff,3,_vAuxOpts);
+        }
       }
     }
   }
 
-  // ---- 3. Cabin, Reflective Windows, Pillars, Mirrors, Door Handles & Interior ----
-  for (const sign of [-1,1]) {
-    // Wheel-well fender flares & side aero skirt
-    p('box',0,.34,sign*(d/2+.02),w*.52,.09,.07,darkMetal,4);
-    p('box',0,.53,sign*(d/2+.025),1.78,.04,.04,chrome,4);
-    // Side windows, A/B/C pillars, door handles, side mirrors
-    p('box',-.08,1.11,sign*(d/2-.12),1.70,.44,.05,glass,8);
-    p('box',-.82,1.12,sign*(d/2-.115),.09,.50,.085,bodyTint,bodyMat);
-    p('box',-.12,1.14,sign*(d/2-.105),.075,.46,.075,darkMetal,4);
-    p('box',.72,1.12,sign*(d/2-.115),.09,.50,.085,bodyTint,bodyMat);
-    // Flush metallic door handles
-    p('box',-.34,.89,sign*(d/2+.015),.20,.042,.045,chrome,4);
-    p('box',.34,.89,sign*(d/2+.015),.20,.042,.045,chrome,4);
-    // Sculpted wing mirror arm + housing
-    p('box',.62,1.01,sign*(d/2+.06),.07,.045,.15,darkMetal,4);
-    p('bevel',.64,1.06,sign*(d/2+.16),.18,.13,.19,bodyTint,bodyMat);
+  // ---- 3. Cabin, Reflective Windows, Pillars, Mirrors, Door Handles, Wipers & Animated Cockpit ----
+  for (let s=-1;s<=1;s+=2) {
+    p('box',0,.34,s*(d/2+.02),w*.52,.09,.07,darkMetal,4);
+    p('box',0,.53,s*(d/2+.025),1.78,.04,.04,chrome,4);
+    p('box',-.08,1.11,s*(d/2-.12),1.70,.44,.05,glass,8);
+    p('box',-.82,1.12,s*(d/2-.115),.09,.50,.085,bodyTint,bodyMat);
+    p('box',-.12,1.14,s*(d/2-.105),.075,.46,.075,darkMetal,4);
+    p('box',.72,1.12,s*(d/2-.115),.09,.50,.085,bodyTint,bodyMat);
+    p('box',-.34,.89,s*(d/2+.015),.20,.042,.045,chrome,4);
+    p('box',.34,.89,s*(d/2+.015),.20,.042,.045,chrome,4);
+    p('box',.62,1.01,s*(d/2+.06),.07,.045,.15,darkMetal,4);
+    p('bevel',.64,1.06,s*(d/2+.16),.18,.13,.19,bodyTint,bodyMat);
   }
-  // Roof panel + windshield + rear glass + wipers
   p('bevel',-.09,1.39,0,1.68,.11,d-.20,roofTint,bodyMat);
-  const frontGlassPitch=.42, rearGlassPitch=-.35;
-  const wfBasis=chassisBasis(visualYaw,(car.pitch??0)-frontGlassPitch,(car.roll??0));
-  const wrBasis=chassisBasis(visualYaw,(car.pitch??0)-rearGlassPitch,(car.roll??0));
-  r.add('box',...at(.75,1.15,0),.072,.50,d-.20,glass,8,{dynamic:true,basis:wfBasis});
-  r.add('box',...at(-.92,1.17,0),.076,.48,d-.22,glass,8,{dynamic:true,basis:wrBasis});
+  chassisBasisInto(visualYaw,cPitch-.42,cRoll,_vAuxBasis);
+  pAux('box',.75,1.15,0,.072,.50,d-.20,glass,8,_vAuxOpts);
+  // Animated Working Windshield Wipers sweep automatically during rain or enemy ink contamination!
   if (hi) {
-    // Interior dashboard, headrests & steering wheel visible through windows
+    const wipeActive=raining || stain>.15;
+    const wipePhase=wipeActive?Math.sin(clock*6.4)*.5+.5:0;
+    for (let k=0;k<2;k++) {
+      const wz=(k===0?-.32:.14)+wipePhase*.28;
+      const wy=.98+Math.sin(wipePhase*Math.PI)*.14;
+      pAux('box',.81,wy,wz,.022,.026,.34,0x151c20,4,_vAuxOpts);
+    }
+  }
+  chassisBasisInto(visualYaw,cPitch+.35,cRoll,_vAuxBasis);
+  pAux('box',-.92,1.17,0,.076,.48,d-.22,glass,8,_vAuxOpts);
+  if (hi) {
+    // Interior dashboard, glowing dash cluster, turning steering wheel & sport headrests!
     p('box',.52,.95,0,.34,.18,d-.34,0x1f282b,21);
-    for (const sz of [-.34,.34]) p('soft',-.18,1.08,sz,.16,.28,.28,0x2a3338,21);
+    if (driver) p('box',.41,1.01,-.26,.04,.07,.32,teamColor,3); // illuminated HUD gauge cluster
+    p('ring',.34,1.02,-.28,.22,.03,.22,rubber,21); // steering wheel
+    p('box',.34,1.02,-.28+steerDir*.06,.03,.18,.04,chrome,4); // turning steering spoke!
+    p('soft',-.18,1.08,-.34,.16,.28,.28,0x2a3338,21);
+    p('soft',-.18,1.08,.34,.16,.28,.28,0x2a3338,21);
   }
 
-  // ---- 4. Archetype Signature Equipment ----
+  // ---- 4. Archetype Signature Equipment & Active Aero Animations ----
   if (style===0) {
-    // Street GT Coupe: high-mounted rear wing spoiler + twin struts + roof shark-fin antenna!
-    for (const sz of [-.52,.52]) p('box',-w/2+.36,1.06,sz,.12,.22,.05,darkMetal,4);
-    p('bevel',-w/2+.32,1.19,0,.28,.055,d+.04,darkMetal,4);
-    for (const sz of [-1,1]) p('box',-w/2+.32,1.19,sz*(d*.5+.03),.32,.14,.03,bodyTint,bodyMat);
+    // Street GT Coupe: ACTIVE DRS Rear Wing (airbrake tilt under braking, sleek flat on turbo!) + underbody team neon!
+    const wingPitch=brakeActive?.42:bfFlame>0?-.12:.06;
+    p('box',-w/2+.36,1.06,-.52,.12,.22,.05,darkMetal,4);
+    p('box',-w/2+.36,1.06,.52,.12,.22,.05,darkMetal,4);
+    chassisBasisInto(visualYaw,cPitch+wingPitch,cRoll,_vAuxBasis);
+    pAux('bevel',-w/2+.32,1.19,0,.28,.055,d+.04,darkMetal,4,_vAuxOpts);
+    for (let s=-1;s<=1;s+=2) p('box',-w/2+.32,1.19,s*(d*.5+.03),.32,.14,.03,bodyTint,bodyMat);
     p('bevel',-.72,1.47,0,.22,.09,.04,darkMetal,4);
+    if (driver && hi && inView) {
+      // Glowing team-ink underbody ground-effect neon strip!
+      p('box',0,.23,-(d*.48),w*.56,.03,.04,teamColor,3);
+      p('box',0,.23,d*.48,w*.56,.03,.04,teamColor,3);
+    }
   } else if (style===1) {
-    // Tactical Pickup Truck: front bull-bar, roll-bar with 4 amber rally lights, ribbed truck bed
+    // Tactical Pickup Truck: front bull-bar, roll-bar with alternating flashing rally lights, bed struts & spare tire!
     p('bevel',w/2+.14,.62,0,.10,.34,d*.74,darkMetal,4);
-    for (const fz of [-.36,.36]) p('orb',w/2+.20,.68,fz,.14,.14,.08,0xffe8a0,3);
+    p('orb',w/2+.20,.68,-.36,.14,.14,.08,0xffe8a0,3);
+    p('orb',w/2+.20,.68,.36,.14,.14,.08,0xffe8a0,3);
     p('box',-w/2+.57,.955,0,1.12,.11,d-.12,0x76827c,4);
-    for (const sign of [-1,1]) {
-      p('box',-w/2+.55,1.08,sign*(d/2-.09),1.22,.22,.12,bodyTint,bodyMat);
-      p('box',-.76,1.38,sign*(d/2-.18),.08,.56,.08,darkMetal,4);
+    for (let s=-1;s<=1;s+=2) {
+      p('box',-w/2+.55,1.08,s*(d/2-.09),1.22,.22,.12,bodyTint,bodyMat);
+      p('box',-.76,1.38,s*(d/2-.18),.08,.56,.08,darkMetal,4);
     }
     p('box',-.76,1.64,0,.09,.08,d-.32,darkMetal,4);
-    for (const lz of [-.42,-.14,.14,.42]) p('orb',-.72,1.72,lz,.11,.10,.12,driver?0xfff6c0:0xd4a852,3);
+    const strobe=driver && Math.abs(car.speed)>2.5?Math.floor(clock*10)%2:-1;
+    for (let k=0;k<4;k++) {
+      const lz=-.42+k*.28;
+      const lit=strobe>=0 && (k%2===strobe);
+      p('orb',-.72,1.72,lz,.11,.10,.12,lit?teamColor:driver?0xfff6c0:0xd4a852,3);
+    }
+    if (hi) p('cylinder',-w/2+.55,.26,0,.62,.20,.62,rubber,21); // under-bed spare wheel
   } else if (style===2) {
-    // Armored Delivery Cargo Van: corrugated high-roof cargo box + roof utility rack + clearance lights
+    // Armored Delivery Cargo Van: corrugated cargo box, sliding door track, roof utility rack & animated caution beacon!
     const cargoTint=lerpRgb(0xd7d4bc,inkColor,clamp(stain*.95,0,1));
     p('bevel',-w/2+.86,1.22,0,1.78,.94,d-.06,cargoTint,2);
     if (hi) {
-      for (let i=0;i<5;i++) for (const sign of [-1,1]) {
-        p('box',-w/2+.18+i*.34,1.22,sign*(d/2-.01),.055,.80,.045,trim,4);
+      for (let i=0;i<5;i++) {
+        const rx=-w/2+.18+i*.34;
+        p('box',rx,1.22,-(d/2-.01),.055,.80,.045,trim,4);
+        p('box',rx,1.22,d/2-.01,.055,.80,.045,trim,4);
       }
-      // Roof utility rack + amber clearance markers
-      for (const sz of [-.68,.68]) p('box',-.42,1.74,sz,1.95,.05,.05,chrome,4);
-      for (const lx of [-1.2,-.42,.36]) p('box',lx,1.72,0,.06,.04,1.38,chrome,4);
+      // Roof rack + rear cargo door seam & bumper step
+      p('box',-.42,1.74,-.68,1.95,.05,.05,chrome,4);
+      p('box',-.42,1.74,.68,1.95,.05,.05,chrome,4);
+      p('box',-1.2,1.72,0,.06,.04,1.38,chrome,4);
+      p('box',-.42,1.72,0,.06,.04,1.38,chrome,4);
+      p('box',.36,1.72,0,.06,.04,1.38,chrome,4);
+      p('box',-w/2-.04,1.22,0,.03,.86,.04,darkMetal,4); // dual rear door seam
     }
-    for (const lz of [-.62,0,.62]) p('orb',.54,1.50,lz,.08,.07,.10,0xffa834,3);
+    for (let k=-1;k<=1;k++) p('orb',.54,1.50,k*.62,.08,.07,.10,0xffa834,3);
+    if (driver) {
+      // Animated pulsing roof utility beacon!
+      const bPulse=.5+.5*Math.sin(clock*16);
+      p('orb',-.42,1.80,0,.16+bPulse*.06,.14,.16+bPulse*.06,bPulse>.5?teamColor:0xffb838,3);
+    }
   }
 
-  // ---- 5. True 4-Wheel Rotating Assemblies (Spokes + Alloy Rims + Brake Calipers!) ----
-  const wheelY=.36;
-  for (const [axIdx,ox] of [[-1,-w*.315],[1,w*.303]]) {
-    const steerAng=axIdx>0?(car.steer??0):0;
-    const wyaw=visualYaw+steerAng;
+  // ---- 5. True 4-Wheel Rotating Assemblies + Compressing Coilover Shocks + Glowing Brake Discs + Drift Sparks! ----
+  const wheelY=.36, spin=car.wheelSpin??0;
+  const cs=Math.cos(spin), ss=Math.sin(spin);
+  const driftActive=!!car.drifting && inView;
+  const dCharge=car.driftCharge??0;
+  const sparkTint=dCharge>=.45?0xfff4cf:dCharge>=.22?0xffa83c:0x5ce8ff;
+  for (let axIdx=0;axIdx<2;axIdx++) {
+    const isFront=axIdx===1, ox=isFront?w*.303:-w*.315;
+    const wyaw=visualYaw+(isFront?(car.steer??0):0);
     const wfx=Math.sin(wyaw), wfz=-Math.cos(wyaw);
     const wrx=Math.cos(wyaw), wrz=Math.sin(wyaw);
-    // Wheel spin rotates around the axle axis [wrx, 0, wrz]
-    const spin=car.wheelSpin??0;
-    const cs=Math.cos(spin), ss=Math.sin(spin);
-    const spA=[wfx*cs,ss,wfz*cs];
-    const spB=[-wfx*ss,cs,-wfz*ss];
-    const wheelBasis=[spA,[wrx,0,wrz],spB];
-    const axleBasis=[[wfx,0,wfz],[wrx,0,wrz],[0,1,0]];
-    for (const sign of [-1,1]) {
-      // Wheel center stays grounded on road while chassis bounces above it!
-      const wz=sign*(d/2+.02);
-      const wc=[x+bf[0]*ox+br[0]*wz, y+wheelY, z+bf[2]*ox+br[2]*wz];
-      // Wide sculpted rubber tire
-      r.add('cylinder',...wc,.72,.26,.72,rubber,21,{dynamic:true,basis:axleBasis});
-      // Deep-dish metallic alloy rim + hub center cap
-      const rimPos=[wc[0]+wrx*sign*.115,wc[1],wc[2]+wrz*sign*.115];
-      r.add('cylinder',...rimPos,.47,.06,.47,0x6e7c7d,4,{dynamic:true,basis:axleBasis});
-      r.add('cylinder',wc[0]+wrx*sign*.145,wc[1],wc[2]+wrz*sign*.145,.16,.04,.16,chrome,4,{dynamic:true,basis:axleBasis});
-      // Brake caliper glowing behind the rim!
+    _vWBasis[0][0]=wfx*cs; _vWBasis[0][1]=ss; _vWBasis[0][2]=wfz*cs;
+    _vWBasis[1][0]=wrx;    _vWBasis[1][1]=0;  _vWBasis[1][2]=wrz;
+    _vWBasis[2][0]=-wfx*ss;_vWBasis[2][1]=cs; _vWBasis[2][2]=-wfz*ss;
+    _vABasis[0][0]=wfx;    _vABasis[0][1]=0;  _vABasis[0][2]=wfz;
+    _vABasis[1][0]=wrx;    _vABasis[1][1]=0;  _vABasis[1][2]=wrz;
+    _vABasis[2][0]=0;      _vABasis[2][1]=1;  _vABasis[2][2]=0;
+    for (let s=-1;s<=1;s+=2) {
+      const wz=s*(d/2+.02);
+      const wcx=x+bf0*ox+br0*wz, wcy=y+wheelY, wcz=z+bf2*ox+br2*wz;
+      r.add('cylinder',wcx,wcy,wcz,.72,.26,.72,rubber,21,_vAOpts);
+      r.add('cylinder',wcx+wrx*s*.115,wcy,wcz+wrz*s*.115,.47,.06,.47,0x6e7c7d,4,_vAOpts);
+      r.add('cylinder',wcx+wrx*s*.145,wcy,wcz+wrz*s*.145,.16,.04,.16,chrome,4,_vAOpts);
       if (hi) {
-        const calPos=[wc[0]+wrx*sign*.07-wfx*.14,wc[1]+.08,wc[2]+wrz*sign*.07-wfz*.14];
-        r.add('box',...calPos,.13,.18,.07,driver?(TEAM_INK[driver.team]??0xe63939):0xc43c32,4,{dynamic:true,basis:axleBasis});
-        // Rotating alloy spokes visibly spinning with wheelSpin!
-        const spokePos=[wc[0]+wrx*sign*.132,wc[1],wc[2]+wrz*sign*.132];
-        r.add('box',...spokePos,.40,.03,.055,chrome,4,{dynamic:true,basis:wheelBasis});
-        r.add('box',...spokePos,.055,.03,.40,chrome,4,{dynamic:true,basis:wheelBasis});
+        // Inner ventilated brake rotor (glows hot orange-red when hard braking!) + caliper
+        const rotorTint=brakeActive && Math.abs(car.speed)>2.5?0xff6a30:0x889496;
+        const rotorMat=brakeActive && Math.abs(car.speed)>2.5?3:4;
+        r.add('cylinder',wcx+wrx*s*.065,wcy,wcz+wrz*s*.065,.34,.04,.34,rotorTint,rotorMat,_vAOpts);
+        r.add('box',wcx+wrx*s*.075-wfx*.14,wcy+.08,wcz+wrz*s*.075-wfz*.14,.13,.18,.07,driver?teamColor:0xc43c32,4,_vAOpts);
+        // Rotating twin crossed alloy spokes visibly spinning with wheelSpin!
+        const spx=wcx+wrx*s*.132, spz=wcz+wrz*s*.132;
+        r.add('box',spx,wcy,spz,.40,.03,.055,chrome,4,_vWOpts);
+        r.add('box',spx,wcy,spz,.055,.03,.40,chrome,4,_vWOpts);
+        // Visible compressing coilover suspension shock inside wheel well!
+        const wellTopY=y+.64+bodyLift+bf1*ox+br1*wz;
+        const strutLen=clamp(wellTopY-wcy,.12,.48);
+        r.add('cylinder',wcx-wrx*s*.10,wcy+strutLen*.5,wcz-wrz*s*.10,.075,strutLen,.075,driver?teamColor:0xe0a63a,4,_vDyn);
+      }
+      // Escalating Drift Sparks & Ink-Tire Smoke spraying off BOTH rear tires during powerslide!
+      if (!isFront && driftActive) {
+        for (let k=0;k<2;k++) {
+          const sp=(clock*13+k*.5+s*.23)%1;
+          const back=.32+sp*1.25, lift=.08+Math.sin(sp*Math.PI)*.42, spread=(k===0?1:-1)*.18*sp;
+          const sz=(1-sp)*.13;
+          r.add('orb',wcx-bf0*back+br0*spread,y+.08+lift,wcz-bf2*back+br2*spread,sz,sz*1.6,sz,k===0?sparkTint:teamColor,3,_vDyn);
+        }
       }
     }
   }
 
-  // ---- 6. Occupied Cockpit Beacon & Driver Silhouette ----
+  // ---- 6. Occupied Cockpit Beacon & Steering-Leaning Driver Silhouette ----
   if (driver) {
-    const teamColor=TEAM_INK[driver.team] ?? 0xffffff;
+    const dLean=clamp(-(car.roll??0)*1.3+steerDir*.18,-.22,.22);
     p('bevel',-.09,1.48,0,1.02,.085,.54,darkMetal,4);
     p('box',-.09,1.50,0,.88,.065,.40,teamColor,3);
-    p('orb',-.02,1.14,-.28,.34,.36,.34,teamColor,3);
-    p('box',.12,1.15,-.28,.08,.12,.26,0x101c22,8);
+    p('orb',-.02,1.14,-.28+dLean,.34,.36,.34,teamColor,3);
+    p('box',.12,1.15,-.28+dLean,.08,.12,.26,0x101c22,8);
   }
 
-  // ---- 7. Progressive Enemy Ink Dyeing & Critical Detonation Aura ----
+  // ---- 7. Progressive Enemy Ink Dyeing, Overheat Steam & Critical Detonation Aura ----
   if (stain>.03) {
     const s=clamp(stain,0,1);
-    // Organic spreading glossy ink blotches across hood, roof, flanks & fenders!
     p('bevel',w*.24,.94,0,1.18*s+.26,.055,(d-.18)*(.45+.55*s),inkColor,9);
     p('bevel',-.09,1.46,0,1.58*s+.22,.05,(d-.24)*(.45+.55*s),inkColor,9);
-    for (const sign of [-1,1]) {
-      p('bevel',.15,.68,sign*(d*.5+.026),w*.86*s+.38,.40*(.42+.58*s),.036,inkColor,9);
-      if (s>.35) p('orb',-w*.26,.78,sign*(d*.5+.02),(.45+.55*s)*.85,.34*s,.08,inkColor,9);
+    for (let side=-1;side<=1;side+=2) {
+      p('bevel',.15,.68,side*(d*.5+.026),w*.86*s+.38,.40*(.42+.58*s),.036,inkColor,9);
+      if (s>.35) p('orb',-w*.26,.78,side*(d*.5+.02),(.45+.55*s)*.85,.34*s,.08,inkColor,9);
     }
     if (s>.55) {
       p('orb',w*.32,.96,.22,.44*s,.14,.42*s,inkColor,9);
       p('orb',-.48,1.45,-.18,.52*s,.12,.48*s,inkColor,9);
     }
-    // Critical detonation overload glow + dual expanding warning shock-rings (>= 76%)
-    if (stain>=.76) {
+    // Rising dark-ink overheat steam puffs from the hood as enemy ink nears detonation!
+    if (s>=.62 && hi && inView) {
+      for (let k=0;k<2;k++) {
+        const sp=(clock*2.4+k*.5+car.index*.17)%1;
+        const ps=(.14+sp*.26)*(1-sp*.6);
+        p('orb',w*.28+Math.sin(clock*5+k)*sp*.18,.98+sp*1.05,(k===0?-.18:.18)*sp,ps,ps,ps,k===0?inkColor:0x2b2530,9);
+      }
+    }
+    if (stain>=.76 && inView) {
       const pulse=.5+.5*Math.sin(clock*26);
-      r.add('ripple',x,y+.08,z,(w+1.5)*(1+pulse*.22),.04,(w+1.5)*(1+pulse*.22),inkColor,12,{dynamic:true,label:.22+pulse*.70});
-      r.add('ripple',x,y+.12,z,(w+2.8)*(1-pulse*.12),.04,(w+2.8)*(1-pulse*.12),0xfff4cf,12,{dynamic:true,label:.4+pulse*.5});
+      _vRipOpts.label=.22+pulse*.70;
+      r.add('ripple',x,y+.08,z,(w+1.5)*(1+pulse*.22),.04,(w+1.5)*(1+pulse*.22),inkColor,12,_vRipOpts);
+      _vRipOpts.label=.4+pulse*.5;
+      r.add('ripple',x,y+.12,z,(w+2.8)*(1-pulse*.12),.04,(w+2.8)*(1-pulse*.12),0xfff4cf,12,_vRipOpts);
       p('orb',w*.25,1.02,0,.32+pulse*.18,.26+pulse*.14,.32+pulse*.18,0xfff2c2,3);
     }
   }
@@ -951,29 +1054,40 @@ function drawExplosionDebris(r,car,age) {
   const life=clamp(1-age/1.55,0,1);
   // Multi-stage fireball core + double shockwave dome + blazing energy halo
   if (age<.58) {
-    const t=age/.58, core=(1-t)*3.8+1.4;
-    r.add('orb',x,y+1.2+t*1.9,z,core,core,core,t<.22?0xffffff:t<.45?0xffe8a8:ink,3,{dynamic:true});
-    r.add('orb',x,y+1.2+t*1.9,z,core*1.55,core*1.45,core*1.55,ink,9,{dynamic:true});
-    r.add('ripple',x,y+.12,z,2.4+t*CAR_EXPLOSION_RADIUS*2.1,.05,2.4+t*CAR_EXPLOSION_RADIUS*2.1,ink,12,{dynamic:true,label:t});
-    r.add('ripple',x,y+.20,z,1.4+t*CAR_EXPLOSION_RADIUS*1.5,.05,1.4+t*CAR_EXPLOSION_RADIUS*1.5,0xfff4cf,12,{dynamic:true,label:clamp(t*1.3,0,1)});
+    const t=age/.58, core=(1-t)*3.9+1.45;
+    r.add('orb',x,y+1.2+t*1.95,z,core,core,core,t<.22?0xffffff:t<.45?0xffe8a8:ink,3,_vDyn);
+    r.add('orb',x,y+1.2+t*1.95,z,core*1.58,core*1.48,core*1.58,ink,9,_vDyn);
+    _vRipOpts.label=t;
+    r.add('ripple',x,y+.12,z,2.4+t*CAR_EXPLOSION_RADIUS*2.15,.05,2.4+t*CAR_EXPLOSION_RADIUS*2.15,ink,12,_vRipOpts);
+    _vRipOpts.label=clamp(t*1.3,0,1);
+    r.add('ripple',x,y+.20,z,1.4+t*CAR_EXPLOSION_RADIUS*1.55,.05,1.4+t*CAR_EXPLOSION_RADIUS*1.55,0xfff4cf,12,_vRipOpts);
   }
+  // Tumbling blown-off hood panel + detached front bumper!
+  const panelLife=Math.max(.02,life);
+  _vDebOpts.yaw=car.yaw+age*5.4; _vDebOpts.pitch=age*8.2;
+  r.add('bevel',x+Math.sin(car.yaw)*age*2.2,Math.max(y+.18,y+1.1+age*7.6-age*age*6.6),z-Math.cos(car.yaw)*age*2.2,
+    1.15*panelLife,.09*panelLife,1.25*panelLife,baseTint,20,_vDebOpts);
+  _vDebOpts.yaw=car.yaw-age*6.8; _vDebOpts.pitch=age*6.4;
+  r.add('bevel',x-Math.cos(car.yaw)*age*3.1,Math.max(y+.14,y+.7+age*5.4-age*age*6.4),z-Math.sin(car.yaw)*age*3.1,
+    .22*panelLife,.16*panelLife,d*panelLife,0x2c363b,4,_vDebOpts);
   // 4 flying spinning tires blown outward from wheel corners!
   for (let tIdx=0;tIdx<4;tIdx++) {
     const ang=car.yaw+tIdx*T+.6, spd=4.4+(tIdx%2)*1.4, lift=6.4+(tIdx%2)*1.1;
     const tx=x+Math.cos(ang)*(1.1+age*spd), tz=z+Math.sin(ang)*(1.1+age*spd);
     const ty=Math.max(y+.26,y+.5+age*lift-age*age*6.8);
-    const sc=.68*Math.max(.02,life);
-    r.add('cylinder',tx,ty,tz,sc,.24*Math.max(.02,life),sc,0x1e2629,21,{dynamic:true,yaw:ang+age*9,pitch:age*11});
+    const sc=.68*panelLife;
+    _vDebOpts.yaw=ang+age*9; _vDebOpts.pitch=age*11;
+    r.add('cylinder',tx,ty,tz,sc,.24*panelLife,sc,0x1e2629,21,_vDebOpts);
   }
-  // Tumbling charred chassis panels & glowing ink sparks
-  const count=r.lite?10:20;
+  // Tumbling charred chassis shards & glowing ink sparks
+  const count=r.lite?10:22;
   for (let i=0;i<count;i++) {
     const a=i*2.399+car.index, speed=3.4+(i%5)*1.55, lift=5.2+(i%4)*1.8;
     const px=x+Math.cos(a)*(w*.22+age*speed), pz=z+Math.sin(a)*(d*.22+age*speed);
     const py=Math.max(y+.1,y+.9+age*lift-age*age*6.4);
     const sz=(.34+(i%3)*.17)*Math.max(.01,life);
     const fiery=i%5===0 && age<.85;
-    r.add(i%3===0?'bevel':'box',px,py,pz,sz,sz*.65,sz*1.15,fiery?0xffe090:i%2===0?ink:baseTint,fiery?3:i%2===0?9:20,
-      {dynamic:true,yaw:a+age*7.2,pitch:age*(i%4+2.8)});
+    _vDebOpts.yaw=a+age*7.2; _vDebOpts.pitch=age*(i%4+2.8);
+    r.add(i%3===0?'bevel':'box',px,py,pz,sz,sz*.65,sz*1.15,fiery?0xffe090:i%2===0?ink:baseTint,fiery?3:i%2===0?9:20,_vDebOpts);
   }
 }

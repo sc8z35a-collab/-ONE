@@ -171,17 +171,32 @@ export function writeSurfaceSlots(out,o,shape) {
     return;
   }
   const r=out[o+16], g=out[o+17], b=out[o+18];
-  // Ultra-fast paths for orientation-independent kinds.
+  // Ultra-fast paths for orientation-independent & sqrt-free kinds (bit-identical to surfaceForCore).
   if (kind===22) {const s=r>.8 && b<.7?S.TACTILE_PAVING:S.ROAD_PAINT; out[o+3]=s; out[o+7]=s; out[o+11]=s; return;}
   if (kind===30) {out[o+3]=S.RIPSTOP; out[o+7]=S.RIPSTOP; out[o+11]=S.RIPSTOP; return;}
   if (kind===26) {out[o+3]=S.DRIED_INK; out[o+7]=S.DRIED_INK; out[o+11]=S.DRIED_INK; return;}
+  const l=r*.2126+g*.7152+b*.0722;
+  if (kind===20) {const s=l<.3?S.CARBON_FIBER:S.HARD_PLASTIC; out[o+3]=s; out[o+7]=s; out[o+11]=s; return;}
+  if (kind===8) {
+    if (l<=.62) {out[o+3]=S.GLASS_GRIME; out[o+7]=S.GLASS_GRIME; out[o+11]=S.GLASS_GRIME; return;}
+    const seed=instanceSeed(out[o+12],out[o+13],out[o+14]);
+    out[o+3]=S.FROSTED_GLASS; out[o+7]=seed<.5?S.GLASS_BLOCK:S.CHANNEL_GLASS; out[o+11]=S.FROSTED_GLASS; return;
+  }
+  if (kind===18) {
+    const s=out[o+12]>CABIN_X-640?S.SEAT_FABRIC:l<.25?S.NEOPRENE:S.SPORT_MESH;
+    out[o+3]=s; out[o+7]=s; out[o+11]=s; return;
+  }
   const a0=out[o], a1=out[o+1], a2=out[o+2];
   const b0=out[o+4], b1=out[o+5], b2=out[o+6];
   const c0=out[o+8], c1=out[o+9], c2=out[o+10];
   const sx=Math.sqrt(a0*a0+a1*a1+a2*a2);
   const sy=Math.sqrt(b0*b0+b1*b1+b2*b2);
   const sz=Math.sqrt(c0*c0+c1*c1+c2*c2);
-  const l=r*.2126+g*.7152+b*.0722;
+  if (kind===14) {
+    if (shape===0) {out[o+3]=S.LEAVES; out[o+7]=S.LEAVES; out[o+11]=S.LEAVES; return;}
+    const side=sy>1.2?S.GREEN_WALL:S.HEDGE;
+    out[o+3]=S.HEDGE; out[o+7]=side; out[o+11]=side; return;
+  }
   const longest=sx>sy?(sx>sz?sx:sz):(sy>sz?sy:sz);
   const thinnest=sx<sy?(sx<sz?sx:sz):(sy<sz?sy:sz);
   const middle=sx+sy+sz-longest-thinnest;
@@ -191,12 +206,19 @@ export function writeSurfaceSlots(out,o,shape) {
     out[o+3]=s; out[o+7]=s; out[o+11]=s; return;
   }
   if (kind===3) {const s=middle>.3 && longest>1.4?S.LIGHTBOX_PANEL:-1; out[o+3]=s; out[o+7]=s; out[o+11]=s; return;}
-  if (kind===20) {const s=l<.3?S.CARBON_FIBER:S.HARD_PLASTIC; out[o+3]=s; out[o+7]=s; out[o+11]=s; return;}
+  if (kind===21) {
+    const topSide=thinnest<.07?S.RUBBER_SOLE:l<.3 && longest<.6?S.LEATHER:S.RUBBER_SOLE;
+    out[o+3]=topSide; out[o+7]=topSide; out[o+11]=S.BOOT_TREAD; return;
+  }
   if (kind===31) {const s=longest>.3?S.BALLISTIC_NYLON:S.CANVAS; out[o+3]=s; out[o+7]=s; out[o+11]=s; return;}
   if (kind===23) {const s=shape===0 && thinnest<.9?S.SUCKER_SKIN:S.CEPHALOPOD_SKIN; out[o+3]=s; out[o+7]=s; out[o+11]=s; return;}
   const x=out[o+12], y=out[o+13], z=out[o+14];
+  if (kind===29) {
+    const seed=instanceSeed(x,y,z);
+    const w=seed<.2?S.WOOD_PLANKS:seed<.4?S.PLYWOOD:seed<.6?S.WOOD_WEATHERED:seed<.8?S.PAINTED_WOOD:S.SHITAMI_BOARD;
+    out[o+3]=longest>2?S.ROOFTOP_DECK:w; out[o+7]=w; out[o+11]=w; return;
+  }
   const cabin=x>CABIN_X-640;
-  if (kind===18) {const s=cabin?S.SEAT_FABRIC:l<.25?S.NEOPRENE:S.SPORT_MESH; out[o+3]=s; out[o+7]=s; out[o+11]=s; return;}
   const under=x>UNDER_X*.5 && !cabin;
   const maxC=r>g?(r>b?r:b):(g>b?g:b);
   const minC=r<g?(r<b?r:b):(g<b?g:b);
