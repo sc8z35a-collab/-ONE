@@ -410,6 +410,10 @@ export class Tactics {
 
   crew(actor,enemy,dt,sight=null) {
     const b=this.battle,s=this.state(actor), level=zoneOf(actor.x), d=enemy?distance(actor,enemy):Infinity;
+    if (actor.isCheater && b.cheaterAI) {
+      b.cheaterAI.step(actor,enemy,s,dt,sight);
+      return;
+    }
     const hnv=b.hnv1;
     // HNV1 Master Disaster & World-Boss Survival Layer (Tsunami, B1 Flood, Goat, Sniper Laser, Train Boss)
     if (hnv?.survivalAction(actor,dt,sight)) {s.cover=null;actor.charge=0;return;}

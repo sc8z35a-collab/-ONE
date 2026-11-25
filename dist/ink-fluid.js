@@ -32,3 +32,5 @@ export function wallRunoff(mark,dt) {
   mark.runoff-=drained;
   return drained;
 }
+
+export {AIR_DENSITY,FLUID_MEDIA,FluidEngine,GRAVITY,STORM_DRAINS} from './fluid-engine.js';

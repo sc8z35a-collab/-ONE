@@ -165,6 +165,7 @@ export class NpcCombat {
     const mod=hnv?hnv.combatPoseModifiers(a,d):{jump:false,swim:false};
     a.intent=a.giant?'巨大化して前進':
       enemy?.isGoat?'HNV1: 破壊神ゴートへ集中砲火':
+      enemy?.isHeli?'HNV1: 暴走ミサイルヘリを対空射撃':
       enemy?.isSniper?'HNV1: マンション狙撃手を制圧':
       enemy?.isRogueDrone?'HNV1: 暴走ドローンを迎撃':
       mod.swim?'HNV1: インク潜伏で間合い調整':

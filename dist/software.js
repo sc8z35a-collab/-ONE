@@ -87,9 +87,18 @@ export class SoftwareRenderer {
 
   setQuality(level) {
     this.quality=level===true?'lite':level===false?'high':level;
-    this.lite=this.quality!=='high';
+    this.lite=this.quality==='lite' || this.quality==='ultralite';
+    this.ultralite=this.quality==='ultralite';
     this.ultra=this.quality==='ultra';
   }
+
+  setMood({bossActive = false, raining = false, dt = 1/60} = {}) {
+    const t=clamp(dt*1.35,0,1);
+    this.bossRage=mix(this.bossRage??0,bossActive?1:0,t);
+    this.rainLevel=mix(this.rainLevel??0,raining?1:0,t);
+  }
+
+  hideStaticRegion() {}
 
   seal() {
     for (const [name,batch] of Object.entries(this.batches)) {
@@ -131,7 +140,7 @@ export class SoftwareRenderer {
     const canvas=this.canvas;
     // Lightweight modes keep the same 400 / 300 lines as the WebGL renderer.
     const short=Math.max(1,Math.min(canvas.clientWidth,canvas.clientHeight));
-    const ratio=this.lite?Math.min(1,(this.ultra?300:400)/short):Math.min(1,1024/canvas.clientWidth,576/canvas.clientHeight);
+    const ratio=this.lite?Math.min(1,(this.ultralite?300:400)/short):Math.min(1,1024/canvas.clientWidth,576/canvas.clientHeight);
     this.viewZone=zoneOf(camera.eye[0]);
     this.interior=interiorBlend(camera);
     if (!this.lite && !this.shadow && this.world) this.configureWorld(this.world,paint);
@@ -156,10 +165,13 @@ export class SoftwareRenderer {
     this.clock=clock;
     this.vp=multiply(perspective(W/H),view(camera.eye,camera.target));
     this.depth.fill(0);
+    const rage=this.bossRage??0, rain=this.rainLevel??0;
     for (let i=0;i<H;i++) {
       const y=clamp(this.direction[1]+(H/2-i)/this.focal,0,.76);
       const a=Math.sqrt(y);
-      this.buffer.fill(pack(mix(218-a*98,67,this.interior),mix(234-a*46,82,this.interior),mix(243-a*22,75,this.interior)),i*W,(i+1)*W);
+      const dayR=mix(218-a*98,86-a*32,rain), dayG=mix(234-a*46,98-a*32,rain), dayB=mix(243-a*22,110-a*28,rain);
+      const sr=mix(dayR,64-a*48,rage), sg=mix(dayG,14-a*10,rage), sb=mix(dayB,16-a*11,rage);
+      this.buffer.fill(pack(mix(sr,67,this.interior),mix(sg,82,this.interior),mix(sb,75,this.interior)),i*W,(i+1)*W);
     }
     const overlays=[];
     const mergeStairs=!!camera.stair && this.viewZone<2;
@@ -188,6 +200,21 @@ export class SoftwareRenderer {
     }
     this.eye=camera.eye;
     this.ctx.putImageData(this.image,0,0);
+    if (rain>.04 && this.viewZone===0 && this.interior<.7) {
+      this.ctx.save();
+      this.ctx.strokeStyle=`rgba(195,216,232,${(rain*.44*(1-this.interior*.7)).toFixed(3)})`;
+      this.ctx.lineWidth=1;
+      this.ctx.beginPath();
+      const lines=Math.round(75*rain);
+      for (let i=0;i<lines;i++) {
+        const rx=((Math.sin(i*12.9898)*43758.5453%1+1)%1)*W;
+        const ry=(((((Math.sin(i*78.233)*43758.5453%1)+1)%1)+clock*(1.6+(i%5)*.2))%1)*H;
+        this.ctx.moveTo(rx,ry);
+        this.ctx.lineTo(rx-4,ry+18);
+      }
+      this.ctx.stroke();
+      this.ctx.restore();
+    }
   }
 
   projectVertex(v,index) {
@@ -210,7 +237,12 @@ export class SoftwareRenderer {
       || (dist>25 && radius*this.focal/dist<.58)) return;
     const {v,indices,faces}=item;
     const projected=[];
-    const fog=clamp((Math.hypot(...rel)-13)/140,0,.69);
+    const rain=this.viewZone===0?(this.rainLevel??0)*(1-this.interior*.85):0;
+    const d3d=Math.hypot(...rel);
+    const clearFog=clamp((d3d-13)/140,0,.69);
+    const rainFog=rain>.01?clamp(1-Math.exp(-Math.max(0,d3d-2.5)*rain*.075),0,.96):0;
+    const fog=Math.max(clearFog,rainFog);
+    const fogR=mix(.73,.36,rain), fogG=mix(.84,.41,rain), fogB=mix(.89,.46,rain);
     for (let i=0;i<v.length;i+=8) projected.push(this.projectVertex(v,i));
     for (let i=0;i<indices.length;i+=3) {
       const ia=indices[i]*8,ib=indices[i+1]*8,ic=indices[i+2]*8;
@@ -221,14 +253,14 @@ export class SoftwareRenderer {
       const base=[projected[indices[i]],projected[indices[i+1]],projected[indices[i+2]]];
       if (base.every(p=>p[2]<NEAR)) continue;
       const face=base.every(p=>p[2]>=NEAR)?base:this.clip(base);
-      const daylight=.64+Math.max(n[1],0)*.16+Math.max(0,dot(n,SUN))*.43;
+      const daylight=.64+Math.max(n[1],0)*.16+Math.max(0,dot(n,SUN))*.43*(1-rain*.75);
       const lambert=item.kind===7?1:(item.kind===3 || item.kind===24 || item.kind===25)?1.16:mix(daylight,.85+Math.max(n[1],0)*.12,this.interior);
       let shine=0;
       if (!this.lite && [4,6,8,9,11,17,20].includes(item.kind)) {
         const eyeDir=unit(sub(this.eye,item.p)), half=unit([eyeDir[0]+SUN[0],eyeDir[1]+SUN[1],eyeDir[2]+SUN[2]]);
-        shine=Math.pow(Math.max(0,dot(n,half)),item.kind===4?65:95)*.29;
+        shine=Math.pow(Math.max(0,dot(n,half)),item.kind===4?65:95)*.29*(1-rain*.8);
       }
-      const tint=item.color.map((v,k)=>(v*lambert*(1-fog)+shine*[1,.96,.86][k]+[.73,.84,.89][k]*fog)*255);
+      const tint=item.color.map((v,k)=>(v*lambert*(1-fog)+shine*[1,.96,.86][k]+[fogR,fogG,fogB][k]*fog)*255);
       const surface=(item.kind===1 || item.kind===5 || item.kind===15 || item.kind===22) && n[1]>.48 &&
         (item.kind===15 || Math.max(v[ia+1],v[ib+1],v[ic+1])>inkY(item.layer)-.055);
       for (let j=1;j<face.length-1;j++) this.triangle(face[0],face[j],face[j+1],tint,item,n,surface);
@@ -314,7 +346,7 @@ export class SoftwareRenderer {
               const wy=(A*yA+B*yB+C*yC)/q;
               const tolerance=item.kind===15 || item.layer===4?.207:FILM_HEIGHT_TOLERANCE;
               const owner=filmOwner(p,layer,u-.5,v-.5,wy,tolerance);
-              const strength=owner?1:0, mixAmount=owner===2?1:0;
+              const strength=owner?1:0, mixAmount=owner===2?1:0, isBoss=owner===3;
               const hash=((Math.imul(Math.floor(wx*19),4787)^Math.imul(Math.floor(wz*19),60757))&127)/127;
               const shadowed=within && inkMap?.[index] && !item.layer;
               const shade=(shadowed ? .87 : 1)*(.96+hash*.066);
@@ -325,9 +357,12 @@ export class SoftwareRenderer {
               const shimmer=strength?(5+grazing*43+wave*2.1):item.kind===5?Math.max(0,Math.sin(wx*.81+wz*.36)-.23)*4.1:0;
               const wet=within?p.pixels[ink+2]/255:0;
               const light=(.95+wet*.06)*strength;
-              const red=tint[0]*(1-strength)+(CYAN[0]+(AMBER[0]-CYAN[0])*mixAmount)*light;
-              const green=tint[1]*(1-strength)+(CYAN[1]+(AMBER[1]-CYAN[1])*mixAmount)*light;
-              const blue=tint[2]*(1-strength)+(CYAN[2]+(AMBER[2]-CYAN[2])*mixAmount)*light;
+              const inkR=isBoss?26:(CYAN[0]+(AMBER[0]-CYAN[0])*mixAmount);
+              const inkG=isBoss?18:(CYAN[1]+(AMBER[1]-CYAN[1])*mixAmount);
+              const inkB=isBoss?34:(CYAN[2]+(AMBER[2]-CYAN[2])*mixAmount);
+              const red=tint[0]*(1-strength)+inkR*light;
+              const green=tint[1]*(1-strength)+inkG*light;
+              const blue=tint[2]*(1-strength)+inkB*light;
               rgb=pack(red*shade+shimmer,green*shade+shimmer,blue*shade+shimmer*1.35);
             } else {
               const wy=(A*yA+B*yB+C*yC)/q;

@@ -36,7 +36,7 @@ export function drawBossModel(r,boss,time,collision=false) {
   const lean=slam?-.46*wind+.18*kick:mortar || lash?-.38*wind+.37*kick:.24*wind;
   const twist=sweep?-.41*wind+.51*kick:0;
   const bank=(boss.poseBank??0)*.72;
-  const lite=!!r.lite || !!r.ultra;
+  const lite=!!r.lite || !!r.ultralite;
   const useScratch=!!r.seal && !collision;
   const part=(type,x,y,z,w,h,d,tint,k=SKIN,pitch=0,turn=0)=>{
     const f=clamp(y*.33,0,1), sx=x+f*(twist+bank), sz=z+f*lean;

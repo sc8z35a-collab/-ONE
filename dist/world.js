@@ -87,6 +87,7 @@ export class World {
     this.elevated=scene?.elevated ?? [];
     this.objects=scene?.objects ?? [];
     this.vehicleDefs=scene?.vehicles ?? [];
+    this.destructibles=[];
     this.rng=randomGenerator(784301);
     if (scene) {
       this.loadParts(this.r,scene.parts);
@@ -107,8 +108,37 @@ export class World {
     renderer.zone=0;
     this.stageParts=prepareStageObjects(this.objects);
     this.indexSolids();
+    if (scene) this.buildBakedDestructibles();
     renderer.seal();
     this.r=renderer;
+  }
+
+  registerDestructible(def) {
+    if (!def || this.destructibles.some(d=>d.id===def.id)) return def;
+    this.destructibles.push(def);
+    return def;
+  }
+
+  buildBakedDestructibles() {
+    for (let i=0;i<this.solids.length;i++) {
+      const s=this.solids[i];
+      if (!s || zoneOf(s.min[0])!==0) continue;
+      const w=s.max[0]-s.min[0], h=s.max[1]-s.min[1], d=s.max[2]-s.min[2];
+      const cx=(s.min[0]+s.max[0])*.5, cy=(s.min[1]+s.max[1])*.5, cz=(s.min[2]+s.max[2])*.5;
+      // Skip underground foundations, walkable floor slabs, ramps, rails, and walk-in apartment interiors.
+      if (s.max[1]<=0.2 || h<0.45 || (w>45 && d>45)) continue;
+      if (this.homes.some(hm=>cx>=hm.x0-0.8 && cx<=hm.x1+0.8 && cz>=hm.z0-0.8 && cz<=hm.z1+0.8)) continue;
+      if (Math.abs(cz)<15 && (Math.abs(cx)>38 && Math.abs(cx)<50)) continue; // keep stairs/station ends clear
+      const isBuilding=h>=6.5 || (w>=7 && d>=5 && h>=3);
+      const isShop=!isBuilding && h>=2.2 && (w>=2.5 || d>=2.5);
+      const kind=isBuilding?'building':isShop?'shop':'object';
+      if (!isBuilding && !isShop && w>8) continue; // skip long road barriers/highway spans
+      this.registerDestructible({
+        id:'baked-'+i,kind,material:h<3 && w<3?'wood':'concrete',
+        x:cx,y:cy,z:cz,w,h,d,yaw:0,tint:0xbab8aa,matKind:isBuilding?10:2,
+        minY:Math.max(0.14,s.min[1]),maxY:s.max[1]+0.8,solids:[s]
+      });
+    }
   }
 
   loadParts(renderer,parts) {
@@ -173,20 +203,45 @@ export class World {
   }
 
   obstacle(x,y,z,w,h,d,ray = true,paintLayer=undefined) {
-    this.solids.push({min:[x-w/2,y-h/2,z-d/2],max:[x+w/2,y+h/2,z+d/2],ray,paintLayer});
+    const s={min:[x-w/2,y-h/2,z-d/2],max:[x+w/2,y+h/2,z+d/2],ray,paintLayer};
+    this.solids.push(s);
+    return s;
+  }
+
+  disableSolid(raw) {
+    const box=this._solidBoxes?.get(raw);
+    if (box) box.disabled=true;
+  }
+
+  disableRegion(zoneIndex,minX,maxX,minY,maxY,minZ,maxZ) {
+    const shapes=this.geometry?.shapes;
+    if (!shapes) return 0;
+    let disabled=0;
+    for (let i=0;i<shapes.length;i++) {
+      const sh=shapes[i];
+      if (sh.disabled || sh.zone!==zoneIndex) continue;
+      if (sh.kind===0 || sh.kind===1 || sh.kind===5 || sh.kind===22 || sh.kind===27) continue;
+      if (sh.px>=minX && sh.px<=maxX && sh.py>=minY && sh.py<=maxY && sh.pz>=minZ && sh.pz<=maxZ) {
+        sh.disabled=true;
+        disabled++;
+      }
+    }
+    return disabled;
   }
 
   indexSolids() {
     this.grid0=new Array(4096);
     this.grid1=new Array(1024);
     this.collisionGrid=new Map();
+    this._solidBoxes=new WeakMap();
     this._traceSeq=0;
     const grid0=this.grid0, grid1=this.grid1, grid=this.collisionGrid;
     for (let i=0;i<this.solids.length;i++) {
       const raw=this.solids[i];
       const x0=raw.min[0], y0=raw.min[1], z0=raw.min[2];
       const x1=raw.max[0], y1=raw.max[1], z1=raw.max[2];
-      const box={x0,y0,z0,x1,y1,z1,ray:raw.ray,paintLayer:raw.paintLayer,_seen:0};
+      const box={x0,y0,z0,x1,y1,z1,ray:raw.ray,paintLayer:raw.paintLayer,disabled:false,_seen:0};
+      this._solidBoxes.set(raw,box);
       const cx0=Math.floor(x0*INV_CELL), cx1=Math.floor(x1*INV_CELL);
       const cz0=Math.floor(z0*INV_CELL), cz1=Math.floor(z1*INV_CELL);
       for (let z=cz0;z<=cz1;z++) {
@@ -263,7 +318,7 @@ export class World {
 
   solid(x,y,z,w,h,d,tint,kind = 2,opts) {
     this.r.add('box',x,y,z,w,h,d,tint,kind,opts);
-    this.obstacle(x,y,z,w,h,d);
+    return this.obstacle(x,y,z,w,h,d);
   }
 
   deck(x0,x1,z0,z1,height,tint) {
@@ -293,12 +348,16 @@ export class World {
       for (let i=0;i<slabs.length;i++) {
         const s=slabs[i];
         if (x<s.x0 || x>s.x1 || z<s.z0 || z>s.z1) continue;
-        if (s.flatResult) return s.flatResult;
+        if (s.flatResult) {
+          return this.dynamicStage?.active?this.dynamicStage.floorOverlay(x,z,s.flatResult):s.flatResult;
+        }
         const t=s.isX?(x-s.x0)*s.invSpan:(z-s.z0)*s.invSpan;
-        return {y:s.from+s.dy*t,layer:s.layer};
+        const hit={y:s.from+s.dy*t,layer:s.layer};
+        return this.dynamicStage?.active?this.dynamicStage.floorOverlay(x,z,hit):hit;
       }
     }
-    return ZONE_FLOORS[zone];
+    const base=ZONE_FLOORS[zone];
+    return this.dynamicStage?.active?this.dynamicStage.floorOverlay(x,z,base):base;
   }
 
   // Zero-allocation scalar floor height query for stand(), trace(), Navigation.clear().
@@ -307,16 +366,17 @@ export class World {
     if (sy===sy) return sy;
     const zone=zoneOf(x);
     const b=this.slabBounds[zone];
+    let y=ZONE_FLOORS[zone].y;
     if (x>=b.x0 && x<=b.x1 && z>=b.z0 && z<=b.z1) {
       const slabs=this.zoneSlabs[zone];
       for (let i=0;i<slabs.length;i++) {
         const s=slabs[i];
         if (x<s.x0 || x>s.x1 || z<s.z0 || z>s.z1) continue;
-        if (!s.dy) return s.from;
-        return s.from+s.dy*(s.isX?(x-s.x0)*s.invSpan:(z-s.z0)*s.invSpan);
+        y=!s.dy?s.from:s.from+s.dy*(s.isX?(x-s.x0)*s.invSpan:(z-s.z0)*s.invSpan);
+        break;
       }
     }
-    return ZONE_FLOORS[zone].y;
+    return this.dynamicStage?.active?this.dynamicStage.floorOverlay(x,z,{y,layer:0}).y:y;
   }
 
   elevatedHeight(x,z) {
@@ -335,17 +395,18 @@ export class World {
     const base=this.floor(x,z);
     const ramp=this.elevatedHeight(x,z);
     let top=ramp<=y+.32?(ramp>base.y?ramp:base.y):base.y;
-    if (y<base.y+.22 && top===base.y) return base;
+    if (y<base.y+.22 && top===base.y && !this.dynamicStage?.active) return base;
     const boxes=this.cellBoxes(Math.floor(x*INV_CELL),Math.floor(z*INV_CELL));
     if (boxes) {
       const maxY=y+.095;
       for (let i=0;i<boxes.length;i++) {
         const b=boxes[i];
-        if (b.y1<=top+.12 || b.y1>maxY || x<=b.x0+.05 || x>=b.x1-.05 || z<=b.z0+.05 || z>=b.z1-.05) continue;
+        if (b.disabled || b.y1<=top+.12 || b.y1>maxY || x<=b.x0+.05 || x>=b.x1-.05 || z<=b.z0+.05 || z>=b.z1-.05) continue;
         top=b.y1;
       }
     }
-    return top>base.y?{y:top,layer:base.layer,raised:true}:base;
+    const res=top>base.y?{y:top,layer:base.layer,raised:true}:base;
+    return this.dynamicStage?.active?this.dynamicStage.supportOverlay(x,y,z,res):res;
   }
 
   blocked(x,y,z,radius = .41,height = 1.68) {
@@ -357,6 +418,7 @@ export class World {
       const lx=x-ZONES[zone].x;
       if (lx<-bounds[0]+radius || lx>bounds[0]-radius || z<-bounds[1]+radius || z>bounds[1]-radius) return true;
     }
+    if (this.dynamicStage?.active && this.dynamicStage.blocked(x,y,z,radius,height)) return true;
     const ramp=this.elevatedHeight(x,z);
     if (y<ramp-.020 && y+height>ramp-.46) return true;
     const r2=radius*radius, yLo=y+.025, yHi=y+height-.025;
@@ -375,7 +437,7 @@ export class World {
       if (!boxes) return false;
       for (let i=0;i<boxes.length;i++) {
         const b=boxes[i];
-        if (yLo>=b.y1 || yHi<=b.y0) continue;
+        if (b.disabled || yLo>=b.y1 || yHi<=b.y0) continue;
         const dx=x<b.x0?x-b.x0:x>b.x1?x-b.x1:0;
         const dz=z<b.z0?z-b.z0:z>b.z1?z-b.z1:0;
         if (dx*dx+dz*dz<r2) return true;
@@ -397,7 +459,7 @@ export class World {
         if (!boxes) continue;
         for (let i=0;i<boxes.length;i++) {
           const b=boxes[i];
-          if (yLo>=b.y1 || yHi<=b.y0) continue;
+          if (b.disabled || yLo>=b.y1 || yHi<=b.y0) continue;
           const dx=x<b.x0?x-b.x0:x>b.x1?x-b.x1:0;
           const dz=z<b.z0?z-b.z0:z>b.z1?z-b.z1:0;
           if (dx*dx+dz*dz<r2) return true;
@@ -454,7 +516,7 @@ export class World {
         if (!boxes) continue;
         for (let i=0;i<boxes.length;i++) {
           const box=boxes[i];
-          if (!box.ray || zoneOf(box.x0)!==zone) continue;
+          if (box.disabled || !box.ray || zoneOf(box.x0)!==zone) continue;
           if (multi) {
             if (box._seen===mark) continue;
             box._seen=mark;
@@ -543,13 +605,17 @@ export class World {
 
   barrier(x,z,w,depth=.66,tint=0xc8c5b4,y=0) {
     const r=this.r;
-    this.solid(x,y+.29,z,w,.58,depth,tint,1);
+    const so=this.solid(x,y+.29,z,w,.58,depth,tint,1);
     r.add('box',x,y+.58,z,w-.06,.09,depth*.67,0xe1decd,1);
     r.add('box',x,y+.12,z,w+.10,.23,depth+.14,0x9e9e94,1);
     for (let i=0;i<Math.floor(w/.44);i++) {
       const bx=x-w/2+.26+i*.44;
       for (const sign of [-1,1]) r.add('box',bx,y+.34,z+sign*(depth/2+.013),.26,.205,.026,i%2?0xe4af45:0x646053,2);
     }
+    this.registerDestructible({
+      id:'barrier-'+Math.round(x*10)+'_'+Math.round(z*10),kind:'object',material:'concrete',
+      x,y:y+.32,z,w:w+.2,h:.72,d:depth+.2,tint,matKind:1,minY:y+0.02,maxY:y+0.9,solids:so?[so]:[]
+    });
   }
 
   pole(x,z,h=5.4,sign=1) {
@@ -565,7 +631,7 @@ export class World {
 
   kiosk(x,z,sign,tint,label) {
     const r=this.r;
-    this.solid(x,1.18,z,2.7,2.36,2.15,tint,2);
+    const so=this.solid(x,1.18,z,2.7,2.36,2.15,tint,2);
     r.add('box',x,2.40,z,2.93,.14,2.37,0xd1cbbb,2);
     r.add('box',x,1.39,z+1.08*sign,2.37,.94,.063,0x4e6364,8);
     r.add('box',x,.90,z+1.24*sign,2.49,.16,.43,0xa59d86,4);
@@ -573,11 +639,15 @@ export class World {
     r.label(label,x,2.04,z+1.152*sign,2.35,.33,WHITE,sign===1?0:Math.PI);
     for (let i=0;i<4;i++) r.add('box',x-.82+i*.55,1.4,z+1.12*sign,.05,1,.06,0x9eaaa5,4);
     for (let i=0;i<9;i++) r.add('box',x-1.02+i*.25,2.24,z+1.30*sign,.24,.075,.58,i%2?tint:0xece6d2,2);
+    this.registerDestructible({
+      id:'kiosk-'+label+'-'+Math.round(x),kind:'object',material:'wood',
+      x,y:1.25,z,w:3.1,h:2.55,d:2.9,tint,matKind:2,minY:0.14,maxY:2.8,solids:so?[so]:[]
+    });
   }
 
   container(x,z,tint,w=6.3,d=2.55,y=0) {
     const r=this.r,h=2.65;
-    this.solid(x,y+h/2,z,w,h,d,tint,2);
+    const so=this.solid(x,y+h/2,z,w,h,d,tint,2);
     for (const s of [-1,1]) {
       for (const hy of [.12,h-.11]) r.add('box',x,y+hy,z+s*d/2,w+.09,.16,.15,tint,4);
       for (let k=-w/2+.22;k<w/2-.12;k+=.34) r.add('box',x+k,y+h/2,z+s*(d/2+.036),.13,h-.24,.095,tint,4);
@@ -589,6 +659,10 @@ export class World {
       }
       r.label(s>0?'A-17':'FREIGHT',x+s*.35,y+1.46,z+s*(d/2+.093),2.6,.65,WHITE,s===1?0:Math.PI);
     }
+    this.registerDestructible({
+      id:'container-'+Math.round(x*10)+'_'+Math.round(z*10),kind:'object',material:'metal',
+      x,y:y+h/2,z,w:w+.4,h:h+.2,d:d+.4,tint,matKind:2,minY:y+0.12,maxY:y+h+0.4,solids:so?[so]:[]
+    });
   }
 
   vehicle(x,z,tint,style=0,dir=1) {
@@ -598,8 +672,15 @@ export class World {
   shop(x,z,sign,w,h,d,tint,label,style,wear) {
     const r=this.r,front=z+sign*d/2, facing=sign===1?0:Math.PI;
     const entry=apartmentEntry(wear), kind=style===1?13:style===3?11:2;
+    let shopSolid=null;
     if (entry) buildApartmentEntry(this,entry,{x,front,sign,w,h,d,tint,kind});
-    else this.solid(x,h/2,z,w,h,d,tint,kind);
+    else shopSolid=this.solid(x,h/2,z,w,h,d,tint,kind);
+    if (shopSolid) {
+      this.registerDestructible({
+        id:'street-shop-'+wear,kind:'building',material:'concrete',
+        x,y:h/2,z,w:w+.35,h:h+.5,d:d+.6,tint,matKind:kind,minY:0.15,maxY:h+1.2,solids:[shopSolid]
+      });
+    }
     for (const ht of entry?[3.25,h-.2]:[.3,2.78,3.25,h-.2]) r.add('box',x,ht,front+sign*.065,w+.12,.13,.19,0xc3bdae,1);
     if (wear===22 || wear===29 || wear===30) {
       floorWeathering(r,wear,x,0,front+sign*.85,w-.5,1.38,0xb9b7ab);
@@ -683,7 +764,11 @@ export class World {
     r.add('box',x,(h+3.15)/2-.2,z,w,h-3.15,d,tint,11);
     // The tower is solid, lobby included: nobody walks into it. Shots keep
     // hitting its drawn shape, so this box only stops bodies.
-    this.obstacle(x,h/2,z,w+.2,h+.2,d+.2,false);
+    const towerOb=this.obstacle(x,h/2,z,w+.2,h+.2,d+.2,false);
+    this.registerDestructible({
+      id:'tower-'+Math.round(x)+'_'+Math.round(z),kind:'building',material:'concrete',
+      x,y:h*.5,z,w:w+.4,h:h+3.2,d:d+.4,tint,matKind:11,minY:0.14,maxY:h+4.0,solids:towerOb?[towerOb]:[]
+    });
     r.add('box',x,1.39,z,w-.68,2.78,d-.68,0x7f928d,8);
     for (const sx of [-1,1]) for (const sz of [-1,1])
       r.add('box',x+sx*(w*.5-.17),1.43,z+sz*(d*.5-.17),.34,2.86,.34,tint,2);
@@ -987,18 +1072,24 @@ export class World {
     this.vehicle(32.2,-17.15,0xb88d63,1,-1);
     this.vehicle(33.8,16.2,0x778794,0,1);
     this.vehicle(-34.5,-16.0,0x8e9f86,0,1);
+    this.vehicle(-31.2,5.1,0x3fcbb8,0,1);
+    this.vehicle(31.2,-5.1,0xf28749,0,-1);
     this.kiosk(-3.8,-16.58,1,0x9d8263,'COFFEE');
     this.kiosk(3.4,16.1,-1,0x66877e,'KIOSK');
     for (const [x,z,w] of [[-12,8.9,4.5],[12,-7.8,4.8],[-20.6,17.8,3.0],[22.4,-10.1,2.55],[-1.6,-11.4,3.3],[.9,10.2,3.75]]) this.barrier(x,z,w);
     for (const [x,z] of [[-32,7.8],[-6,9.4],[15.6,-9.5],[30,-9.0],[-33,-9.1],[-1,-18.8],[4,20]]) {
       const tint=R()>.5?0xac9c78:0x96a7a0;
-      this.solid(x,.33,z,1.55,.66,.82,tint,1);
+      const po=this.solid(x,.33,z,1.55,.66,.82,tint,1);
       r.add('box',x,.67,z,1.60,.13,.87,0xaca38f,1);
       r.add('box',x,.73,z,1.39,.043,.66,0x75705d,1);
       for (let i=0;i<13;i++) {
         const px=x-.61+R()*1.22,pz=z-.26+R()*.52;
         r.add('orb',px,.81+R()*.28,pz,.30+R()*.18,.25+R()*.31,.31,[.30+R()*.23,.44+R()*.24,.29+R()*.16],14);
       }
+      this.registerDestructible({
+        id:'planter-'+Math.round(x*10)+'_'+Math.round(z*10),kind:'object',material:'clay',
+        x,y:.45,z,w:1.65,h:1.05,d:.95,tint,matKind:1,minY:0.05,maxY:1.4,solids:po?[po]:[]
+      });
     }
     this.highway();
     buildElevatedApproach(this);

@@ -1,4 +1,5 @@
 import {castShapeInto,makeShape} from './collision.js';
+import {DestructionPhysics} from './destruction.js';
 import {sameLevel,UNDER_X,UNDER_Y,zoneOf} from './layout.js';
 import {add,clamp,scale,sub,TAU} from './render.js';
 
@@ -13,7 +14,7 @@ const BLOCKS={
   concrete:{hp:176,tint:0xaeb4aa,accent:0x828d88},
   glass:{hp:26,tint:0x82b7b6,accent:0xdaf6ee}
 };
-const INK=[0x10d8be,0xff6c33,0xa16bb4];
+const INK=[0x10d8be,0xff6c33,0x141118];
 const EPS=.0001;
 const SHARDS=.74;
 
@@ -24,7 +25,27 @@ export function buildBreakableBlocks(world) {
     ['g-concrete','concrete',33,0,12.75,1.42,1.07,.91],
     ['b-wood','wood',UNDER_X-39,UNDER_Y,21.1,1.14,1.01,1.08],
     ['b-clay','clay',UNDER_X+14,UNDER_Y,27.1,1.31,.90,.85],
-    ['b-concrete','concrete',UNDER_X+38,UNDER_Y,6,1.42,1.07,.91]
+    ['b-concrete','concrete',UNDER_X+38,UNDER_Y,6,1.42,1.07,.91],
+    ['obj-01','wood',-31.5,0,-12.5,1.25,1.08,1.15],
+    ['obj-02','clay',-28.5,0,15.5,1.35,.92,.96],
+    ['obj-03','concrete',-22.5,0,-21.2,1.55,1.12,.94],
+    ['obj-04','glass',-18.2,0,12.5,1.60,1.65,.22],
+    ['obj-05','wood',-10.2,0,-16.2,1.28,1.04,1.12],
+    ['obj-06','concrete',-9.8,0,19.4,1.50,1.08,.92],
+    ['obj-07','clay',-4.2,0,-22.2,1.34,.95,.90],
+    ['obj-08','wood',5.2,0,-19.8,1.22,1.05,1.08],
+    ['obj-09','concrete',10.6,0,19.2,1.48,1.10,.95],
+    ['obj-10','glass',18.2,0,-19.6,1.65,1.62,.22],
+    ['obj-11','clay',22.6,0,-12.4,1.32,.92,.88],
+    ['obj-12','wood',28.4,0,-18.2,1.26,1.06,1.10],
+    ['obj-13','concrete',31.8,0,13.6,1.46,1.08,.94],
+    ['obj-14','clay',35.6,0,-11.2,1.34,.94,.90],
+    ['obj-15','wood',-38.4,0,22.4,1.30,1.05,1.14],
+    ['obj-16','concrete',38.6,0,22.2,1.52,1.10,.96],
+    ['obj-17','wood',UNDER_X-24,UNDER_Y,-15.5,1.24,1.04,1.10],
+    ['obj-18','clay',UNDER_X+24.5,UNDER_Y,19.5,1.32,.94,.88],
+    ['obj-19','concrete',UNDER_X-10,UNDER_Y,16.5,1.48,1.08,.92],
+    ['obj-20','glass',UNDER_X+10,UNDER_Y,-16.2,1.60,1.60,.22]
   ]) world.objects.push({id,type,x,y:y+h/2,z,w,h,d,yaw:0});
 }
 
@@ -40,6 +61,7 @@ const containsHome=(home,x,y,z)=>y<home.ceiling && y>=-.20 && x>home.x0 && x<hom
 
 export class StageObjects {
   constructor(world) {
+    this.world=world;
     this.homes=world.homes;
     this.parts=world.stageParts;
     this.byId=new Map();
@@ -54,6 +76,11 @@ export class StageObjects {
       this.byZone[z].push(part);
     }
     this.damage=new Map();
+    this.destruction=new DestructionPhysics(world);
+    if (world?.destructibles) {
+      for (const d of world.destructibles) this.destruction.registerStructure(d);
+    }
+    this._lastViewZ=0;
   }
 
   snapshot() {
@@ -80,14 +107,35 @@ export class StageObjects {
     return this.damage.get(o.id)?.hp!==0;
   }
 
-  strike(o,amount,clock,team) {
+  strike(o,amount,clock,team,hitPos=null,impulse=null) {
     if (!o || !this.intact(o) || !(amount>0)) return;
     const hp=Math.max(0,(this.damage.get(o.id)?.hp??o.style.hp)-amount);
     this.damage.set(o.id,{hp,at:clock,team});
     if (hp===0 && o._idx!==undefined && !this.broken[o._idx]) {
       this.broken[o._idx]=1;
       this.brokenCount++;
+      if (this.destruction) {
+        const s=this.destruction.registerStructure({
+          id:'stage-'+o.id,kind:'object',material:o.type==='glass'?'glass':o.type==='wood'?'wood':o.type==='clay'?'clay':'concrete',
+          x:o.x,y:o.y,z:o.z,w:o.w,h:o.h,d:o.d,yaw:o.yaw,tint:o.style.tint,matKind:o.type==='wood'?WOOD:2,hp:1
+        });
+        this.destruction.applyInkImpact(hitPos?.[0]??o.x,hitPos?.[1]??o.y,hitPos?.[2]??o.z,impulse?.[0]??0,impulse?.[1]??2,impulse?.[2]??0,999,team,o.w+1);
+      }
     }
+  }
+
+  strikeAt(x,y,z,amount,team,radius=1.5,opts={}) {
+    if (!this.destruction || !(amount>0)) return null;
+    if (opts.inkRain) return this.destruction.strikeInkRain(x,z,amount,team);
+    return this.destruction.applyInkImpact(x,y,z,opts.fx??0,opts.fy??0,opts.fz??0,amount,team,radius);
+  }
+
+  strikeTsunami(waveX,width,height,dir,peakPressure,dt) {
+    return this.destruction?.strikeTsunami(waveX,width,height,dir,peakPressure,dt)??0;
+  }
+
+  update(dt,battle=null) {
+    this.destruction?.update(dt,battle);
   }
 
   trace(start,end,clearance=0,limit=1) {
@@ -183,9 +231,11 @@ export class StageObjects {
       if (hit?.stageObject!==o) continue;
       this.strike(o,amount*(1-.47*distance/radius),battle.clock,actor.team);
     }
+    this.destruction?.applySplashDamage(x,y,z,radius,amount,actor.team,Math.max(10,amount*.35));
   }
 
-  draw(renderer,viewX,clock) {
+  draw(renderer,viewX,clock,viewZ=this._lastViewZ) {
+    this._lastViewZ=viewZ;
     for (const o of this.parts) {
       if (!sameLevel(o.x,viewX)) continue;
       const state=this.damage.get(o.id);
@@ -194,6 +244,7 @@ export class StageObjects {
         if (age>=0 && age<SHARDS) drawFragments(renderer,o,state,age);
       } else drawObject(renderer,o,state);
     }
+    this.destruction?.draw(renderer,viewX,viewZ);
   }
 }
 

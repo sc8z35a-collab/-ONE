@@ -140,7 +140,13 @@ function drawResidence(world,site,wear) {
   // The same block as a collision box, axis-aligned (blocks face the four axes).
   const cx=site.x+dz*sy, cz=site.z+dz*cy;
   const spanX=Math.abs(cy)*width+Math.abs(sy)*depth, spanZ=Math.abs(sy)*width+Math.abs(cy)*depth;
-  world.obstacle(cx,height*.5,cz,spanX,height,spanZ,false);
+  const ob=world.obstacle(cx,height*.5,cz,spanX,height,spanZ,false);
+  world.registerDestructible?.({
+    id:'res-'+wear,kind:'building',material:'concrete',
+    x:cx,y:height*.5,z:cz,w:spanX,h:height,d:spanZ,
+    yaw:site.yaw,tint:type.tint,matKind:10,minY:0.15,maxY:height+0.8,
+    obstacles:ob?[ob]:[]
+  });
   const front=dz+depth*.5;
   if (wear===22 || wear===29 || wear===30) {
     const walk=front+SETBACK*.5;

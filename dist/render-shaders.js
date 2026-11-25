@@ -287,17 +287,20 @@ export const SKY=`
 uniform sampler2D uDetail;
 uniform vec3 uSun;
 uniform float uClock;
+uniform float uBossRage;
+uniform float uRainLevel;
 vec3 skyAtmos(vec3 d){
   float y=d.y, h=max(y,0.), mu=dot(d,uSun);
   float horizon=pow(1.-h,5.5);
-  vec3 zenith=vec3(.050,.135,.390);
-  vec3 hz=vec3(.44,.55,.68);
+  vec3 zenith=mix(mix(vec3(.050,.135,.390),vec3(.055,.068,.088),uRainLevel),vec3(.018,.003,.005),uBossRage);
+  vec3 hz=mix(mix(vec3(.44,.55,.68),vec3(.13,.155,.185),uRainLevel),vec3(.30,.020,.026),uBossRage);
   vec3 col=mix(zenith,hz,horizon);
-  col*=.84+.30*sat(mu*.5+.5);
+  col*=.84+.30*sat(mu*.5+.5)*(1.-uRainLevel*.75);
   float a=max(mu,0.);
-  col+=vec3(1.,.82,.60)*(pow(a,5.)*.16+pow(a,36.)*.42+pow(a,380.)*1.9)*mix(.55,1.,horizon);
-  if (y<0.) col=mix(hz*vec3(.86,.87,.86),vec3(.105,.11,.105),sat(-y*4.5));
-  return col*1.55;
+  vec3 sunTint=mix(vec3(1.,.82,.60),vec3(.92,.10,.08),uBossRage)*(1.-uRainLevel*.86);
+  col+=sunTint*(pow(a,5.)*.16+pow(a,36.)*.42+pow(a,380.)*1.9)*mix(.55,1.,horizon);
+  if (y<0.) col=mix(hz*mix(vec3(.86,.87,.86),vec3(.35,.08,.09),uBossRage),mix(vec3(.105,.11,.105),vec3(.018,.005,.008),uBossRage),sat(-y*4.5));
+  return col*mix(mix(1.55,.88,uRainLevel),1.25,uBossRage);
 }
 // Streamlined 2-tap warped cloud field + 1-tap light path (3 taps vs 8, crisp at any resolution).
 float cloudField(vec2 p){
@@ -309,19 +312,19 @@ float cloudField(vec2 p){
 vec4 skyClouds(vec3 d){
   if (d.y<.004) return vec4(0.);
   vec2 p=d.xz/(d.y+.04);
-  float n=cloudField(p), cover=.585;
-  float dens=sat((n-cover)*3.6);
+  float n=cloudField(p), cover=mix(mix(.585,.22,uRainLevel),.43,uBossRage);
+  float dens=sat((n-cover)*mix(3.6,5.2,uRainLevel));
   if (dens<=.002) return vec4(0.);
   vec2 q2=p+uSun.xz/max(uSun.y,.25)*.09+vec2(uClock*.0016,uClock*.0005);
   float n2=texture(uDetail,q2*.19).r*.76+texture(uDetail,q2*.83).r*.28;
   float lightPath=sat((n2-cover)*2.2);
   float shade=sat(.78-lightPath*.95+(n-n2)*1.6);
   float core=sat((n-cover)*1.5);
-  vec3 lit=vec3(1.07,1.03,.98)*1.72;
-  vec3 dark=vec3(.40,.46,.56)*1.25;
-  vec3 col=mix(dark,lit,shade)*(1.-core*.28);
+  vec3 lit=mix(mix(vec3(1.07,1.03,.98)*1.72,vec3(.24,.28,.33),uRainLevel),vec3(.52,.045,.055),uBossRage);
+  vec3 dark=mix(mix(vec3(.40,.46,.56)*1.25,vec3(.085,.098,.115),uRainLevel),vec3(.015,.005,.008),uBossRage);
+  vec3 col=mix(dark,lit,shade)*(1.-core*mix(.28,.55,max(uBossRage,uRainLevel*.85)));
   float mu=max(dot(d,uSun),0.);
-  col+=vec3(1.,.86,.66)*pow(mu,14.)*(1.-dens)*2.6;
+  col+=mix(vec3(1.,.86,.66),vec3(.75,.07,.06),uBossRage)*pow(mu,14.)*(1.-dens)*2.6*(1.-uRainLevel*.88);
   col=mix(skyAtmos(d),col,mix(.30,1.,smoothstep(.015,.32,d.y)));
   return vec4(col,dens*smoothstep(.004,.14,d.y));
 }
@@ -339,14 +342,15 @@ vec3 skyFull(vec3 d,bool clouds,bool disk){
     float az=atan(d.x,-d.z)*36.;
     float id=hash12(vec2(floor(az),2.3));
     float side=step(.5,fract(az))*.5+.5;
-    vec3 tower=mix(vec3(.25,.31,.37),vec3(.37,.42,.47),id)*mix(.82,1.08,side*sat(uSun.y+.3));
+    vec3 tower=mix(mix(vec3(.25,.31,.37),vec3(.06,.02,.03),uBossRage),mix(vec3(.37,.42,.47),vec3(.11,.025,.032),uBossRage),id)*mix(.82,1.08,side*sat(uSun.y+.3));
     float rows=step(.55,fract(d.y*640.))*step(.45,fract(az*7.))*.035;
-    vec3 building=(tower+rows)*1.15;
+    vec3 building=(tower+rows*mix(vec3(1.),vec3(.8,.12,.1),uBossRage))*1.15;
     col=mix(building,col,.42+.38*sat(1.-(top-d.y)*40.));
   }
   if (disk) {
     float s=dot(d,uSun);
-    col+=vec3(1.,.93,.80)*smoothstep(.99988,.99995,s)*70.;
+    vec3 dTint=mix(vec3(1.,.93,.80),vec3(.88,.08,.07),uBossRage);
+    col+=dTint*smoothstep(.99988,.99995,s)*mix(70.,22.,uBossRage);
   }
   return col;
 }
@@ -417,11 +421,12 @@ void main(){
   vec3 col=skyFull(d,true,false);
   if (d.y<0.) {
     float g=sat(-d.y*3.);
-    vec3 ground=mix(vec3(.30,.31,.30),vec3(.17,.17,.16),g)*(.55+.45*sat(uSun.y*1.5));
+    vec3 gCol=mix(mix(vec3(.30,.31,.30),vec3(.17,.17,.16),g),mix(vec3(.10,.02,.03),vec3(.03,.01,.015),g),uBossRage);
+    vec3 ground=gCol*(.55+.45*sat(uSun.y*1.5));
     col=mix(col,ground,smoothstep(0.,.08,-d.y));
   }
   float s=max(dot(d,uSun),0.);
-  col+=vec3(1.,.9,.75)*pow(s,900.)*14.;
+  col+=mix(vec3(1.,.9,.75),vec3(.85,.10,.08),uBossRage)*pow(s,900.)*14.;
   frag=vec4(envEncode(col),1.);
 }`;
 
@@ -605,6 +610,10 @@ uniform float uEnvLod;
 uniform vec2 uViewport;
 uniform float uExposure;
 uniform float uDrawFar;
+uniform float uRaytrace;
+uniform float uWetLevel;
+uniform float uBossRage;
+uniform float uRainLevel;
 out vec4 frag;
 ${SURFACE_HIGH}
 vec3 envAt(vec3 d,float lod){return envDecode(textureLod(uEnv,envUV(d),lod));}
@@ -669,12 +678,13 @@ void main(){
       col*=mix(vec3(1.),toLinear(stex.rgb)/max(toLinear(surfaceMean(slot)),vec3(.05)),.75);
     }
     vec3 dir=-V;
-    float fall=.022, h0=uEye.y, dy=vPos.y-uEye.y;
+    float fall=mix(.022,.004,uRainLevel), h0=uEye.y, dy=vPos.y-uEye.y;
     float integral=abs(dy)>.01?(exp(-fall*h0)-exp(-fall*vPos.y))/(fall*dy):exp(-fall*h0);
-    float fogAmt=1.-exp(-.0021*dist*max(integral,0.));
+    float density=mix(.0021,.072,uRainLevel);
+    float fogAmt=1.-exp(-density*dist*max(integral,0.));
     if (uDrawFar>0.) fogAmt=max(fogAmt,smoothstep(uDrawFar*.6,uDrawFar*.97,dist));
     if (fogAmt>.002) {
-      vec3 fogCol=envAt(normalize(vec3(dir.x,max(dir.y,.035),dir.z)),4.5)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.);
+      vec3 fogCol=mix(envAt(normalize(vec3(dir.x,max(dir.y,.035),dir.z)),4.5)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
       col=mix(col,fogCol,fogAmt);
     }
     if (uHDR) frag=vec4(col,0.);
@@ -770,30 +780,40 @@ void main(){
         vec4 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
         vec4 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
         vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
-        float coverage=st.r+st.g;
+        float bossMask=mix(mix(step(1.35,a.r+a.g),step(1.35,b.r+b.g),part.x),mix(step(1.35,c.r+c.g),step(1.35,d.r+d.g),part.x),part.y);
+        float coverage=mix(mix(min(1.,a.r+a.g),min(1.,b.r+b.g),part.x),mix(min(1.,c.r+c.g),min(1.,d.r+d.g),part.x),part.y);
         if (coverage>.08) {
           vec4 iDet=texture(uDetail,vPos.xz*.83);
           float thr=.5+(iDet.r*.6+iDet.a*.4-.5)*.38;
           float aa=fwidth(coverage)*.9+.015;
           float mask=smoothstep(thr-aa,thr+aa,coverage);
           if (mask>.003) {
-            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014);
+            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014), bossCol=vec3(.014,.010,.020);
             float thick=st.b;
-            vec3 ink=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 teamInk=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 ink=mix(teamInk,bossCol*(1.05-thick*.15),smoothstep(.3,.7,bossMask));
             vec3 coord=vec3(inkUV,vSlots.w);
             float e0=texture(uInk,coord+vec3(uInkTexel.x,0.,0.)).b;
             float s0=texture(uInk,coord+vec3(0.,uInkTexel.y,0.)).b;
             vec2 liquid=-vec2(e0-thick,s0-thick)*1.62;
             albedo=mix(albedo,ink,mask);
-            rough=mix(rough,.21+length(liquid)*.18,mask);
+            rough=mix(rough,mix(.21,.065,bossMask)+length(liquid)*.18,mask);
             metal=mix(metal,0.,mask);
-            emit=ink*(.05*mask);
-            f0Base=mix(f0Base,.045,mask);
+            emit=mix(ink*.05,vec3(.042,.006,.014),bossMask)*mask;
+            f0Base=mix(f0Base,mix(.045,.075,bossMask),mask);
             n=normalize(mix(n,normalize(ng+vec3(liquid.x,0.,liquid.y)),mask));
           }
         }
       }
     }
+  }
+  float wetEnv=max(uWetLevel,uBossRage*.58);
+  if (wetEnv>.002 && ng.y>.42 && kind!=0 && kind!=3) {
+    float pNoise=texture(uDetail,uvW*.17+vec2(.13,.41)).r;
+    float puddle=smoothstep(.44,.76,pNoise+.26*wetEnv)*wetEnv;
+    albedo=mix(albedo,albedo*.62,puddle*.68);
+    rough=mix(rough,mix(.14,.045,clamp(uRaytrace+puddle*.4,0.,1.)),puddle*(kind==1?.86:.56));
+    f0Base=mix(f0Base,.055,puddle*.65);
   }
   float nv=max(dot(n,V),1e-4), nl=dot(n,uSun);
   vec3 R=reflect(-V,n), direct=vec3(0.);
@@ -810,18 +830,20 @@ void main(){
     }
   }
   vec3 irr=envAt(n,uEnvLod-1.6)*.92+vec3(.36,.34,.30)*(sat(-n.y)*.2);
+  if (uBossRage>.005) irr=mix(irr,irr*vec3(1.15,.36,.34)+vec3(.028,.004,.005),uBossRage*.55);
   // Matte dielectrics sample a ~2x1 mip; reusing irr eliminates atan2/acos/textureLod.
   vec3 spec=(rough>.72 && metal<.01)?irr:envAt(R,clamp(sqrt(rough)*uEnvLod,0.,uEnvLod));
   if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
   vec3 ambient=diffC*irr+spec*envBRDF(f0,rough,nv);
   vec3 col=direct+ambient+emit;
   vec3 dir=-V;
-  float fall=.022, h0=uEye.y, dy=vPos.y-uEye.y;
+  float fall=mix(.022,.004,uRainLevel), h0=uEye.y, dy=vPos.y-uEye.y;
   float integral=abs(dy)>.01?(exp(-fall*h0)-exp(-fall*vPos.y))/(fall*dy):exp(-fall*h0);
-  float fogAmt=1.-exp(-.0021*dist*max(integral,0.));
+  float density=mix(.0021,.072,uRainLevel);
+  float fogAmt=1.-exp(-density*dist*max(integral,0.));
   if (uDrawFar>0.) fogAmt=max(fogAmt,smoothstep(uDrawFar*.6,uDrawFar*.97,dist));
   if (fogAmt>.002) {
-    vec3 fogCol=envAt(normalize(vec3(dir.x,max(dir.y,.035),dir.z)),4.5)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.);
+    vec3 fogCol=mix(envAt(normalize(vec3(dir.x,max(dir.y,.035),dir.z)),4.5)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
     col=mix(col,fogCol,fogAmt);
   }
   if (uHDR) frag=vec4(col,sat(lum(ambient)/(lum(col)+1e-4))*(1.-fogAmt));
@@ -997,25 +1019,27 @@ void main(){
         vec4 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
         vec4 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
         vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
-        float coverage=st.r+st.g;
+        float bossMask=mix(mix(step(1.35,a.r+a.g),step(1.35,b.r+b.g),part.x),mix(step(1.35,c.r+c.g),step(1.35,d.r+d.g),part.x),part.y);
+        float coverage=mix(mix(min(1.,a.r+a.g),min(1.,b.r+b.g),part.x),mix(min(1.,c.r+c.g),min(1.,d.r+d.g),part.x),part.y);
         if (coverage>.08) {
           vec4 iDet=texture(uDetail,vPos.xz*.83);
           float thr=.5+(iDet.r*.6+iDet.a*.4-.5)*.38;
           float aa=fwidth(coverage)*.9+.015;
           float mask=smoothstep(thr-aa,thr+aa,coverage);
           if (mask>.003) {
-            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014);
+            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014), bossCol=vec3(.014,.010,.020);
             float thick=st.b;
-            vec3 ink=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 teamInk=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 ink=mix(teamInk,bossCol*(1.05-thick*.15),smoothstep(.3,.7,bossMask));
             vec3 coord=vec3(inkUV,lyr);
             float e0=texture(uInk,coord+vec3(uInkTexel.x,0.,0.)).b;
             float s0=texture(uInk,coord+vec3(0.,uInkTexel.y,0.)).b;
             vec2 liquid=-vec2(e0-thick,s0-thick)*1.62;
             albedo=mix(albedo,ink,mask);
-            rough=mix(rough,.21+length(liquid)*.18,mask);
+            rough=mix(rough,mix(.21,.065,bossMask)+length(liquid)*.18,mask);
             metal=mix(metal,0.,mask);
-            emit=ink*(.05*mask);
-            f0Base=mix(f0Base,.045,mask);
+            emit=mix(ink*.05,vec3(.042,.006,.014),bossMask)*mask;
+            f0Base=mix(f0Base,mix(.045,.075,bossMask),mask);
             n=normalize(mix(n,normalize(ng+vec3(liquid.x,0.,liquid.y)),mask));
           }
         }
@@ -1255,6 +1279,9 @@ uniform vec2 uInkBounds;
 uniform float uExposure;
 uniform float uTrainShift;
 uniform float uDrawFar;
+uniform float uRaytrace;
+uniform float uWetLevel;
+uniform float uRainLevel;
 out vec4 frag;
 
 ${SURFACE_HIGH}
@@ -2108,14 +2135,8 @@ void main(){
         vec4 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
         vec4 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
         vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
-        float corners=a.r+a.g, edgeCell=abs(corners-(b.r+b.g))+abs(corners-(c.r+c.g))+abs(corners-(d.r+d.g));
-        if (edgeCell>.01 && a.w*b.w*c.w*d.w>.5) {
-          vec2 hs=.5/vec2(size);
-          float lf=float(layer);
-          st=(texture(uInk,vec3(inkUV+vec2(-hs.x,-hs.y),lf)).rgb+texture(uInk,vec3(inkUV+vec2(hs.x,-hs.y),lf)).rgb
-             +texture(uInk,vec3(inkUV+vec2(-hs.x,hs.y),lf)).rgb+texture(uInk,vec3(inkUV+hs,lf)).rgb)*.25;
-        }
-        float coverage=st.r+st.g;
+        float bossMask=mix(mix(step(1.35,a.r+a.g),step(1.35,b.r+b.g),part.x),mix(step(1.35,c.r+c.g),step(1.35,d.r+d.g),part.x),part.y);
+        float coverage=mix(mix(min(1.,a.r+a.g),min(1.,b.r+b.g),part.x),mix(min(1.,c.r+c.g),min(1.,d.r+d.g),part.x),part.y);
         if (coverage>.08) {
           vec4 iDet=det(xz*.83);
           float rough0=iDet.r*.6+iDet.a*.4;
@@ -2123,9 +2144,10 @@ void main(){
           float aa=fwidth(coverage)*.9+.015;
           float mask=smoothstep(thr-aa,thr+aa,coverage);
           if (mask>.003) {
-            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014);
+            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014), bossCol=vec3(.014,.010,.020);
             float thick=st.b;
-            vec3 ink=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 teamInk=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 ink=mix(teamInk,bossCol*(1.05-thick*.15),smoothstep(.3,.7,bossMask));
             if (!lite) {
               vec3 coord=vec3(inkUV,vExtra.y);
               float e0=texture(uInk,coord+vec3(uInkTexel.x,0.,0.)).b;
@@ -2137,12 +2159,12 @@ void main(){
               liquid+=vec2(bubble*.6);
             }
             m.albedo=mix(m.albedo,ink,mask);
-            m.rough=mix(m.rough,.21+length(liquid)*.18,mask);
+            m.rough=mix(m.rough,mix(.21,.065,bossMask)+length(liquid)*.18,mask);
             m.metal=mix(m.metal,0.,mask);
-            m.clear=mix(m.clear,.32,mask);
-            m.emit=mix(m.emit,ink*.05,mask);
+            m.clear=mix(m.clear,mix(.32,.65,bossMask),mask);
+            m.emit=mix(m.emit,mix(ink*.05,vec3(.042,.006,.014),bossMask),mask);
             m.ao=mix(m.ao,1.,mask*.6);
-            m.f0=mix(m.f0,.045,mask);
+            m.f0=mix(m.f0,mix(.045,.075,bossMask),mask);
             n=normalize(mix(n,normalize(ng+vec3(liquid.x,0.,liquid.y)),mask));
             inked=mask;
           }
@@ -2153,6 +2175,15 @@ void main(){
 
   // ---------- lighting ----------
   float nv=max(dot(n,V),1e-4);
+  if (zoneInterior<.5 && (uWetLevel>.02 || uRaytrace>.5)) {
+    float upWet=smoothstep(.65,.95,ng.y)*sat(1.-inked);
+    float puddle=smoothstep(.42,.66,det(xz*.11).r);
+    float wetAmt=sat(uWetLevel*upWet*(.45+.55*puddle)+(uRaytrace>.5?upWet*puddle*.22:0.));
+    m.rough=mix(m.rough,.065,wetAmt);
+    m.clear=max(m.clear,wetAmt*.58);
+    m.f0=max(m.f0,.045*wetAmt);
+    m.albedo=mix(m.albedo,m.albedo*.72,wetAmt*.65);
+  }
   vec3 R=reflect(-V,n);
   vec3 f0=mix(vec3(m.f0),m.albedo,m.metal);
   vec3 diffC=m.albedo*(1.-m.metal);
@@ -2177,6 +2208,7 @@ void main(){
     vec3 irr=envDiffuse(n);
     float bounce=sat(-n.y)*.2;
     irr+=vec3(.36,.34,.30)*bounce;
+    if (uBossRage>.01) irr=mix(irr,irr*vec3(1.12,.52,.58)+vec3(.04,.005,.01),uBossRage*.55);
     ambient+=diffC*irr*m.ao;
     vec3 spec=(m.rough>.72 && m.metal<.01)?irr:envSpec(R,m.rough);
     if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
@@ -2313,18 +2345,17 @@ void main(){
   float fogAmt=0.;
 #ifndef INTERIOR_ONLY
   if (outdoor>.001) {
-    float fall=.022;
+    float fall=mix(.022,.004,uRainLevel);
     float h0=uEye.y, dy=vPos.y-uEye.y;
     float integral=abs(dy)>.01?(exp(-fall*h0)-exp(-fall*vPos.y))/(fall*dy):exp(-fall*h0);
-    float density=.0021;
+    float density=mix(.0021,.072,uRainLevel);
     fogAmt=1.-exp(-density*dist*max(integral,0.));
     // A shortened draw distance (settings) fades the city into the haze
     // before the chunks stop drawing.
     if (uDrawFar>0.) fogAmt=max(fogAmt,smoothstep(uDrawFar*.6,uDrawFar*.97,dist));
     if (fogAmt>.002) {
       vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
-      vec3 fogCol=envAt(fdir,4.5);
-      fogCol+=uSunColor*.06*pow(sat(dot(dir,uSun)),8.);
+      vec3 fogCol=mix(envAt(fdir,4.5)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
       col=mix(col,fogCol,fogAmt*outdoor);
     }
   }
@@ -2470,8 +2501,8 @@ void main(){
   frag=vec4(c*(uWeight*.25),1.);
 }`;
 
-// Composite pass: single-AO fetch + edge-directed Subpixel FXAA + AMD
-// FidelityFX Contrast-Adaptive Sharpening (CAS) for superior perceived crispness.
+// Composite pass: single-AO fetch + subpixel FXAA + CAS + ULTRA Real-Time Raytracing
+// (hierarchical SSR reflections with binary refinement, contact shadow rays, 1-bounce SSGI & light shafts).
 export const COMPOSITE_FRAGMENT=`#version 300 es
 precision highp float;
 ${COMMON}
@@ -2479,17 +2510,30 @@ in vec2 vUV;
 uniform sampler2D uColor;
 uniform sampler2D uAO;
 uniform sampler2D uBloom;
+uniform sampler2D uDepth;
 uniform vec2 uTexel;
 uniform float uExposure;
 uniform float uBloomStrength;
 uniform float uAOStrength;
 uniform float uTime;
 uniform float uInterior;
+uniform float uRaytrace;
+uniform float uBossRage;
+uniform float uWetLevel;
+uniform float uRainLevel;
+uniform mat4 uVP;
+uniform mat4 uInvVP;
+uniform vec3 uEye;
+uniform vec3 uSun;
 uniform bool uAOOn;
 uniform bool uBloomOn;
 uniform bool uFXAA;
 out vec4 frag;
 float pluma(vec3 c){float l=lum(c)*uExposure;return l/(1.+l);}
+vec3 worldFromDepth(vec2 uv,float d){
+  vec4 w=uInvVP*vec4(uv*2.-1.,d*2.-1.,1.);
+  return w.xyz/max(abs(w.w),1e-5);
+}
 void main(){
   vec2 uv=vUV;
   vec4 cM=textureLod(uColor,uv,0.);
@@ -2516,13 +2560,11 @@ void main(){
       col=(lA<lo || lA>hi)?mix(col,aaA,.45):aaA;
     }
   }
-  // Contrast-Adaptive Sharpening (CAS) in perceptual HDR space using already-fetched N/S/E/W.
   vec3 mn=min(col,min(min(cN,cS),min(cW,cE)));
   vec3 mx=max(col,max(max(cN,cS),max(cW,cE)));
   vec3 amp=sqrt(clamp(min(mn,max(vec3(0.),2.-mx))/max(mx,vec3(1e-4)),0.,1.));
   vec3 w=-amp*.075;
   col=max((col+(cN+cS+cW+cE)*w)/(1.+4.*w),vec3(0.));
-  // Subtle lens chromatic aberration near screen edges (center stays razor sharp).
   vec2 d=uv-.5;
   float r2=dot(d,d);
   if (r2>.035) {
@@ -2530,12 +2572,152 @@ void main(){
     col.r=mix(col.r,textureLod(uColor,uv-ca,0.).r,.7);
     col.b=mix(col.b,textureLod(uColor,uv+ca,0.).b,.7);
   }
-  // Single AO fetch applied once (3x cheaper than sampling AO per RGB channel).
   if (uAOOn) {
     float ao=textureLod(uAO,uv,0.).r;
     col*=mix(1.,ao,sat(cM.a)*uAOStrength);
   }
+
+  // ULTRA Real-Time Raytracing Stage: SSR + Binary Refinement, 1-Bounce SSGI & Micro Contact Shadows.
+  if (uRaytrace>.5) {
+    float zC=textureLod(uDepth,uv,0.).r;
+    vec3 P=worldFromDepth(uv,zC);
+    vec3 V=normalize(uEye-P);
+    if (zC<.99992) {
+      float zL=textureLod(uDepth,uv-vec2(uTexel.x,0.),0.).r;
+      float zR=textureLod(uDepth,uv+vec2(uTexel.x,0.),0.).r;
+      float zD=textureLod(uDepth,uv-vec2(0.,uTexel.y),0.).r;
+      float zU=textureLod(uDepth,uv+vec2(0.,uTexel.y),0.).r;
+      vec3 pL=worldFromDepth(uv-vec2(uTexel.x,0.),zL), pR=worldFromDepth(uv+vec2(uTexel.x,0.),zR);
+      vec3 pD=worldFromDepth(uv-vec2(0.,uTexel.y),zD), pU=worldFromDepth(uv+vec2(0.,uTexel.y),zU);
+      vec3 dX=(abs(zR-zC)<abs(zC-zL))?(pR-P):(P-pL);
+      vec3 dY=(abs(zU-zC)<abs(zC-zD))?(pU-P):(P-pD);
+      vec3 N=normalize(cross(dX,dY));
+      if (dot(N,V)<0.) N=-N;
+      float ign=hash12(gl_FragCoord.xy+fract(uTime*11.7)*vec2(173.,293.));
+
+      // 1. Hierarchical 24-Step Screen-Space Raytraced Reflections + 4-Step Binary Search
+      vec3 R=reflect(-V,N);
+      float camDist=length(uEye-P);
+      float ndv=max(dot(N,V),0.);
+      float fresnel=mix(.045,.88,pow5(1.-ndv));
+      float upFloor=smoothstep(.65,.95,abs(N.y));
+      float wetGloss=sat(.22+uWetLevel*.55+uBossRage*.25);
+      float reflWeight=sat(fresnel*(upFloor*(.35+wetGloss*.65)+(1.-upFloor)*.38))*smoothstep(140.,18.,camDist);
+      if (reflWeight>.02) {
+        vec3 rtHitCol=mix(mix(vec3(.22,.34,.52),vec3(.22,.02,.03),uBossRage),vec3(.04,.02,.03),sat(-R.y*2.));
+        float rtAlpha=0.;
+        float stepLen=clamp(camDist*.035,.18,1.15);
+        vec3 rayPos=P+N*.05;
+        vec3 prevPos=rayPos;
+        for (int i=1;i<=24;i++) {
+          float stride=stepLen*(1.+float(i)*.10);
+          rayPos+=R*stride*(i==1?.5+ign*.5:1.);
+          vec4 clip=uVP*vec4(rayPos,1.);
+          if (clip.w<=.05) break;
+          vec2 suv=(clip.xy/clip.w)*.5+.5;
+          if (suv.x<=.002 || suv.x>=.998 || suv.y<=.002 || suv.y>=.998) break;
+          float rayD=(clip.z/clip.w)*.5+.5;
+          float sceneD=textureLod(uDepth,suv,0.).r;
+          float diff=rayD-sceneD;
+          if (diff>0. && diff<.028 && sceneD<.9999) {
+            // Binary search refinement across hit bracket
+            vec3 lo=prevPos, hi=rayPos;
+            for (int b=0;b<4;b++) {
+              vec3 mid=(lo+hi)*.5;
+              vec4 mc=uVP*vec4(mid,1.);
+              vec2 muv=(mc.xy/mc.w)*.5+.5;
+              float md=(mc.z/mc.w)*.5+.5;
+              float msd=textureLod(uDepth,muv,0.).r;
+              if (md>msd) hi=mid; else lo=mid;
+            }
+            vec4 fc=uVP*vec4(hi,1.);
+            vec2 fuv=clamp((fc.xy/fc.w)*.5+.5,vec2(.002),vec2(.998));
+            float edgeFade=sat(min(min(fuv.x,1.-fuv.x),min(fuv.y,1.-fuv.y))*12.);
+            rtHitCol=textureLod(uColor,fuv,0.).rgb;
+            rtAlpha=edgeFade;
+            break;
+          }
+          prevPos=rayPos;
+        }
+        col=mix(col,max(col,rtHitCol*1.08),reflWeight*mix(.28,1.,rtAlpha));
+      }
+
+      // 2. Micro Screen-Space Raytraced Contact Shadows toward uSun (8 steps)
+      if (uInterior<.85 && dot(N,uSun)>.05 && camDist<58.) {
+        float cShadow=1.;
+        for (int s=1;s<=8;s++) {
+          float sd=(.07*float(s)+ign*.04);
+          vec3 sp=P+N*.03+uSun*sd;
+          vec4 sc=uVP*vec4(sp,1.);
+          if (sc.w<=.05) break;
+          vec2 suv=(sc.xy/sc.w)*.5+.5;
+          if (suv.x<0. || suv.x>1. || suv.y<0. || suv.y>1.) break;
+          float sRay=(sc.z/sc.w)*.5+.5;
+          float sDepth=textureLod(uDepth,suv,0.).r;
+          if (sRay>sDepth && (sRay-sDepth)<.0045) {
+            cShadow=min(cShadow,.38);
+            break;
+          }
+        }
+        col*=mix(1.,cShadow,(1.-uInterior)*smoothstep(58.,12.,camDist)*.68);
+      }
+
+      // 3. 1-Bounce Raytraced Global Illumination (6 Golden-Angle Hemisphere Rays / SSGI)
+      vec3 gi=vec3(0.);
+      float giSpan=clamp(camDist*.08,.65,3.2);
+      for (int k=0;k<6;k++) {
+        float ang=float(k)*2.39996+ign*6.283;
+        vec2 off=vec2(cos(ang),sin(ang))*(float(k+1)/6.)*giSpan*uTexel*28.;
+        vec2 guv=clamp(uv+off,vec2(.003),vec2(.997));
+        float gd=textureLod(uDepth,guv,0.).r;
+        if (gd<.9998) {
+          vec3 gP=worldFromDepth(guv,gd);
+          vec3 gDir=gP-P;
+          float d2=dot(gDir,gDir)+.25;
+          float align=sat(dot(N,normalize(gDir)));
+          vec3 sampleCol=textureLod(uColor,guv,0.).rgb;
+          gi+=sampleCol*(align/(1.+d2*.22));
+        }
+      }
+      gi*=.18*(1.-uBossRage*.25);
+      col+=col*gi*.55+gi*.16;
+    }
+
+    // 4. Volumetric Sun / Crimson-Storm Light Shafts
+    if (uInterior<.8) {
+      vec3 rDir=normalize(P-uEye);
+      float sunAlign=max(dot(rDir,uSun),0.);
+      if (sunAlign>.35) {
+        vec4 sClip=uVP*vec4(uEye+uSun*120.,1.);
+        if (sClip.w>.05) {
+          vec2 sUV=(sClip.xy/sClip.w)*.5+.5;
+          vec2 delta=(uv-sUV)*.14;
+          float shaft=0.;
+          vec2 tuv=uv;
+          for (int g=0;g<5;g++) {
+            tuv-=delta;
+            if (tuv.x>0. && tuv.x<1. && tuv.y>0. && tuv.y<1.) {
+              float td=textureLod(uDepth,tuv,0.).r;
+              shaft+=step(.999,td);
+            }
+          }
+          vec3 shaftTint=mix(vec3(1.,.90,.72),vec3(.88,.10,.09),uBossRage);
+          col+=shaftTint*(shaft*.045)*pow(sunAlign,5.)*(1.-uInterior);
+        }
+      }
+    }
+  }
+
   if (uBloomOn) col+=textureLod(uBloom,uv,0.).rgb*uBloomStrength;
+  if (uRainLevel>.01 && uInterior<.8) {
+    float rainStrength=uRainLevel*(1.-uInterior*.75);
+    float s0=fract(sin(floor(uv.x*185.+uv.y*24.)*12.9898)*43758.5453);
+    float dropA=smoothstep(.92,1.,sin((uv.y*12.+uv.x*2.4+uTime*8.5+s0*6.28)*3.14159));
+    float s1=fract(sin(floor(uv.x*290.-uv.y*18.)*78.233)*19432.23);
+    float dropB=smoothstep(.94,1.,sin((uv.y*18.+uv.x*3.1+uTime*11.2+s1*6.28)*3.14159));
+    float streak=(dropA*.55+dropB*.45)*rainStrength;
+    col=mix(col,vec3(.24,.28,.33),rainStrength*.24)+vec3(.42,.49,.56)*streak*.42;
+  }
   vec3 c=grade(col*uExposure);
   c*=mix(1.,.70,smoothstep(.10,.62,r2*1.5));
   float grain=hash12(gl_FragCoord.xy+fract(uTime*7.31)*vec2(311.,173.))-.5;
@@ -2611,6 +2793,8 @@ uniform float uCabinY;
 uniform vec2 uInkBounds;
 uniform vec3 uFog;
 uniform vec2 uFogRange;
+uniform float uBossRage;
+uniform float uRainLevel;
 out vec4 frag;
 ${SURFACE_CORE}
 // The texture's colour against the surface's own (sRGB, no relief).
@@ -2620,10 +2804,10 @@ vec3 liteSurface(vec3 t,int slot,vec3 base){
 }
 float sat(float x){return clamp(x,0.,1.);}
 float hash(vec2 p){return fract(sin(dot(p,vec2(12.9898,78.233)))*43758.5453);}
-vec3 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
+vec4 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
   vec4 cell=texelFetch(uInk,ivec3(clamp(pixel,ivec2(0),size-1),layer),0);
   float bed=${f(FILM_HEIGHT_ORIGIN)}+(round(cell.a*255.)-1.)*${f(FILM_HEIGHT_STEP)};
-  return cell.a>0. && abs(height-bed)<tolerance?cell.rgb:vec3(0.);
+  return cell.a>0. && abs(height-bed)<tolerance?cell:vec4(0.);
 }
 void main(){
   vec3 ng=normalize(vNormal);
@@ -2637,9 +2821,10 @@ void main(){
   vec3 tint=vTint.rgb;
   vec2 xz=vPos.xz;
   float zoneInterior=vPos.x>uUnderX*.5?1.:smoothstep(-.4,-3.2,vPos.y);
-  float far=smoothstep(uFogRange.x,uFogRange.y,dist);
+  float far=max(smoothstep(uFogRange.x,uFogRange.y,dist),uRainLevel*(1.-exp(-max(0.,dist-2.5)*.075)));
   float haze=mix(far,max(far,.55*(1.-exp(-dist*.011))),zoneInterior);
-  vec3 fogCol=mix(uFog,vec3(.07,.075,.072),zoneInterior);
+  vec3 outFog=mix(mix(uFog,vec3(.24,.28,.33),uRainLevel*.88),vec3(.085,.018,.022),uBossRage*.9);
+  vec3 fogCol=mix(outFog,vec3(.07,.075,.072),zoneInterior);
 
 #ifndef OPAQUE_PURE
   if (kind==28) {
@@ -2779,23 +2964,29 @@ void main(){
         ivec2 pixel=ivec2(floor(grid));
         vec2 part=fract(grid);
         part=part*part*(3.-2.*part);
-        vec3 a=filmCell(pixel,size,layer,vPos.y,clearance);
-        vec3 b=filmCell(pixel+ivec2(1,0),size,layer,vPos.y,clearance);
-        vec3 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
-        vec3 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
-        vec3 st=mix(mix(a,b,part.x),mix(c,d,part.x),part.y);
-        float mask=smoothstep(.42,.58,st.r+st.g);
-        if (mask>.003) {
-          vec3 ink=(st.r>=st.g?vec3(.063,.847,.745):vec3(1.,.424,.2))*(1.-st.b*.16);
-          col=mix(col,ink,mask);
-          inked=mask;
-        }
+          vec4 ca=filmCell(pixel,size,layer,vPos.y,clearance);
+          vec4 cb=filmCell(pixel+ivec2(1,0),size,layer,vPos.y,clearance);
+          vec4 cc=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
+          vec4 cd=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
+          vec3 st=mix(mix(ca.rgb,cb.rgb,part.x),mix(cc.rgb,cd.rgb,part.x),part.y);
+          float bossMask=mix(mix(step(1.35,ca.r+ca.g),step(1.35,cb.r+cb.g),part.x),mix(step(1.35,cc.r+cc.g),step(1.35,cd.r+cd.g),part.x),part.y);
+          float coverage=mix(mix(min(1.,ca.r+ca.g),min(1.,cb.r+cb.g),part.x),mix(min(1.,cc.r+cc.g),min(1.,cd.r+cd.g),part.x),part.y);
+          float mask=smoothstep(.42,.58,coverage);
+          if (mask>.003) {
+            vec3 teamInk=(st.r>=st.g?vec3(.063,.847,.745):vec3(1.,.424,.2))*(1.-st.b*.16);
+            vec3 bossInk=vec3(.026,.018,.036)*(1.-st.b*.12);
+            vec3 ink=mix(teamInk,bossInk,smoothstep(.3,.7,bossMask));
+            col=mix(col,ink,mask);
+            inked=mask;
+          }
       }
     }
   }
 
   float ndl=max(dot(ng,uSun),0.);
-  vec3 sunLight=vec3(.60,.63,.69)+vec3(.50,.45,.36)*ndl+.06*ng.y;
+  vec3 daySun=vec3(.60,.63,.69)+vec3(.50,.45,.36)*ndl+.06*ng.y;
+  vec3 stormSun=vec3(.18,.075,.08)+vec3(.24,.06,.05)*ndl+.02*ng.y;
+  vec3 sunLight=mix(daySun,stormSun,uBossRage);
   vec3 roomLight=vec3(.74,.73,.70)+.16*ng.y;
   vec3 light=mix(sunLight,roomLight,zoneInterior);
   light=mix(light,vec3(1.),max(glow,inked*.4));
@@ -2804,7 +2995,7 @@ void main(){
   frag=vec4(mix(col,fogCol,haze),1.);
 }`;
 
-// Minimal 4-varying architectural shader for lite and ultra modes (kinds 0, 1, 2, 3, 4, 13, 15, 19, 29).
+// Minimal 4-varying architectural shader for lite and ultra-lite modes (kinds 0, 1, 2, 3, 4, 13, 15, 19, 29).
 export const ARCH_LITE_FRAGMENT=`#version 300 es
 precision highp float;
 precision highp sampler2DArray;
@@ -2823,16 +3014,18 @@ uniform float uCabinY;
 uniform vec2 uInkBounds;
 uniform vec3 uFog;
 uniform vec2 uFogRange;
+uniform float uBossRage;
+uniform float uRainLevel;
 out vec4 frag;
 ${SURFACE_CORE}
 vec3 liteSurface(vec3 t,int slot,vec3 base){
   vec3 mean=max(surfaceMean(slot),vec3(.02));
   return mix(base*t/mean,t*(sfLum(base)/max(sfLum(mean),.02)),S_TAKE[slot]);
 }
-vec3 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
+vec4 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
   vec4 cell=texelFetch(uInk,ivec3(clamp(pixel,ivec2(0),size-1),layer),0);
   float bed=${f(FILM_HEIGHT_ORIGIN)}+(round(cell.a*255.)-1.)*${f(FILM_HEIGHT_STEP)};
-  return cell.a>0. && abs(height-bed)<tolerance?cell.rgb:vec3(0.);
+  return cell.a>0. && abs(height-bed)<tolerance?cell:vec4(0.);
 }
 void main(){
   vec3 ng=normalize(vNormal);
@@ -2869,14 +3062,18 @@ void main(){
           ivec2 pixel=ivec2(floor(grid));
           vec2 part=fract(grid);
           part=part*part*(3.-2.*part);
-          vec3 a=filmCell(pixel,size,layer,vPos.y,clearance);
-          vec3 b=filmCell(pixel+ivec2(1,0),size,layer,vPos.y,clearance);
-          vec3 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
-          vec3 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
-          vec3 st=mix(mix(a,b,part.x),mix(c,d,part.x),part.y);
-          float mask=smoothstep(.42,.58,st.r+st.g);
+          vec4 a=filmCell(pixel,size,layer,vPos.y,clearance);
+          vec4 b=filmCell(pixel+ivec2(1,0),size,layer,vPos.y,clearance);
+          vec4 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
+          vec4 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
+          vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
+          float bossMask=mix(mix(step(1.35,a.r+a.g),step(1.35,b.r+b.g),part.x),mix(step(1.35,c.r+c.g),step(1.35,d.r+d.g),part.x),part.y);
+          float coverage=mix(mix(min(1.,a.r+a.g),min(1.,b.r+b.g),part.x),mix(min(1.,c.r+c.g),min(1.,d.r+d.g),part.x),part.y);
+          float mask=smoothstep(.42,.58,coverage);
           if (mask>.003) {
-            vec3 ink=(st.r>=st.g?vec3(.063,.847,.745):vec3(1.,.424,.2))*(1.-st.b*.16);
+            vec3 teamInk=(st.r>=st.g?vec3(.063,.847,.745):vec3(1.,.424,.2))*(1.-st.b*.16);
+            vec3 bossInk=vec3(.026,.018,.036)*(1.-st.b*.12);
+            vec3 ink=mix(teamInk,bossInk,smoothstep(.3,.7,bossMask));
             col=mix(col,ink,mask);
             inked=mask;
           }
@@ -2885,11 +3082,15 @@ void main(){
     }
   }
   float zoneInterior=vPos.x>uUnderX*.5?1.:smoothstep(-.4,-3.2,vPos.y);
-  float far=smoothstep(uFogRange.x,uFogRange.y,dist);
+  float far=max(smoothstep(uFogRange.x,uFogRange.y,dist),uRainLevel*(1.-exp(-max(0.,dist-2.5)*.075)));
   float haze=mix(far,max(far,.55*(1.-exp(-dist*.011))),zoneInterior);
-  vec3 fogCol=mix(uFog,vec3(.07,.075,.072),zoneInterior);
+  vec3 outFog=mix(mix(uFog,vec3(.24,.28,.33),uRainLevel*.88),vec3(.085,.018,.022),uBossRage*.9);
+  vec3 fogCol=mix(outFog,vec3(.07,.075,.072),zoneInterior);
   float ndl=max(dot(ng,uSun),0.);
-  vec3 light=mix(vec3(.60,.63,.69)+vec3(.50,.45,.36)*ndl+.06*ng.y,vec3(.74,.73,.70)+.16*ng.y,zoneInterior);
+  vec3 daySun=vec3(.60,.63,.69)+vec3(.50,.45,.36)*ndl*(1.-uRainLevel*.75)+.06*ng.y;
+  vec3 stormSun=vec3(.18,.075,.08)+vec3(.24,.06,.05)*ndl+.02*ng.y;
+  vec3 sunLight=mix(daySun,stormSun,uBossRage);
+  vec3 light=mix(sunLight,vec3(.74,.73,.70)+.16*ng.y,zoneInterior);
   light=mix(light,vec3(1.),max(glow,inked*.4));
   frag=vec4(mix(col*light,fogCol,haze),1.);
 }`;
@@ -2904,13 +3105,19 @@ uniform vec3 uSun;
 uniform vec3 uFog;
 uniform vec2 uField;
 uniform float uInterior;
+uniform float uBossRage;
+uniform float uRainLevel;
 out vec4 frag;
 void main(){
   vec2 s=vUV*2.-1.;
   vec3 ray=normalize(uForward+uRight*s.x*uField.x+uUp*s.y*uField.y);
   float h=clamp(ray.y,0.,1.), sun=max(dot(ray,uSun),0.);
-  vec3 col=mix(uFog,vec3(.30,.50,.80),1.-pow(1.-h,3.2));
-  col+=vec3(1.,.92,.74)*pow(sun,420.)*1.2+vec3(.25,.20,.12)*pow(sun,10.);
-  if (ray.y<0.) col=mix(uFog,uFog*.72,clamp(-ray.y*5.,0.,1.));
+  vec3 horizon=mix(mix(uFog,vec3(.24,.28,.33),uRainLevel*.88),vec3(.14,.022,.025),uBossRage);
+  vec3 zenith=mix(mix(vec3(.30,.50,.80),vec3(.10,.12,.15),uRainLevel*.85),vec3(.028,.004,.006),uBossRage);
+  vec3 col=mix(horizon,zenith,1.-pow(1.-h,3.2));
+  vec3 sunDisk=mix(vec3(1.,.92,.74),vec3(.55,.06,.05),uBossRage)*(1.-uRainLevel*.9);
+  vec3 sunHalo=mix(vec3(.25,.20,.12),vec3(.18,.02,.02),uBossRage)*(1.-uRainLevel*.85);
+  col+=sunDisk*pow(sun,420.)*(1.2-uBossRage*.55)+sunHalo*pow(sun,10.);
+  if (ray.y<0.) col=mix(horizon,horizon*.72,clamp(-ray.y*5.,0.,1.));
   frag=vec4(mix(col,vec3(.055,.062,.058),uInterior),1.);
 }`;

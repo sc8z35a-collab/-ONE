@@ -1,5 +1,6 @@
 import {Abilities} from './abilities.js';
 import {Battle} from './battle.js';
+import {DynamicStage} from './dynamic-stage.js';
 import {StageObjects} from './stage-objects.js';
 import {Boss} from './boss.js';
 import {AVATAR_FIELDS} from './cloud-view.js';
@@ -87,6 +88,8 @@ function makeScene(world,paint,frame) {
   b.metro=new Transit(world,null,METRO);
   b.abilities=new Abilities(b);
   b.stage=new StageObjects(world);
+  b.dynamicStage=new DynamicStage(world,paint);
+  b.fluid={underBossDepth:0};
   b.subweapons=new Subweapons(b);
   b.boss=new Boss(b);
   b.raiders=new Raiders(b);
@@ -333,14 +336,18 @@ export class RemoteMatch {
     const b=this.scene ??= makeScene(this.world,this.paint,f);
     if (f.fullInk) resetVisualInk(this.paint,f.fullInk);
     this.paint.count=f.count;
+    if (f.bossCount!==undefined) this.paint.bossCount=f.bossCount;
     if (f.total!==undefined) this.paint.total=f.total;
     if (f.zoneCount) this.paint.zoneCount=f.zoneCount;
+    if (f.zoneBossCount) this.paint.zoneBossCount=f.zoneBossCount;
     if (f.zoneTotal) this.paint.zoneTotal=f.zoneTotal;
     if ('unlimited' in f) b.unlimited=!!f.unlimited;
     Object.assign(b,{clock:f.clock,elapsed:f.elapsed,left:b.unlimited?Infinity:f.left,countdown:f.countdown,finished:f.finished,
       watching:f.watching});
     if (f.events) b.events=f.events;
     if (f.chip) b.chip=f.chip;
+    if (f.underBossDepth!==undefined && b.fluid) b.fluid.underBossDepth=f.underBossDepth;
+    if (f.dynStage && b.dynamicStage) b.dynamicStage.restore(f.dynStage);
     this.motions.length=0;
     const now=performance.now();
     this.frameAt=now;

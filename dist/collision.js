@@ -272,7 +272,7 @@ export function makeShape(type,x,y,z,w,h,d,kind,opts=IDENTITY) {
 }
 
 export function castShapeInto(shape,sx,sy,sz,dx,dy,dz,limit,padding,out) {
-  if (nearBox6(sx,sy,sz,dx,dy,dz,shape.minX,shape.minY,shape.minZ,shape.maxX,shape.maxY,shape.maxZ,limit,padding*1.733)===Infinity) return false;
+  if (shape.disabled || nearBox6(sx,sy,sz,dx,dy,dz,shape.minX,shape.minY,shape.minZ,shape.maxX,shape.maxY,shape.maxZ,limit,padding*1.733)===Infinity) return false;
   const ox=sx-shape.px, oy=sy-shape.py, oz=sz-shape.pz;
   let k0=1, k1=1, k2=1;
   if (padding) {
@@ -302,7 +302,7 @@ export function castShapeInto(shape,sx,sy,sz,dx,dy,dz,limit,padding,out) {
 }
 
 function castShapeAny(shape,sx,sy,sz,dx,dy,dz,rx0,ry0,rz0,rx1,ry1,rz1) {
-  if (ry1<shape.minY || ry0>shape.maxY || rx1<shape.minX || rx0>shape.maxX || rz1<shape.minZ || rz0>shape.maxZ) return false;
+  if (shape.disabled || ry1<shape.minY || ry0>shape.maxY || rx1<shape.minX || rx0>shape.maxX || rz1<shape.minZ || rz0>shape.maxZ) return false;
   const ox=sx-shape.px, oy=sy-shape.py, oz=sz-shape.pz;
   const ax=shape.i0x*ox+shape.i0y*oy+shape.i0z*oz;
   const ay=shape.i1x*ox+shape.i1y*oy+shape.i1z*oz;
@@ -453,7 +453,7 @@ export class Geometry {
         const rz0=(sz<ez?sz:ez)-EPS, rz1=(sz>ez?sz:ez)+EPS;
         for (let i=0;i<candidates.length;i++) {
           const shape=candidates[i];
-          if (shape.zone!==zone || ry1<shape.minY || ry0>shape.maxY || rx1<shape.minX || rx0>shape.maxX || rz1<shape.minZ || rz0>shape.maxZ) continue;
+          if (shape.disabled || shape.zone!==zone || ry1<shape.minY || ry0>shape.maxY || rx1<shape.minX || rx0>shape.maxX || rz1<shape.minZ || rz0>shape.maxZ) continue;
           if (castShapeInto(shape,sx,sy,sz,dx,dy,dz,limit,0,_bestHit)) {
             limit=_bestHit.t;
             found=true;
@@ -478,7 +478,7 @@ export class Geometry {
         }
         if (candidates) for (let i=0;i<candidates.length;i++) {
           const shape=candidates[i];
-          if (shape.visited===mark || shape.zone!==zone || ry1<shape.minY || ry0>shape.maxY) continue;
+          if (shape.disabled || shape.visited===mark || shape.zone!==zone || ry1<shape.minY || ry0>shape.maxY) continue;
           shape.visited=mark;
           if (castShapeInto(shape,sx,sy,sz,dx,dy,dz,limit,0,_bestHit)) {
             limit=_bestHit.t;
@@ -521,7 +521,7 @@ export class Geometry {
       if (!candidates) return false;
       for (let i=0;i<candidates.length;i++) {
         const shape=candidates[i];
-        if (shape.zone===zone && castShapeAny(shape,sx,sy,sz,dx,dy,dz,rx0,ry0,rz0,rx1,ry1,rz1)) return true;
+        if (!shape.disabled && shape.zone===zone && castShapeAny(shape,sx,sy,sz,dx,dy,dz,rx0,ry0,rz0,rx1,ry1,rz1)) return true;
       }
       return false;
     }
@@ -542,7 +542,7 @@ export class Geometry {
       }
       if (candidates) for (let i=0;i<candidates.length;i++) {
         const shape=candidates[i];
-        if (shape.visited===mark || shape.zone!==zone) continue;
+        if (shape.disabled || shape.visited===mark || shape.zone!==zone) continue;
         shape.visited=mark;
         if (castShapeAny(shape,sx,sy,sz,dx,dy,dz,rx0,ry0,rz0,rx1,ry1,rz1)) return true;
       }
@@ -581,7 +581,7 @@ export class Geometry {
         if (!candidates) continue;
         for (let i=0;i<candidates.length;i++) {
           const shape=candidates[i];
-          if (shape.visited===mark || shape.zone!==zone || ry1<shape.minY || ry0>shape.maxY) continue;
+          if (shape.disabled || shape.visited===mark || shape.zone!==zone || ry1<shape.minY || ry0>shape.maxY) continue;
           shape.visited=mark;
           if (castShapeInto(shape,sx,sy,sz,dx,dy,dz,limit,radius,_bestHit)) {
             limit=_bestHit.t;

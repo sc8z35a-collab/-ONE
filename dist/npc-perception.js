@@ -3,7 +3,7 @@ import {clamp,forward} from './render.js';
 
 const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y,a.z-b.z);
 const eyeHeight=a=>a.isBoss?2.86:a.swimming?.57:1.39-(a.brace??0)*.31;
-export const visibleHeight=a=>a.isGoat?2.1:a.isBoss?2.45:a.isRogueDrone?.05:a.isSniper?1.15:a.giant?1.51:a.swimming?.37:a.isRaider?1.11:1.09-(a.brace??0)*.30;
+export const visibleHeight=a=>a.isGoat?2.1:a.isHeli?1.15:a.isBoss?2.45:a.isRogueDrone?.05:a.isSniper?1.15:a.giant?1.51:a.swimming?.37:a.isRaider?1.11:1.09-(a.brace??0)*.30;
 
 export class NpcPerception {
   constructor(battle) {
@@ -15,14 +15,15 @@ export class NpcPerception {
   live(a,b) {
     return !!b && a!==b && (a.team!==b.team || a.isBoss) && (b.down??0)<=0 && (b.shield??0)<=0 &&
       Number.isFinite(b.x) && Number.isFinite(b.y) && Number.isFinite(b.z) && !b.lift && !b.ride &&
-      (!(b.isBoss || b.isRaider || b.isSniper || b.isRogueDrone || b.isGoat) || b.active);
+      (!(b.isBoss || b.isRaider || b.isSniper || b.isRogueDrone || b.isGoat || b.isHeli) || b.active);
   }
 
   sight(a,b) {
     if (!this.live(a,b) || zoneOf(a.x)!==zoneOf(b.x)) return null;
     const dx=b.x-a.x, dy=b.y-a.y, dz=b.z-a.z, d=Math.hypot(dx,dz);
     const baseReach=a.isBoss?39:a.isRaider?28:a.weapon.blast?18:Math.min(36,a.weapon.range*.96);
-    const reach=(b.isSniper || b.isGoat)?Math.max(baseReach,34):baseReach;
+    let reach=(b.isSniper || b.isGoat || b.isHeli)?Math.max(baseReach,42):baseReach;
+    if (zoneOf(a.x)===0 && this.battle.hazards?.rain?.active) reach=Math.min(reach,(b.isHeli||b.isGoat||b.isSniper)?30:22);
     if (d*d+(dy*.72)*(dy*.72)>reach*reach || (b.inkSwimming && d>8.8)) return null;
     const bearing=(dx*Math.sin(a.yaw)-dz*Math.cos(a.yaw))/(d>.01?d:.01);
     const hnv=this.battle.hnv1;

@@ -4,7 +4,7 @@ import {RoomEngine} from './room-engine.js';
 import {BOSS_RESPAWN_SECONDS,EXP_PER_KILL,RESPAWN_SECONDS} from '../dist/battle.js';
 import {bankResults,levelOf,loadCareer,matchResults,mostActive} from '../dist/progress.js';
 import {DRONE_WEAPON,CHEATER_WEAPON,EBOT,GOAT_WEAPON,NPC_WEAPONS,ROGUE_DRONE_WEAPON,SNIPER_WEAPON,SUPERS,WEAPONS,weaponById} from '../dist/weapons.js';
-import {CABIN_X,RAIL,UNDER_X,UNDER_Y} from '../dist/layout.js';
+import {BASE_TANK,CABIN_X,RAIL,UNDER_X,UNDER_Y} from '../dist/layout.js';
 import {GOAT_ARMS} from '../dist/hazards.js';
 import {HNV1_GAIN,HNV1_VERSION} from '../dist/hnv1.js';
 import {optionsFor} from './edge.js';
@@ -279,12 +279,13 @@ test('SW OUT II: player-only, lighter, faster and longer, guidance at no extra i
   assert(Math.abs(p.fire-two.delay*2)<1e-9);
 });
 
-test('オート英馬: player-only rapid 7-pellet homing shotgun (0.5 ink/pellet), slow weak wide high-paint rounds that home within range',()=>{
+test('オート英馬: player-only rapid 7-pellet homing shotgun (0.25 ink/pellet, 1.2x tank), slow weak wide high-paint rounds that home within range',()=>{
   const ae=weaponById('autoeima'), fan=weaponById('fan'), lob=weaponById('lob'), sw=weaponById('swout');
   assert.equal(ae.name,'オート英馬');
   assert(ae.playerOnly && !NPC_WEAPONS.some(w=>w.id==='autoeima'));
   assert.equal(ae.pellets,7);
-  assert(Math.abs(ae.cost-7*.5)<1e-9);
+  assert(Math.abs(ae.cost-7*.25)<1e-9);
+  assert(Math.abs(ae.tankScale-1.2)<1e-9);
   assert(ae.delay<fan.delay && ae.speed<fan.speed && ae.speed<lob.speed);
   assert(ae.damage<fan.damage && ae.damage<sw.damage);
   assert(ae.radius>fan.radius && ae.spread>fan.spread && ae.range>fan.range);
@@ -293,6 +294,13 @@ test('オート英馬: player-only rapid 7-pellet homing shotgun (0.5 ink/pellet
     assert(mb.actors.filter(a=>!a.isPlayer).every(a=>!a.weapon.playerOnly && a.weapon.id!=='autoeima'),mode);
   }
   const engine=new RoomEngine({...options,weapon:'autoeima'}), b=engine.battle, p=b.player;
+  // Carrying オート英馬 expands tankMax by 1.2x (both standard and after Giga chip, and when swapping weapons).
+  assert(Math.abs(p.tankMax-BASE_TANK*1.2)<1e-9);
+  assert(Math.abs(p.tank-BASE_TANK*1.2)<1e-9);
+  const swap=new RoomEngine({...options,weapon:'jet'}).battle;
+  assert.equal(swap.player.tankMax,BASE_TANK);
+  assert(swap.equipPlayer('autoeima',swap.player.subId));
+  assert(Math.abs(swap.player.tankMax-BASE_TANK*1.2)<1e-9);
   const enemy=b.actors.find(a=>a.team!==p.team);
   b.countdown=0;
   alone(b,p,enemy);
@@ -300,12 +308,13 @@ test('オート英馬: player-only rapid 7-pellet homing shotgun (0.5 ink/pellet
   assert(b.shoot(p,[p.x+12,p.y+1,p.z]));
   const shots=b.shots.filter(s=>s.actor===p);
   assert.equal(shots.length,7);
-  assert(Math.abs(100-p.tank-3.5)<1e-9);
+  assert(Math.abs(100-p.tank-1.75)<1e-9);
   assert(shots.every(s=>s.homing && s.homing.reach===ae.homing.reach && !s.homing.target));
-  // Checkpoint cold restore preserves weapon homing on in-flight pellets.
+  // Checkpoint cold restore preserves weapon homing on in-flight pellets & 1.2x tank.
   const restored=new RoomEngine({...options,weapon:'autoeima'},new Map(Object.entries(engine.checkpoint()))).battle;
   assert.equal(restored.shots.length,7);
   assert(restored.shots.every(s=>s.homing && s.homing.reach===ae.homing.reach));
+  assert(Math.abs(restored.player.tankMax-BASE_TANK*1.2)<1e-9);
   // Without aiming directly at an enemy, a pellet steers toward an opponent inside homing.reach.
   const center=shots[3];
   Object.assign(enemy,{x:center.pos[0]+9,y:p.y,z:center.pos[2]+4.5,shield:0,down:0});
@@ -320,9 +329,12 @@ test('オート英馬: player-only rapid 7-pellet homing shotgun (0.5 ink/pellet
   assert.deepEqual(outer.vel,[vx,vy,vz]);
 });
 
-test('チーター NPC: appears in ~50% of matches with オート英馬 II Super (half ink, stronger auto-aim) and enhanced HP/agility',()=>{
+test('チーター NPC: appears in ~50% of matches with オート英馬 II Super (half ink, 1.2x fire rate, 9 pellets, stronger auto-aim) and enhanced HP/agility',()=>{
   const ae=weaponById('autoeima');
   assert.equal(CHEATER_WEAPON.name,'オート英馬 II Super');
+  assert.equal(CHEATER_WEAPON.pellets,9);
+  assert(CHEATER_WEAPON.spread>=0.5 && CHEATER_WEAPON.spread>ae.spread);
+  assert(Math.abs(CHEATER_WEAPON.delay-.115/1.2)<1e-9);
   assert(Math.abs(CHEATER_WEAPON.cost-ae.cost*.5)<1e-9);
   assert(CHEATER_WEAPON.homing.turn>ae.homing.turn && CHEATER_WEAPON.homing.reach>ae.homing.reach && CHEATER_WEAPON.homing.cone>ae.homing.cone);
   // 50% spawn rate across 120 seeded matches.
@@ -343,11 +355,11 @@ test('チーター NPC: appears in ~50% of matches with オート英馬 II Super
   b.move(cheater,5,0,.2,false,false);
   b.move(normal,5,0,.2,false,false);
   assert(cheater.x-(-20)>(normal.x-(-20))*1.4);
-  // Fires 7 super-homing pellets for half of オート英馬's ink cost (1.75).
+  // Fires 9 super-homing pellets for half of オート英馬's ink cost (0.875).
   cheater.tank=100; cheater.fire=0;
   assert(b.shoot(cheater,[cheater.x+10,cheater.y+1,cheater.z]));
-  assert.equal(b.shots.filter(s=>s.actor===cheater).length,7);
-  assert(Math.abs(100-cheater.tank-1.75)<1e-9);
+  assert.equal(b.shots.filter(s=>s.actor===cheater).length,9);
+  assert(Math.abs(100-cheater.tank-.875)<1e-9);
   // ClearSuper and checkpoint cold restore preserve Cheater stats & weapon.
   b.abilities.clearSuper(cheater);
   assert.equal(cheater.maxHp,220);
@@ -507,7 +519,7 @@ test('perimeter apartments enclose all four sides of the arena while railway tun
   assert(minX<-58 && maxX>58,'elevated train traverses tunnel portals: ['+minX+','+maxX+']');
 });
 
-test('破壊神ゴート: overwhelming HP, hovers midair with 8 arms, attacks both teams indiscriminately, escalates phases, and checkpoints',()=>{
+test('破壊神ゴート: overwhelming HP, hovers midair with 16 arms & 50m reach, attacks both teams indiscriminately, escalates phases, and checkpoints',()=>{
   const engine=new RoomEngine({...options,cheater:false}), b=engine.battle;
   const engine8=new RoomEngine({mode:'play',weapon:'jet',teamSize:8,cheater:false});
   assert.equal(engine.battle.hazards.goat.maxHp,12000);
@@ -516,27 +528,39 @@ test('破壊神ゴート: overwhelming HP, hovers midair with 8 arms, attacks bo
   b.countdown=0;
   alone(b,cyan,amber);
   const g=b.hazards.spawnGoat(60);
-  assert(g.active && g.hp===12000 && g.arms===GOAT_ARMS && g.arms===8);
+  assert(g.active && g.hp===12000 && g.arms===GOAT_ARMS && g.arms===16);
   assert(g.y>=4,'Goat hovers in midair: y='+g.y);
-  // Position Cyan and Amber beneath Goat -> Goat attacks both teams indiscriminately!
-  Object.assign(cyan,{x:4,y:0,z:-4,hp:100,shield:0,down:0});
-  Object.assign(amber,{x:-4,y:0,z:-4,hp:100,shield:0,down:0});
+  // Position Cyan and Amber across range & speeds -> smart Goat selects smash, whirl, & barrage!
+  Object.assign(cyan,{x:4,y:0,z:-4,hp:100,shield:0,down:0,vx:0,vz:0});
+  Object.assign(amber,{x:-4,y:0,z:-4,hp:100,shield:0,down:0,vx:0,vz:0});
   g.nextAttack=b.clock;
-  let sawSmash=false, sawWhirl=false, sawBarrage=false;
-  for (let i=0;i<160;i++) {
+  let sawSmash=false, sawWhirl=false, sawBarrage=false, cyanHit=false, amberHit=false;
+  for (let i=0;i<180;i++) {
+    // Keep targets alive across tests so smart Goat demonstrates close whirl, spread smash, and fast barrage!
+    if (i===55) Object.assign(cyan,{x:26,y:0,z:4,hp:100,shield:0,down:0,vx:7,vz:0}), Object.assign(amber,{x:-28,y:0,z:-8,hp:100,shield:0,down:0,vx:-7,vz:0});
+    if (i===110) Object.assign(cyan,{x:18,y:0,z:0,hp:100,shield:0,down:0,vx:0,vz:0}), Object.assign(amber,{x:-18,y:0,z:-2,hp:100,shield:0,down:0,vx:0,vz:0});
     b.clock+=.06; b.elapsed+=.06;
     b.hazards.updateGoat(.06);
+    if (cyan.down>0 || cyan.hp<100) cyanHit=true;
+    if (amber.down>0 || amber.hp<100) amberHit=true;
     if (g.cast?.kind==='smash') sawSmash=true;
     if (g.cast?.kind==='whirl') sawWhirl=true;
     if (g.cast?.kind==='barrage') sawBarrage=true;
   }
-  assert(sawSmash && sawWhirl && sawBarrage,'Goat cycles 8-arm smash, whirl, and barrage');
+  assert(sawSmash && sawWhirl && sawBarrage,'Goat uses 16-tentacle smash, whirl, and barrage');
   assert(b.shots.some(s=>s.weapon===GOAT_WEAPON && s.homing),'barrage fires homing Goat orbs');
+  assert(cyanHit,'Cyan attacked by Goat');
+  assert(amberHit,'Amber attacked by Goat');
+  // Also confirm both teams get eliminated when grounded inside close reach.
+  Object.assign(cyan,{x:4,y:0,z:-4,hp:100,shield:0,down:0,vx:0,vz:0});
+  Object.assign(amber,{x:-4,y:0,z:-4,hp:100,shield:0,down:0,vx:0,vz:0});
+  Object.assign(g,{x:0,z:-4,volley:0,cast:null,lastCastKind:null,nextAttack:b.clock});
+  for (let i=0;i<130;i++) {b.clock+=.06;b.elapsed+=.06;b.hazards.updateGoat(.06);}
   assert(cyan.down>0 && cyan.downBy==='goat','Cyan eliminated by Goat');
   assert(amber.down>0 && amber.downBy==='goat','Amber eliminated by Goat');
   // Checkpoint preserves Goat state cleanly.
   const restored=new RoomEngine({...options,cheater:false},new Map(Object.entries(engine.checkpoint()))).battle;
-  assert(restored.hazards.goat.active && restored.hazards.goat.hp===g.hp && restored.hazards.goat.arms===8);
+  assert(restored.hazards.goat.active && restored.hazards.goat.hp===g.hp && restored.hazards.goat.arms===16);
   // Phase escalation & defeat via player fire.
   cyan.down=0; cyan.hp=100;
   const hit=b.findActor([g.x,g.y+1.8,g.z-6],[g.x,g.y+1.8,g.z+6],cyan.team);
@@ -601,14 +625,14 @@ test('HNV1 foundation engine powers every NPC type with human archetypes, predic
   assert.equal(bot.intent,'HNV1: 地下浸水から地上へ脱出');
   b.hazards.underFlood.active=false;
 
-  // God of Destruction Goat 8-arm telegraph avoidance!
+  // God of Destruction Goat 16-tentacle telegraph avoidance!
   const g=b.hazards.spawnGoat(40);
   g.x=10; g.z=-16;
-  g.cast={kind:'whirl',x:10,z:-16,radius:13,start:b.clock,at:b.clock+.45,end:b.clock+1.1,done:false,yaw:0};
+  g.cast={kind:'whirl',x:10,z:-16,radius:28,start:b.clock,at:b.clock+.45,end:b.clock+1.1,done:false,yaw:0};
   Object.assign(bot,{x:14,y:0,z:-16,down:0});
   b.motion.begin();
   assert(b.hnv1.survivalAction(bot,.05,null));
-  assert.equal(bot.intent,'HNV1: 破壊神ゴートの8本腕を回避');
+  assert.equal(bot.intent,'HNV1: 破壊神ゴートの16本触手を回避');
 });
 
 test('map cars are drivable, paint own ink while driving, ram/run over enemies, dye with enemy ink when attacked, and explode for massive AoE damage',()=>{
@@ -886,8 +910,8 @@ test('deep motion & animation pass: swimming squid, crew hair/flinch/hose, vehic
 
   // Cycle Goat through all 3 animated attacks (smash, whirl, barrage) + step clocks cleanly.
   const casts=[
-    {kind:'smash',x:goat.x,z:goat.z,start:b.clock,at:b.clock+.5,end:b.clock+1.1,done:false,points:Array.from({length:8},(_,i)=>[i*2-7,0,-15])},
-    {kind:'whirl',x:goat.x,z:goat.z,start:b.clock,at:b.clock+.4,end:b.clock+1.1,done:false,radius:12,yaw:0},
+    {kind:'smash',x:goat.x,z:goat.z,start:b.clock,at:b.clock+.5,end:b.clock+1.1,done:false,points:Array.from({length:16},(_,i)=>[i*2-15,0,-15])},
+    {kind:'whirl',x:goat.x,z:goat.z,start:b.clock,at:b.clock+.4,end:b.clock+1.1,done:false,radius:28,yaw:0},
     {kind:'barrage',x:goat.x,z:goat.z,start:b.clock,at:b.clock+.4,end:b.clock+1.0,done:false,yaw:0}
   ];
   const t0=performance.now();
