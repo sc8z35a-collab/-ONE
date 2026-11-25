@@ -6,7 +6,7 @@ import {add,dot,scale} from '../dist/render.js';
 import {shotWeaponById,weaponById} from '../dist/weapons.js';
 import {randomGenerator} from '../dist/world.js';
 
-const STORAGE_VERSION=6;
+const STORAGE_VERSION=7;
 const filmKeys=Array.from({length:PAINT_LAYERS},(_,i)=>'ink'+i);
 const flowKeys=Array.from({length:INK_REGIONS},(_,i)=>'flow'+i);
 export const STORAGE_KEYS=['game',...filmKeys,...flowKeys];
@@ -58,23 +58,25 @@ function restoreHits(b,hits=[]) {
 function encodeFilm(p,layer) {
   const start=layer*p.layerSize,end=start+p.layerSize;
   let n=0;
-  for (let i=start;i<end;i++) if (p.cyan[i] || p.amber[i]) n++;
-  const buffer=new ArrayBuffer(n*12), out=new DataView(buffer);
+  const bossArr=p.boss;
+  for (let i=start;i<end;i++) if (p.cyan[i] || p.amber[i] || (bossArr && bossArr[i])) n++;
+  const buffer=new ArrayBuffer(n*16), out=new DataView(buffer);
   let at=0;
   for (let i=start;i<end;i++) {
-    const a=p.cyan[i], b=p.amber[i];
-    if (!a && !b) continue;
+    const a=p.cyan[i], b=p.amber[i], c=bossArr?bossArr[i]:0;
+    if (!a && !b && !c) continue;
     out.setUint32(at,i-start,true);
     out.setFloat32(at+4,a,true);
     out.setFloat32(at+8,b,true);
-    at+=12;
+    out.setFloat32(at+12,c,true);
+    at+=16;
   }
   return buffer;
 }
 
 function decodeFilm(p,layer,buffer,field,version) {
   if (!(buffer instanceof ArrayBuffer)) return;
-  const data=new DataView(buffer), legacy=version<4, stride=legacy?8:12;
+  const data=new DataView(buffer), legacy=version<4, hasBoss=version>=7, stride=legacy?8:hasBoss?16:12;
   const area=(field.boundX*field.boundZ/(field.width*field.height))/(p.boundX*p.boundZ/(p.w*p.h));
   for (let at=0;at+stride<=data.byteLength;at+=stride) {
     const cell=data.getUint32(at,true);
@@ -85,6 +87,7 @@ function decodeFilm(p,layer,buffer,field,version) {
     if (index<0 || !p.mask[index]) continue;
     p.cyan[index]+=(legacy?data.getUint16(at+4,true)/FILM_SCALE:data.getFloat32(at+4,true))*area;
     p.amber[index]+=(legacy?data.getUint16(at+6,true)/FILM_SCALE:data.getFloat32(at+8,true))*area;
+    if (hasBoss && p.boss) p.boss[index]+=data.getFloat32(at+12,true)*area;
     p.publish(index);
     p.wake(inkRegion(Math.floor(index/p.layerSize))*p.layerSize+index%p.layerSize);
   }
@@ -146,6 +149,8 @@ export function checkpointOf(b) {
       return {...clone(shot),source,departed,weapon:weapon.id};
     }),
     stage:b.stage.snapshot(),
+    dynamicStage:b.dynamicStage?.snapshot?.() ?? null,
+    underBossDepth:b.fluid?.underBossDepth ?? 0,
     effects:b.abilities.advanced.effects.map(({actor,hit,damage,...motion})=>({
       ...clone(motion),owner:b.actors.indexOf(actor),
       hit:hit?Array.from(hit,target=>reference(b,target)).filter(Boolean):undefined,
@@ -184,7 +189,7 @@ function migratePositions(data) {
 
 export function restoreCheckpoint(b,stored) {
   const saved=stored.get('game');
-  if (!saved || ![1,2,3,4,5,STORAGE_VERSION].includes(saved.version) ||
+  if (!saved || ![1,2,3,4,5,6,STORAGE_VERSION].includes(saved.version) ||
       saved.actors.filter(a=>a.casterIndex===undefined).length!==b.actors.length) return;
   const data=saved.version<5?migratePositions(clone(saved)):saved;
   for (const key of ['clock','elapsed','left','countdown','watching','finished']) b[key]=data[key];
@@ -247,11 +252,13 @@ export function restoreCheckpoint(b,stored) {
     b.chip.owner=(kind==='crew'?b.actors[i]:b.raiders.members.find(a=>a.index===i)) ?? true;
   }
   if (data.version===1) for (const a of [...b.actors,...b.raiders.members]) {
-    const previous=a.tankMax || 100, next=previous>100?BASE_TANK*2:BASE_TANK;
+    const previous=a.tankMax || 100, next=(previous>100?BASE_TANK*2:BASE_TANK)*(a.weapon?.tankScale ?? 1);
     a.tank*=next/previous;
     a.tankMax=next;
   }
   b.stage.restore(data.stage);
+  if (b.dynamicStage && data.dynamicStage) b.dynamicStage.restore(data.dynamicStage);
+  if (b.fluid && data.underBossDepth!==undefined) b.fluid.underBossDepth=data.underBossDepth;
   const savedDecals=data.decals ?? [];
   b.decals=savedDecals.flatMap(mark=>{
     const start=add(mark.p,scale(mark.normal,.075));

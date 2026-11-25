@@ -75,18 +75,19 @@ function volumes(profile) {
 function residence(world,x,z,profile) {
   const {id,width:w,depth:d,height:h,tint,trim,roof,form}=profile,r=world.r;
   const lot=residentialLot(w,d,h);
+  const bSolids=[];
   world.solid(x,-lot.foundationDepthBelowGrade/2,z,lot.foundationWidth,lot.foundationDepthBelowGrade,
     lot.foundationDepth,0x858c82,2);
   r.add('box',x,-.029,z,lot.width,.083,lot.depth,0xc3c0aa,1);
-  world.solid(x,lot.podium*.32,z,lot.foundationWidth,lot.podium*.64,lot.foundationDepth,roof,13);
+  bSolids.push(world.solid(x,lot.podium*.32,z,lot.foundationWidth,lot.podium*.64,lot.foundationDepth,roof,13));
   const base=lot.podium*.64;
   for (const [ox,oz,bw,bd,low,high] of volumes(profile)) {
     const px=x+ox*w,pz=z+oz*d,sw=bw*w,sd=bd*d,span=(high-low)*h,bottom=base+low*h,top=bottom+span;
-    world.solid(px,bottom+span*.5,pz,sw,span,sd,tint,11);
-    world.solid(px,top+.055,pz,sw+.09,.11,sd+.09,roof,2);
+    bSolids.push(world.solid(px,bottom+span*.5,pz,sw,span,sd,tint,11));
+    bSolids.push(world.solid(px,top+.055,pz,sw+.09,.11,sd+.09,roof,2));
     const front=pz+sd/2;
     if (low===0) {
-      world.solid(px,bottom+1.35,front+.039,Math.min(sw*.47,4.6),2.64,.102,trim,8);
+      bSolids.push(world.solid(px,bottom+1.35,front+.039,Math.min(sw*.47,4.6),2.64,.102,trim,8));
       r.add('box',px,bottom+2.72,front+.40,Math.min(sw*.59,5.6),.21,.85,roof,4);
       wallWeathering(r,id%20+1,px+sw*.33,bottom+.05,front,0,sw*.26,Math.min(2.65,span),tint,id);
     }
@@ -101,37 +102,53 @@ function residence(world,x,z,profile) {
       if (form==='slab'||form==='ell') r.add('box',px,y+.38,front+.29,sw*.84,.62,.068,trim,8);
     }
     if (high===1) {
-      world.solid(px+sw*.21,top+.61,pz-sd*.18,sw*.23,1.12,sd*.27,roof,4);
+      bSolids.push(world.solid(px+sw*.21,top+.61,pz-sd*.18,sw*.23,1.12,sd*.27,roof,4));
       r.add('cylinder',px+sw*.22,top+2.2,pz-sd*.19,.11,2.18,.11,trim,4);
     }
   }
+  world.registerDestructible?.({
+    id:'outer-'+Math.round(x)+'_'+Math.round(z),kind:'building',material:'concrete',
+    x,y:h*.5+base*.5,z,w:w+1.5,h:h+base+2.6,d:d+1.5,tint,matKind:11,minY:0.12,maxY:h+base+4,
+    solids:bSolids.filter(Boolean)
+  });
 }
 
 function facilities(world) {
   const r=world.r;
   // Abandoned depot with exposed edges and a clear entrance.
+  const depotSolids=[];
   for (const [dx,z,w,h,d] of [[0,177,20,4.3,.42],[-9.75,184,.45,5.3,14],[9.75,187,.45,3.7,8],[-5.1,190,9.5,2.35,.44]]) {
-    world.solid(-176+dx,h/2,z,w,h,d,0x9e8975,13);
+    depotSolids.push(world.solid(-176+dx,h/2,z,w,h,d,0x9e8975,13));
   }
   r.add('box',-176,-.010,183.5,21,.052,15,0xaaa495,1);
-  for (const [dx,dz] of [[-6,3],[7,-2],[8,5]]) world.solid(-176+dx,.31,183+dz,1.95,.62,1.1,0x847c6d,13);
+  for (const [dx,dz] of [[-6,3],[7,-2],[8,5]]) depotSolids.push(world.solid(-176+dx,.31,183+dz,1.95,.62,1.1,0x847c6d,13));
   wallWeathering(r,18,-176,.24,177.21,0,18.8,3.6,0x9e8975);
+  world.registerDestructible?.({
+    id:'outer-depot',kind:'shop',material:'brick',
+    x:-176,y:2.6,z:183.5,w:21,h:5.4,d:15,tint:0x9e8975,matKind:13,minY:0.12,maxY:6,
+    solids:depotSolids.filter(Boolean)
+  });
 
   // Walk-in convenience shop on its own lot.
-  const x=172,z=165;
+  const x=172,z=165, martSolids=[];
   r.add('box',x,-.009,z,15,.041,12,0xbdbda5,1);
-  world.solid(x,1.69,z-3.75,11.8,3.38,.24,0xb7bcac,13);
+  martSolids.push(world.solid(x,1.69,z-3.75,11.8,3.38,.24,0xb7bcac,13));
   for (const side of [-1,1]) {
-    world.solid(x+side*5.81,1.69,z,.24,3.38,7.6,0xb7bcac,13);
-    world.solid(x+side*3.53,1.24,z+3.75,4.51,2.48,.12,0x709b98,8);
-    world.solid(x+side*3.23,.76,z-.55,2.62,1.52,.68,0xa5ab93,2);
+    martSolids.push(world.solid(x+side*5.81,1.69,z,.24,3.38,7.6,0xb7bcac,13));
+    martSolids.push(world.solid(x+side*3.53,1.24,z+3.75,4.51,2.48,.12,0x709b98,8));
+    martSolids.push(world.solid(x+side*3.23,.76,z-.55,2.62,1.52,.68,0xa5ab93,2));
     for (let i=0;i<7;i++) r.add('box',x+side*3.23+(i-3)*.31,1.63,z-.55,.21,.22,.42,[0xdfba63,0x8fa8ac,0xb77458][i%3],2);
   }
-  world.solid(x,3.32,z,12.14,.33,7.92,0xbfc6b5,2);
-  world.solid(x,2.92,z+3.80,11.93,.72,.35,0x467f71,4);
+  martSolids.push(world.solid(x,3.32,z,12.14,.33,7.92,0xbfc6b5,2));
+  martSolids.push(world.solid(x,2.92,z+3.80,11.93,.72,.35,0x467f71,4));
   r.add('box',x,3.12,z+3.988,11.83,.12,.025,0xde994f,3);
   r.label('CORNER MART',x,2.88,z+3.99,5.36,.43,CREAM);
   r.add('box',x,3.115,z+2.41,7.94,.039,.39,0xf5edd2,3);
+  world.registerDestructible?.({
+    id:'outer-cornermart',kind:'shop',material:'concrete',
+    x,y:1.8,z,w:12.6,h:3.6,d:8.6,tint:0xb7bcac,matKind:13,minY:0.12,maxY:4.2,
+    solids:martSolids.filter(Boolean)
+  });
 
   // Open parking deck with wheel stops and a drive aisle.
   const px=-160,pz=-180;

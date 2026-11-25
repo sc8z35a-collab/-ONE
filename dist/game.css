@@ -160,9 +160,11 @@ h1 i { color: var(--orange); font-style: normal; }
 .guide dt { color: var(--ink); font-weight: 750; }
 .guide dd { margin: 0; }
 .result-scores { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.result-scores.three { grid-template-columns: repeat(3,minmax(0,1fr)); }
 .result-scores div { padding: 8px 10px; background: #0a181d; border-top: 2px solid currentColor; font: 800 11px var(--mono); }
 .result-scores div:first-child { color: var(--ink); }
-.result-scores div:last-child { color: var(--orange); }
+.result-scores div:nth-child(2) { color: var(--orange); }
+.result-scores .boss { color: #d59be8; }
 .result-scores b { display: block; margin-top: 4px; font-size: 29px; }
 #loading { position: absolute; z-index: 3; inset: 0; display: grid; grid-auto-flow: column; justify-content: center; align-content: center; align-items: center; gap: 12px; background: #112027; font-size: 13px; letter-spacing: .13em; }
 @media (max-height: 730px) and (min-width: 701px) {
@@ -360,12 +362,14 @@ h1 i { color: var(--orange); font-style: normal; }
 .skill-action:disabled { opacity:.76; cursor:default; }
 .skill-action i { position:absolute; left:0; bottom:0; height:2px; width:0; background:#e7bc79; }
 .skill-action kbd, .transit-action kbd { color:#d6e8d8; font-size:9px; padding-left:4px; border-left:1px solid #93ada27a; }
-.transit-action { min-height:38px; padding-inline:13px; background:#3f6862f0; border-color:#def1d7; font-size:12px; }
-.transit-action:disabled { background:#263f3cdd; cursor:default; }
+.transit-action { min-height:40px; padding-inline:15px; background:#236b64f2; border:2px solid #7affea; font-size:13px; box-shadow:0 0 14px #2eeed055; }
+.transit-action:disabled { background:#263f3cdd; border-color:#8ca8a1; box-shadow:none; cursor:default; }
 .feed-entry.neutral { border-color:#c894d9; }
 .touch-active #combat-tools kbd, .touch-active .transit-action kbd { display:none; }
 .touch-active .skill-action { min-height:37px; }
 .in-transit .touch-actions, .in-transit #stick { opacity:.27; }
+.in-car #touch-swim, .in-car #touch-fire { opacity:.27; }
+.in-car #stick, .in-car #touch-jump { opacity:1; }
 .super-description { margin:9px 0 0; padding:7px 8px; border-left:2px solid #8ad5be; font-size:11px; color:#d5e6da; }
 .weapon-card span { display:block; }
 .controls-settings .graphics-setting { grid-template-columns:auto 1fr; }

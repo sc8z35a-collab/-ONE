@@ -55,13 +55,14 @@ export const WEAPONS = [
   {id:'swout2',name:'SW OUT II',role:'後継2発拳銃・プレイヤー専用',detail:'SW OUTの後継機。追従中も消費は増えず、基本消費4割減、弾速1.3倍、追従力・追従範囲・射程1.5倍。Cキー（またはCOボタン）でCOモードを切り替え：発射間隔が2倍になる代わりに追従力がさらに2倍。',special:'om2',playerOnly:true,
     speed:63*1.3,gravity:8,range:28*1.5,damage:14.5,cost:2.9*.6,delay:.26,radius:.98,depth:.040,pellets:2,spread:.018,arc:0,size:.17,
     autoAim:{turn:2.6*1.5,cone:.30*1.5,reach:22*1.5,ink:1},coMode:{delay:2,turn:2}},
-  // Player-only rapid-fire 7-pellet homing shotgun: 0.5 ink per pellet (3.5 per
-  // shot after INK_COST_FACTOR), slow rounds that steer toward any enemy inside
-  // their seeker radius, low per-pellet damage, wide spread and heavy painting.
-  {id:'autoeima',name:'オート英馬',role:'7連自動追尾散弾・プレイヤー専用',detail:'プレイヤー専用の自動追尾散弾銃。1回で7発（1発あたり0.5インク消費）を速い連射で広範囲に発射し、一定範囲内の敵へ弾が自動追従する。弾速は遅く攻撃力は低いが、塗り力は抜群。',special:'vortex',playerOnly:true,
-    speed:23.5,gravity:5.5,range:30,damage:6.5,cost:7,delay:.165,radius:1.55,depth:.056,pellets:7,spread:.34,arc:0,size:.21,
-    homing:{turn:4.8,cone:2.1,reach:16}}
+  // Player-only rapid-fire 7-pellet homing shotgun: 0.25 ink per pellet (1.75 per
+  // shot after INK_COST_FACTOR) and +20% (1.2x) ink tank capacity while held.
+  {id:'autoeima',name:'オート英馬',role:'7連自動追尾散弾・プレイヤー専用',detail:'プレイヤー専用の自動追尾散弾銃。1回で7発（1発あたり0.25インク消費）を速い連射で広範囲に発射し、所持するだけでインクタンク容量が1.2倍になる。一定範囲内の敵へ弾が自動追従し、塗り力は抜群。',special:'vortex',playerOnly:true,
+    speed:23.5,gravity:5.5,range:30,damage:6.5,cost:3.5,delay:.165,radius:1.55,depth:.056,pellets:7,spread:.34,arc:0,size:.21,
+    tankScale:1.2,homing:{turn:4.8,cone:2.1,reach:16}}
 ].map(weapon=>({...weapon,cost:weapon.cost*INK_COST_FACTOR,radius:weapon.radius*PAINT_RADIUS_FACTOR}));
+
+export const weaponTankMax=(weapon,base=150)=>base*(weapon?.tankScale ?? 1);
 
 export const weaponById=id=>WEAPONS.find(weapon=>weapon.id===id) ?? WEAPONS[0];
 // Weapons a computer-controlled crew may carry (playerOnly weapons are excluded).
@@ -75,23 +76,25 @@ export const DRONE_WEAPON={id:'drone',name:'ドローン',speed:27,gravity:0,ran
   pellets:1,spread:0,arc:0,size:.17};
 export const DRONE_HOMING={turn:5.6,cone:1.35,reach:21};
 // Illegally modified オート英馬 carried exclusively by the Cheater NPC:
-// stronger, wider, faster auto-aim homing and half the default ink cost (1.75 vs 3.5).
-export const CHEATER_WEAPON={id:'autoeima2s',name:'オート英馬 II Super',role:'違法改造7連超追尾散弾・チーター専用',
-  detail:'チーターがオート英馬を違法改造した超追尾散弾銃。圧倒的な自動追尾と半減されたインク消費量を誇る。',special:'vortex',
-  speed:34,gravity:3.5,range:44,damage:10.5,cost:3.5*.5,delay:.115,radius:1.75*PAINT_RADIUS_FACTOR,depth:.062,pellets:7,spread:.36,arc:0,size:.22,
+// stronger, wider, faster auto-aim homing and half the default ink cost (0.875 vs 1.75).
+export const CHEATER_WEAPON={id:'autoeima2s',name:'オート英馬 II Super',role:'違法改造9連超追尾散弾・チーター専用',
+  detail:'チーターがオート英馬を違法改造した9連超追尾散弾銃。1.2倍の連射速度・広角散弾・圧倒的な自動追尾と半減されたインク消費量を誇る。',special:'vortex',
+  speed:34,gravity:3.5,range:44,damage:10.5,cost:1.75*.5,delay:.115/1.2,radius:1.75*PAINT_RADIUS_FACTOR,depth:.062,pellets:9,spread:.52,arc:0,size:.22,
   homing:{turn:11.5,cone:2.75,reach:32}};
 // Indiscriminate hazard weapons used by apartment snipers and rogue drones.
 export const SNIPER_WEAPON={id:'sniper',name:'マンションスナイパー',speed:115,gravity:1.5,range:95,damage:46,cost:0,delay:2.4,
   radius:.45,depth:0,pellets:1,spread:0,arc:0,size:.16};
 export const ROGUE_DRONE_WEAPON={id:'rogue_drone',name:'暴走ドローン',speed:29,gravity:0,range:22,damage:22,cost:0,delay:1.15,
   radius:.55,depth:0,pellets:1,spread:0,arc:0,size:.18,homing:{turn:5.2,cone:1.5,reach:22}};
-export const TRAIN_BOSS_WEAPON={id:'train_boss',name:'暴走列車',speed:36,gravity:2.4,range:38,damage:34,cost:0,delay:.9,
-  radius:.85,depth:0,pellets:1,spread:0,arc:0,size:.28,homing:{turn:3.8,cone:1.2,reach:26}};
-export const GOAT_WEAPON={id:'goat_orb',name:'破壊神ゴート',speed:38,gravity:1.2,range:55,damage:42,cost:0,delay:.6,
-  radius:1.1,depth:0,pellets:1,spread:0,arc:0,size:.34,homing:{turn:4.2,cone:1.6,reach:30}};
+export const TRAIN_BOSS_WEAPON={id:'train_boss',name:'暴走列車',speed:38,gravity:1.8,range:52,damage:36,cost:0,delay:.68,
+  radius:1.05,depth:0,pellets:1,spread:0,arc:0,size:.30,homing:{turn:4.2,cone:1.5,reach:42}};
+export const GOAT_WEAPON={id:'goat_orb',name:'破壊神ゴート',speed:42,gravity:1.0,range:55,damage:42,cost:0,delay:.6,
+  radius:1.25,depth:.025,pellets:1,spread:0,arc:0,size:.38,homing:{turn:5.6,cone:2.2,reach:50}};
+export const HELI_MISSILE_WEAPON={id:'heli_missile',name:'マルチミサイルヘリ',speed:30,gravity:4.8,range:72,damage:56,cost:0,delay:2.6,
+  radius:2.1,depth:.02,pellets:1,spread:0,arc:0,size:.34,homing:{turn:6.4,cone:2.6,reach:68}};
 const SPECIAL_SHOT_WEAPONS={[DRONE_WEAPON.id]:DRONE_WEAPON,[CHEATER_WEAPON.id]:CHEATER_WEAPON,
   [SNIPER_WEAPON.id]:SNIPER_WEAPON,[ROGUE_DRONE_WEAPON.id]:ROGUE_DRONE_WEAPON,[TRAIN_BOSS_WEAPON.id]:TRAIN_BOSS_WEAPON,
-  [GOAT_WEAPON.id]:GOAT_WEAPON};
+  [GOAT_WEAPON.id]:GOAT_WEAPON,[HELI_MISSILE_WEAPON.id]:HELI_MISSILE_WEAPON};
 export const shotWeaponById=id=>SPECIAL_SHOT_WEAPONS[id] ?? weaponById(id);
 
 export function shotTravel(weapon,horizontal,rangeFactor=1,power=1) {

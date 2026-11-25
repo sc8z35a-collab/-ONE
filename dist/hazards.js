@@ -1,16 +1,18 @@
 import {TAU,add,clamp,forward,scale,sub,unit} from './render.js';
+import {STORM_DRAINS} from './ink-fluid.js';
 import {METRO,RAIL,UNDER_Y,ZONES,isCabin,localX,sameLevel,zoneOf} from './layout.js';
-import {GOAT_WEAPON,ROGUE_DRONE_WEAPON,SNIPER_WEAPON,TRAIN_BOSS_WEAPON} from './weapons.js';
+import {GOAT_WEAPON,HELI_MISSILE_WEAPON,ROGUE_DRONE_WEAPON,SNIPER_WEAPON,TRAIN_BOSS_WEAPON} from './weapons.js';
 import {drawTentacle} from './creature-models.js';
 import {randomGenerator} from './world.js';
 
 export const SNIPER_FIRST=42, SNIPER_INTERVAL=75, SNIPER_STAY=32, SNIPER_COUNT=4;
-export const ROGUE_DRONE_FIRST=58, ROGUE_DRONE_INTERVAL=82, ROGUE_DRONE_STAY=26, ROGUE_DRONE_COUNT=4;
+export const ROGUE_DRONE_FIRST=58, ROGUE_DRONE_INTERVAL=82, ROGUE_DRONE_STAY=26, ROGUE_DRONE_COUNT=16;
 export const RAIN_FIRST=70, RAIN_INTERVAL=95, RAIN_DURATION=22;
+export const HELI_FIRST=92, HELI_INTERVAL=120, HELI_STAY=42, HELI_SALVO_COUNT=6;
 export const TSUNAMI_FIRST=112, TSUNAMI_INTERVAL=115, TSUNAMI_WARN=5, TSUNAMI_SPEED=12.5, TSUNAMI_HEIGHT=3.6, TSUNAMI_WIDTH=9.5;
 export const UNDER_FLOOD_MAX=2.65, UNDER_FLOOD_HOLD=16;
 export const TRAIN_BOSS_FIRST=145, TRAIN_BOSS_INTERVAL=130, TRAIN_BOSS_DURATION=42;
-export const GOAT_FIRST=185, GOAT_INTERVAL=165, GOAT_DURATION=65, GOAT_ARMS=8, GOAT_HOVER_Y=4.6, GOAT_REACH=14.5;
+export const GOAT_FIRST=185, GOAT_INTERVAL=165, GOAT_DURATION=65, GOAT_ARMS=16, GOAT_HOVER_Y=4.6, GOAT_REACH=50;
 
 function discoverApartmentPerches(world) {
   const north=[], south=[];
@@ -21,7 +23,7 @@ function discoverApartmentPerches(world) {
     const sign=cz<0?1:-1;
     const front=sign>0?s.max[2]:s.min[2];
     const y=clamp(Math.min(s.max[1]-.4,7.6+(Math.abs(Math.round(cx))%3)*2.2),6.6,12.5);
-    const perch={x:cx,y,z:front+sign*.78,yaw:sign>0?Math.PI:0,sign};
+    const perch={x:cx,y,z:front+sign*.78,yaw:sign>0?Math.PI:0,sign,roofY:s.max[1],roofZ:cz};
     (sign>0?north:south).push(perch);
   }
   const pickSpread=(list,want)=>{
@@ -34,13 +36,26 @@ function discoverApartmentPerches(world) {
   const combined=[...pickSpread(north,5),...pickSpread(south,5)];
   if (combined.length>=4) return combined;
   return [
-    {x:-30,y:8.2,z:-30.8,yaw:Math.PI,sign:1},
-    {x:-6,y:9.4,z:-30.8,yaw:Math.PI,sign:1},
-    {x:22,y:8.2,z:-30.8,yaw:Math.PI,sign:1},
-    {x:-20,y:8.4,z:30.8,yaw:0,sign:-1},
-    {x:8,y:9.2,z:30.8,yaw:0,sign:-1},
-    {x:30,y:8.4,z:30.8,yaw:0,sign:-1}
+    {x:-30,y:8.2,z:-30.8,yaw:Math.PI,sign:1,roofY:11.6,roofZ:-34},
+    {x:-6,y:9.4,z:-30.8,yaw:Math.PI,sign:1,roofY:12.4,roofZ:-34},
+    {x:22,y:8.2,z:-30.8,yaw:Math.PI,sign:1,roofY:11.6,roofZ:-34},
+    {x:-20,y:8.4,z:30.8,yaw:0,sign:-1,roofY:11.6,roofZ:34},
+    {x:8,y:9.2,z:30.8,yaw:0,sign:-1,roofY:12.4,roofZ:34},
+    {x:30,y:8.4,z:30.8,yaw:0,sign:-1,roofY:11.6,roofZ:34}
   ];
+}
+
+function discoverApartmentDronePorts(world,perches) {
+  const ports=[];
+  for (const h of world?.homes ?? []) {
+    const cx=(h.x0+h.x1)*.5, cz=(h.z0+h.z1)*.5, sign=-Math.sign(cz)||1;
+    ports.push({x:cx,y:3.2,z:(sign>0?h.z1:h.z0)+sign*1.2,yaw:sign>0?0:Math.PI});
+  }
+  for (const p of perches) {
+    ports.push({x:p.x,y:Math.min(7.8,p.y),z:p.z+p.sign*1.1,yaw:p.yaw});
+  }
+  if (!ports.length) return [{x:-24,y:4.5,z:-29,yaw:Math.PI},{x:24,y:4.5,z:29,yaw:0}];
+  return ports;
 }
 
 export class Hazards {
@@ -48,22 +63,34 @@ export class Hazards {
     this.battle=battle;
     this.rng=randomGenerator((battle.seed ?? 519231)^0x5a3c9e1);
     this.perches=discoverApartmentPerches(battle.world);
+    this.dronePorts=discoverApartmentDronePorts(battle.world,this.perches);
     this.snipers=[];
     this.rogueDrones=[];
+    this.droneSpawnsLeft=0;
+    this.droneSpawnTimer=0;
     this.sniperWave=0;
     this.droneWave=0;
+    this.heliWave=0;
     this.trainBossCount=0;
     this.nextSniper=SNIPER_FIRST;
     this.sniperRetreatAt=0;
     this.nextDrone=ROGUE_DRONE_FIRST;
     this.droneRetreatAt=0;
+    this.nextHeli=HELI_FIRST;
+    this.heli={
+      active:false,name:'暴走攻撃ヘリ',hp:0,maxHp:battle.teamSize===8?2400:1600,
+      x:0,y:13,z:-32,yaw:0,vx:0,vz:0,pitch:0,roll:0,rotor:0,until:0,fire:0,
+      radius:2.2,height:2.4,team:-1,isHeli:true,weapon:HELI_MISSILE_WEAPON
+    };
+    this.missiles=[];
     this.nextRain=RAIN_FIRST;
     this.rain={active:false,until:0,washTimer:0};
     this.nextTsunami=TSUNAMI_FIRST;
     this.tsunami={phase:'idle',warnUntil:0,x:-64,height:TSUNAMI_HEIGHT,width:TSUNAMI_WIDTH,floodedUnder:false};
     this.underFlood={active:false,phase:'idle',depth:0,maxDepth:UNDER_FLOOD_MAX,timer:0,washTimer:0};
     this.nextTrainBoss=TRAIN_BOSS_FIRST;
-    this.trainBoss={active:false,rail:'transit',name:'暴走列車 07',hp:0,maxHp:battle.teamSize===8?3800:2600,until:0,fire:0,x:0,y:0,z:0};
+    this.trainBoss={active:false,rail:'transit',name:'暴走列車 07',hp:0,maxHp:battle.teamSize===8?3800:2600,
+      until:0,fire:0,shock:0,stageMode:true,pathT:0,yaw:Math.PI*.5,pitch:0,roll:0,speed:24,x:-42,y:0,z:0};
     this.trainHits=new Map();
     this.nextGoat=GOAT_FIRST;
     this.goat={
@@ -94,6 +121,7 @@ export class Hazards {
     const list=[];
     for (const s of this.snipers) if (s.active && sameLevel(s.x,atX)) list.push(s);
     for (const d of this.rogueDrones) if (d.active && sameLevel(d.x,atX)) list.push(d);
+    if (this.heli.active && sameLevel(this.heli.x,atX)) list.push(this.heli);
     if (this.goat.active && sameLevel(this.goat.x,atX)) list.push(this.goat);
     return list;
   }
@@ -196,31 +224,39 @@ export class Hazards {
     }
   }
 
-  // ---- Periodic Rogue Drone Swarm (敵味方無差別ドローン襲撃) ----
+  // ---- Apartment Swarm Drones (マンションから無数のドローンが湧き出し襲撃) ----
+  _launchApartmentDrone(index,delay=0) {
+    const b=this.battle, ports=this.dronePorts;
+    const port=ports[(this.droneWave*5+index)%ports.length];
+    const spread=(this.rng()-.5)*4.2;
+    const drone={
+      id:this.droneWave*100+index,index,
+      x:port.x+spread,y:port.y+(this.rng()-.5)*.9,z:port.z+(this.rng()-.5)*2.0,
+      yaw:port.yaw+(this.rng()-.5)*.7,team:-1,isRogueDrone:true,active:true,hp:75,maxHp:75,
+      radius:.58,height:.7,weapon:ROGUE_DRONE_WEAPON,
+      name:'マンション暴走ドローン '+String(index+1).padStart(2,'0'),
+      fire:.55+(index%6)*.22+delay,turn:0,flash:-9,aim:0
+    };
+    b.hnv1?.mind(drone);
+    b.burst([drone.x,drone.y,drone.z],-1,10,2.8);
+    return drone;
+  }
+
   spawnRogueDrones(count=ROGUE_DRONE_COUNT) {
     const b=this.battle;
     this.rogueDrones=[];
     this.droneWave++;
-    const spots=[
-      {x:-24,z:-8,zone:0},{x:0,z:11,zone:0},{x:26,z:-9,zone:0},
-      {x:1280,z:8,zone:1},{x:-12,z:16,zone:0}
-    ];
-    for (let i=0;i<count;i++) {
-      const sp=spots[i%spots.length];
-      const floor=b.world.floor(sp.x,sp.z).y;
-      const drone={
-        id:this.droneWave*10+i,index:i,x:sp.x+(this.rng()-.5)*6,y:floor+2.6,z:sp.z+(this.rng()-.5)*6,
-        yaw:this.rng()*TAU,team:-1,isRogueDrone:true,active:true,hp:75,maxHp:75,radius:.58,height:.7,weapon:ROGUE_DRONE_WEAPON,
-        name:'暴走ドローン '+String(i+1).padStart(2,'0'),
-        fire:.7+i*.3,turn:0,flash:-9,aim:0
-      };
-      b.hnv1?.mind(drone);
-      this.rogueDrones.push(drone);
+    const initial=count>8?Math.min(count,14):count;
+    for (let i=0;i<initial;i++) {
+      this.rogueDrones.push(this._launchApartmentDrone(i));
     }
+    // Countless reinforcements continue pouring from apartment exits during full invasion waves!
+    this.droneSpawnsLeft=count>=ROGUE_DRONE_COUNT?16:0;
+    this.droneSpawnTimer=1.35;
     this.droneRetreatAt=b.elapsed+ROGUE_DRONE_STAY;
     this.nextDrone=b.elapsed+ROGUE_DRONE_INTERVAL;
-    this.announce('⚠ 暴走ドローン群 ×'+this.rogueDrones.length+' 襲来！敵味方関係なく攻撃！',4.8,'drone');
-    b.events.unshift({label:'暴走ドローン群 ×'+this.rogueDrones.length+' 襲来',team:-1,until:b.clock+4.2});
+    this.announce('⚠ マンションから無数の暴走ドローン ×'+count+' が湧き出した！',5.0,'drone');
+    b.events.unshift({label:'マンションドローン群 湧出中！',team:-1,until:b.clock+4.4});
     b.events.length=Math.min(b.events.length,4);
     return this.rogueDrones;
   }
@@ -234,9 +270,9 @@ export class Hazards {
       const b=this.battle;
       if (source) source.kills++;
       b.burst([drone.x,drone.y,drone.z],source?.team ?? -1,18,3.8);
-      b.events.unshift({label:(source?.name ?? '撃墜')+'  ▸  '+drone.name,team:source?.team ?? -1,until:b.clock+3.6});
+      b.events.unshift({label:(source?.name ?? '撃破')+'  ▸  '+drone.name,team:source?.team ?? -1,until:b.clock+3.6});
       b.events.length=Math.min(b.events.length,4);
-      if (!this.rogueDrones.some(d=>d.active)) this.announce('暴走ドローン群を全機撃墜！',3.6,'bossDown');
+      if (!this.rogueDrones.some(d=>d.active) && this.droneSpawnsLeft<=0) this.announce('マンションの暴走ドローン群を全機撃墜！',3.6,'bossDown');
     }
     return lost;
   }
@@ -247,6 +283,19 @@ export class Hazards {
     if (this.rogueDrones.length && b.elapsed>=this.droneRetreatAt) {
       for (const d of this.rogueDrones) d.active=false;
       this.rogueDrones=[];
+      this.droneSpawnsLeft=0;
+    }
+    if (this.droneSpawnsLeft>0 && b.elapsed<this.droneRetreatAt-1.8) {
+      this.droneSpawnTimer-=dt;
+      const activeCount=this.rogueDrones.filter(d=>d.active).length;
+      if (this.droneSpawnTimer<=0 && activeCount<18) {
+        this.droneSpawnTimer=.95;
+        const burstCount=Math.min(3,this.droneSpawnsLeft);
+        for (let k=0;k<burstCount;k++) {
+          this.rogueDrones.push(this._launchApartmentDrone(this.rogueDrones.length));
+          this.droneSpawnsLeft--;
+        }
+      }
     }
     for (const d of this.rogueDrones) {
       if (!d.active) continue;
@@ -302,12 +351,155 @@ export class Hazards {
     }
   }
 
-  // ---- Rain (豪雨によるインク消失) ----
+  // ---- Apartment Rooftop Attack Helicopter (屋上から無差別マルチミサイル乱射ヘリ) ----
+  spawnHeli(duration=HELI_STAY) {
+    const b=this.battle;
+    this.heliWave++;
+    const perches=this.perches;
+    const roof=perches[(this.heliWave*3)%perches.length] ?? {x:-6,roofY:12,roofZ:-34,z:-31};
+    const maxHp=b.teamSize===8?2400:1600;
+    const rx=roof.x, ry=(roof.roofY??11.8)+1.4, rz=roof.roofZ??roof.z;
+    Object.assign(this.heli,{
+      active:true,hp:maxHp,maxHp,
+      x:rx,y:ry,z:rz,yaw:rz<0?Math.PI:0,vx:0,vz:0,pitch:0,roll:0,rotor:0,
+      until:b.elapsed+duration,fire:1.35,salvo:0,flash:-9
+    });
+    this.missiles=[];
+    this.nextHeli=b.elapsed+HELI_INTERVAL;
+    b.burst([rx,ry+.8,rz],-1,32,6.5);
+    this.announce('🚁 マンション屋上から暴走攻撃ヘリ発進！無差別マルチミサイル警報！',5.4,'boss');
+    b.events.unshift({label:'🚁 暴走ヘリ 屋上発進・ミサイル乱射',team:-1,until:b.clock+4.6});
+    b.events.length=Math.min(b.events.length,4);
+    return this.heli;
+  }
+
+  hurtHeli(amount,source=null) {
+    const h=this.heli;
+    if (!h.active || !(amount>0)) return 0;
+    const lost=Math.min(h.hp,amount);
+    h.hp-=lost;
+    const b=this.battle;
+    if (h.hp<=0) {
+      h.active=false;
+      this.missiles=[];
+      if (source) source.kills++;
+      b.burst([h.x,h.y+1.1,h.z],source?.team ?? -1,48,8.5);
+      b.events.unshift({label:(source?.name ?? '撃墜')+'  ▸  '+h.name,team:source?.team ?? -1,until:b.clock+4.2});
+      b.events.length=Math.min(b.events.length,4);
+      this.announce('✦ 暴走攻撃ヘリを撃墜した！',4.2,'bossDown');
+    }
+    return lost;
+  }
+
+  updateHeli(dt) {
+    const b=this.battle, h=this.heli;
+    if (!h.active && b.elapsed>=this.nextHeli-1e-6) this.spawnHeli();
+    if (h.active && b.elapsed>=h.until) {
+      h.active=false;
+      this.missiles=[];
+      this.announce('暴走攻撃ヘリは空域を離脱した',3.8);
+    }
+    if (h.active) {
+      h.rotor=(h.rotor+dt*28)%TAU;
+      h.salvo+=dt;
+      const t=b.elapsed*.55;
+      const targetX=Math.sin(t)*32, targetZ=Math.cos(t*.85)*18;
+      const targetY=Math.max(12.2,b.world.floor(targetX,targetZ).y+11.5+Math.sin(t*1.7)*1.4);
+      const dx=targetX-h.x, dz=targetZ-h.z, d=Math.max(.1,Math.hypot(dx,dz));
+      h.vx=dx/d*Math.min(13.5,d*1.8);
+      h.vz=dz/d*Math.min(13.5,d*1.8);
+      h.x+=h.vx*dt; h.z+=h.vz*dt;
+      h.y+=clamp(targetY-h.y,-dt*6.5,dt*6.5);
+      const desiredYaw=Math.atan2(h.vx,-h.vz);
+      let dYaw=desiredYaw-h.yaw;
+      while (dYaw>Math.PI) dYaw-=TAU; while (dYaw<-Math.PI) dYaw+=TAU;
+      h.yaw+=dYaw*clamp(dt*4.5,0,1);
+      h.pitch=.14;
+      h.roll=clamp(dYaw*-.35,-.32,.32);
+      h.fire-=dt;
+      if (h.fire<=0) {
+        h.fire=HELI_MISSILE_WEAPON.delay;
+        h.flash=b.clock;
+        const pool=[...b.actors,...b.raiders.live()].filter(a=>a.down<=0 && zoneOf(a.x)===0 && !a.ride && !a.lift);
+        for (let m=0;m<HELI_SALVO_COUNT;m++) {
+          const podSide=m%2===0?-1:1;
+          const rx=Math.cos(h.yaw)*podSide*1.35, rz=Math.sin(h.yaw)*podSide*1.35;
+          const fx=Math.sin(h.yaw)*.6, fz=-Math.cos(h.yaw)*.6;
+          const sx=h.x+rx+fx, sy=h.y-.35, sz=h.z+rz+fz;
+          let tx, tz;
+          if (pool.length && m<pool.length) {
+            const pick=pool[(Math.floor(this.rng()*pool.length))%pool.length];
+            tx=clamp(pick.x+(pick.vx??0)*.45+(this.rng()-.5)*2.4,-46,46);
+            tz=clamp(pick.z+(pick.vz??0)*.45+(this.rng()-.5)*2.4,-28,28);
+          } else {
+            tx=(this.rng()-.5)*68;
+            tz=(this.rng()-.5)*40;
+          }
+          const ty=b.world.floor(tx,tz).y;
+          const dir=unit([tx-sx,ty+3.5-sy,tz-sz]);
+          this.missiles.push({
+            id:++b.shotSequence,
+            x:sx,y:sy,z:sz,
+            vx:dir[0]*21+rx*3.5,vy:4.8+(m%3)*1.6,vz:dir[2]*21+rz*3.5,
+            tx,ty,tz,life:3.2,age:0
+          });
+          b.abilities.rings.push({x:tx,y:ty+.06,z:tz,r:3.2,team:1,until:b.clock+1.05});
+        }
+        b.burst([h.x,h.y-.3,h.z],-1,16,4.2);
+      }
+    }
+    this.updateMissiles(dt);
+  }
+
+  updateMissiles(dt) {
+    if (!this.missiles.length) return;
+    const b=this.battle, next=[];
+    const shooter={team:-1,name:this.heli.name,isHeli:true};
+    for (let i=0;i<this.missiles.length;i++) {
+      const ms=this.missiles[i];
+      ms.age+=dt;
+      ms.life-=dt;
+      const toX=ms.tx-ms.x, toY=(ms.ty+.2)-ms.y, toZ=ms.tz-ms.z;
+      const dist=Math.hypot(toX,toY,toZ);
+      const steer=ms.age<.28?3.2:14.0;
+      const desired=unit([toX,toY+(dist>9?5.5:0),toZ]);
+      const spd=29;
+      ms.vx=ms.vx+(desired[0]*spd-ms.vx)*clamp(dt*steer,0,1);
+      ms.vy=ms.vy+(desired[1]*spd-ms.vy)*clamp(dt*steer,0,1);
+      ms.vz=ms.vz+(desired[2]*spd-ms.vz)*clamp(dt*steer,0,1);
+      const nx=ms.x+ms.vx*dt, ny=ms.y+ms.vy*dt, nz=ms.z+ms.vz*dt;
+      const flY=b.world.floor(nx,nz).y;
+      const hitWall=ms.age>.18 && (b.traceShot?.([ms.x,ms.y,ms.z],[nx,ny,nz],true)?.t<1);
+      const impacted=hitWall || ny<=flY+.32 || dist<1.45 || ms.life<=0;
+      ms.x=nx; ms.y=ny; ms.z=nz;
+      if (impacted) {
+        const iy=Math.max(flY,ms.y);
+        b.burst([ms.x,iy+.6,ms.z],1,22,5.6);
+        b.abilities.rings.push({x:ms.x,y:flY+.07,z:ms.z,r:3.6,team:1,until:b.clock+.55});
+        b.stage.damageArea(b,shooter,ms.x,iy,ms.z,3.6,72);
+        b.vehicles?.damageArea(ms.x,iy,ms.z,3.6,64,shooter);
+        for (const a of [...b.actors,...b.raiders.live()]) {
+          if (a.down>0 || a.ride || a.lift || !sameLevel(a.x,ms.x)) continue;
+          const ad=Math.hypot(a.x-ms.x,a.z-ms.z);
+          if (ad>3.75 || Math.abs(a.y-iy)>3.4) continue;
+          const falloff=clamp(1-.55*(ad/3.75),.42,1);
+          const inv=1/Math.max(.3,ad);
+          b.stepActor(a,(a.x-ms.x)*inv*1.8,(a.z-ms.z)*inv*1.8);
+          b.damage(a,58*falloff,shooter,[a.x,a.y+.9,a.z],'heli');
+        }
+      } else {
+        next.push(ms);
+      }
+    }
+    this.missiles=next;
+  }
+
+  // ---- Rain (豪雨による視界不良＆インク消失) ----
   startRain(duration=RAIN_DURATION) {
     const b=this.battle;
     this.rain={active:true,until:b.elapsed+duration,washTimer:0};
     this.nextRain=b.elapsed+RAIN_INTERVAL;
-    this.announce('☂ 豪雨発生！地上のインクが洗い流される！',4.5);
+    this.announce('☂ 豪雨発生！視界不良＆地上のインクが洗い流される！',4.8);
   }
 
   updateRain(dt) {
@@ -319,9 +511,10 @@ export class Hazards {
       return;
     }
     this.rain.washTimer+=dt;
+    if (b.fluid) b.fluid.stepRain(this,b.paint,dt);
     if (this.rain.washTimer>=.25) {
       this.rain.washTimer-=.25;
-      b.paint.wash(ZONES[0].inkMask,.0095);
+      if (!b.fluid) b.paint.wash(ZONES[0].inkMask,.0095);
       // Gradually dissolve exposed surface wall decals in the rain.
       if (b.decals.length) {
         let removed=0;
@@ -361,9 +554,15 @@ export class Hazards {
     if (ts.phase==='wave') {
       const prevX=ts.x;
       ts.x+=TSUNAMI_SPEED*dt;
+      ts.dir=1;
+      ts.speed=TSUNAMI_SPEED;
       const back=Math.min(prevX,ts.x)-ts.width*.55, front=ts.x+ts.width*.5;
-      // Completely wash away surface ink swept by the tsunami wave.
-      b.paint.wash(ZONES[0].inkMask,1.0,back,front);
+      // Unified fluid engine drives shallow-water bore wave, Morison push, structure impact & scour.
+      if (b.fluid) {
+        b.fluid.stepTsunamiFluid(this,b,dt);
+      } else {
+        b.paint.wash(ZONES[0].inkMask,1.0,back,front);
+      }
       if (b.decals.length) {
         b.decals=b.decals.filter(d=>!(zoneOf(d.p[0])===0 && d.p[1]<ts.height+.4 && d.p[0]>=back && d.p[0]<=front));
       }
@@ -383,6 +582,8 @@ export class Hazards {
       if (ts.x>68) {
         ts.phase='idle';
       }
+    } else if (b.fluid && this.underFlood.active) {
+      b.fluid.stepTsunamiFluid(this,b,dt);
     }
     const uf=this.underFlood;
     if (!uf.active) return;
@@ -416,9 +617,52 @@ export class Hazards {
     }
   }
 
-  // ---- Runaway Train Boss (電車の暴走による敵ボス化) ----
+  // ---- Runaway Train Boss (暴走列車：ステージ上へ上がり蹂躙しながら攻撃) ----
   trainBossRail() {
     return this.trainBoss.rail==='metro'?this.battle.metro:this.battle.transit;
+  }
+
+  traceTrainBoss(start,end,clearance=0,limit=1) {
+    const tb=this.trainBoss;
+    if (!tb.active || !tb.stageMode || zoneOf(start[0])!==0) return null;
+    const dx=end[0]-start[0], dy=end[1]-start[1], dz=end[2]-start[2];
+    const hw=8.2+clearance, hh=1.95+clearance, hd=1.55+clearance;
+    const cx=tb.x, cy=tb.y+1.95, cz=tb.z;
+    const rBound=Math.hypot(hw,hd)+.5;
+    if (Math.max(start[0],end[0])<cx-rBound || Math.min(start[0],end[0])>cx+rBound ||
+        Math.max(start[2],end[2])<cz-rBound || Math.min(start[2],end[2])>cz+rBound ||
+        Math.max(start[1],end[1])<tb.y-clearance || Math.min(start[1],end[1])>tb.y+4.2+clearance) return null;
+    const fx=Math.sin(tb.yaw??0), fz=-Math.cos(tb.yaw??0);
+    const rx=Math.cos(tb.yaw??0), rz=Math.sin(tb.yaw??0);
+    const ox=start[0]-cx, oy=start[1]-cy, oz=start[2]-cz;
+    const lx=ox*fx+oz*fz, ly=oy, lz=ox*rx+oz*rz;
+    const dlx=dx*fx+dz*fz, dly=dy, dlz=dx*rx+dz*rz;
+    let near=0, far=limit??1, axis=1, sign=1;
+    const test=(o,d,h,ax)=>{
+      if (d>-1e-6 && d<1e-6) return o>=-h && o<=h;
+      const inv=1/d, t0=(-h-o)*inv, t1=(h-o)*inv;
+      const enter=t0<t1?t0:t1, leave=t0<t1?t1:t0;
+      if (enter>near) {near=enter;axis=ax;sign=t0<t1?-1:1;}
+      if (leave<far) far=leave;
+      return far>=near;
+    };
+    if (!test(lx,dlx,hw,0) || !test(ly,dly,hh,1) || !test(lz,dlz,hd,2)) return null;
+    if (near<0 || near>=far) return null;
+    const normal=axis===0?[fx*sign,0,fz*sign]:axis===1?[0,sign,0]:[rx*sign,0,rz*sign];
+    return {t:near,position:[start[0]+dx*near,start[1]+dy*near,start[2]+dz*near],normal,trainBoss:tb};
+  }
+
+  blocksTrainBoss(x,y,z,radius,height) {
+    const tb=this.trainBoss;
+    if (!tb.active || !tb.stageMode || zoneOf(x)!==0) return false;
+    if (y>=tb.y+3.9 || y+height<=tb.y-.2) return false;
+    const dx=x-tb.x, dz=z-tb.z;
+    const fx=Math.sin(tb.yaw??0), fz=-Math.cos(tb.yaw??0);
+    const rx=Math.cos(tb.yaw??0), rz=Math.sin(tb.yaw??0);
+    const lx=dx*fx+dz*fz, lz=dx*rx+dz*rz;
+    const cx=lx<-8.1?lx+8.1:lx>8.1?lx-8.1:0;
+    const cz=lz<-1.48?lz+1.48:lz>1.48?lz-1.48:0;
+    return cx*cx+cz*cz<radius*radius;
   }
 
   startTrainBoss(which=null) {
@@ -439,13 +683,15 @@ export class Hazards {
       if (a.down>0) continue;
       if (isCabin(a.x) && sameLevel(a.x,rail.line.cabinX) || !rail.metro && a.ride) rail.unboard(a,true);
     }
-    const p0=rail.pose();
-    this.trainBoss={active:true,rail:railKey,name,hp:maxHp,maxHp,until:b.elapsed+TRAIN_BOSS_DURATION,fire:1.0,
-      x:p0.ox,y:p0.y,z:p0.oz};
+    const sx=-38, sz=0, sy=b.world.floor(sx,sz).y;
+    this.trainBoss={
+      active:true,rail:railKey,name,hp:maxHp,maxHp,until:b.elapsed+TRAIN_BOSS_DURATION,fire:1.0,shock:b.elapsed+1.8,
+      stageMode:true,pathT:0,yaw:Math.PI*.5,pitch:0,roll:0,speed:24,x:sx,y:sy,z:sz
+    };
     this.trainHits.clear();
     this.nextTrainBoss=b.elapsed+TRAIN_BOSS_INTERVAL;
-    this.announce('⚠ '+name+' が暴走・敵ボス化！攻撃して鎮圧せよ！',5.0,'boss');
-    b.events.unshift({label:'⚠ '+name+' 暴走・ボス化',team:-1,until:b.clock+4.5});
+    this.announce('⚠ '+name+' がステージ上に暴走侵入！蹂躙攻撃に警戒せよ！',5.4,'boss');
+    b.events.unshift({label:'⚠ '+name+' ステージ上へ侵入・暴走！',team:-1,until:b.clock+4.8});
     b.events.length=Math.min(b.events.length,4);
     return this.trainBoss;
   }
@@ -459,8 +705,9 @@ export class Hazards {
     this.trainHits.clear();
     if (defeated) {
       rail.derail('暴走鎮圧・緊急停止');
-      b.burst([tb.x,tb.y+2.2,tb.z],source?.team ?? -1,36,6.5);
-      this.announce('✦ '+tb.name+' を鎮圧した！',4.8,'bossDown');
+      b.burst([tb.x,tb.y+2.2,tb.z],source?.team ?? -1,44,8.0);
+      b.abilities.rings.push({x:tb.x,y:tb.y+.1,z:tb.z,r:9.5,team:source?.team??0,until:b.clock+.75});
+      this.announce('✦ '+tb.name+' をステージ上で鎮圧した！',4.8,'bossDown');
       b.events.unshift({label:(source?.name ?? '鎮圧')+'  ▸  '+tb.name,team:source?.team ?? -1,until:b.clock+4.5});
       b.events.length=Math.min(b.events.length,4);
       if (source) source.kills++;
@@ -493,55 +740,96 @@ export class Hazards {
       this.stopTrainBoss(false);
       return;
     }
-    const rail=this.trainBossRail(), pose=rail.pose(), origin=[pose.ox,pose.y,pose.oz];
-    tb.x=origin[0]; tb.y=origin[1]; tb.z=origin[2];
-    // Crush & knock back any fighter close to the runaway train hull.
+    const rail=this.trainBossRail();
+    if (rail?.train) {
+      rail.train.berserk=true;
+      rail.train.stop=0;
+      rail.train.speed=Math.max(rail.train.speed??0,24);
+    }
+    // Sweep across the surface arena plaza along a dynamic high-speed rampage figure-8 loop!
+    tb.pathT=(tb.pathT??0)+dt*.52;
+    const tx=-Math.cos(tb.pathT)*38, tz=Math.sin(tb.pathT*2)*18.5;
+    const dvx=Math.sin(tb.pathT)*38*.52, dvz=Math.cos(tb.pathT*2)*37*.52;
+    const yaw=Math.atan2(dvx,-dvz);
+    const ty=b.world.floor(tx,tz).y;
+    const fx=Math.sin(yaw), fz=-Math.cos(yaw);
+    const fFloor=b.world.floor(tx+fx*4.2,tz+fz*4.2).y, bFloor=b.world.floor(tx-fx*4.2,tz-fz*4.2).y;
+    tb.x=tx; tb.y=ty; tb.z=tz; tb.yaw=yaw; tb.speed=Math.hypot(dvx,dvz);
+    tb.pitch=clamp(Math.atan2(fFloor-bFloor,8.4),-.24,.24);
+    tb.roll=Math.sin(b.clock*16)*.06;
+    tb.stageMode=true;
+
+    const shooter={team:-1,name:tb.name,isBoss:true};
+    // Bulldoze & shatter breakables/vehicles along cowcatcher front!
+    const noseX=tb.x+fx*8.4, noseZ=tb.z+fz*8.4;
+    b.stage?.damageArea(b,shooter,noseX,tb.y+.6,noseZ,3.8,240);
+    b.vehicles?.damageArea(noseX,tb.y+.5,noseZ,3.4,140,shooter);
+    if (b.paint.hasSurface(tb.x,tb.z,0)) b.paint.kick(tb.x,tb.z,0,fx*10,fz*10);
+
+    // Crush, stomp & knock airborne any fighter near the rampaging locomotive hull!
     const victims=[...b.actors,...b.raiders.live()];
     let target=null, bestDist=TRAIN_BOSS_WEAPON.range;
+    const rx=Math.cos(yaw), rz=Math.sin(yaw);
     for (const a of victims) {
-      if (a.down>0 || a.ride || a.lift || !sameLevel(a.x,origin[0])) continue;
-      const local=pose.pose.local([a.x,a.y+.8,a.z]);
-      if (Math.abs(local[0])<9.8 && Math.abs(local[2])<2.55 && local[1]>-.6 && local[1]<4.3) {
+      if (a.down>0 || a.ride || a.lift || zoneOf(a.x)!==0) continue;
+      const dx=a.x-tb.x, dz=a.z-tb.z;
+      const lx=dx*fx+dz*fz, lz=dx*rx+dz*rz;
+      if (Math.abs(lx)<9.2 && Math.abs(lz)<2.45 && a.y>=tb.y-.8 && a.y<=tb.y+4.4) {
         const lastHit=this.trainHits.get(a) ?? -99;
-        if (b.clock-lastHit>=.85) {
+        if (b.clock-lastHit>=.75) {
           this.trainHits.set(a,b.clock);
-          const side=local[2]>=0?1:-1;
-          const push=pose.pose.rotate(0,0,side*2.6);
-          b.stepActor(a,push[0],push[2]);
-          b.damage(a,95,null,[a.x,a.y+.9,a.z],'trainBoss');
+          const side=lz>=0?1:-1;
+          b.stepActor(a,(rx*side*2.6+fx*2.0),(rz*side*2.6+fz*2.0));
+          a.vy=Math.max(a.vy??0,6.8);
+          b.damage(a,115,null,[a.x,a.y+.9,a.z],'trainBoss');
+          b.burst([a.x,a.y+.9,a.z],-1,14,4.2);
         }
       }
       if (a.shield<=0) {
-        const dist=Math.hypot(a.x-origin[0],a.y+.9-(origin[1]+3.1),a.z-origin[2]);
+        const dist=Math.hypot(a.x-tb.x,a.y+.9-(tb.y+3.1),a.z-tb.z);
         if (dist<bestDist && dist>3) {bestDist=dist;target=a;}
+      }
+    }
+    // Cowcatcher shockwave smash while charging!
+    if (b.elapsed>=(tb.shock??0)) {
+      tb.shock=b.elapsed+2.4;
+      b.abilities.rings.push({x:noseX,y:tb.y+.08,z:noseZ,r:8.2,team:1,until:b.clock+.6});
+      b.burst([noseX,tb.y+.8,noseZ],1,18,5.8);
+      for (const a of victims) {
+        if (a.down>0 || a.ride || a.lift || zoneOf(a.x)!==0) continue;
+        const d=Math.hypot(a.x-noseX,a.z-noseZ);
+        if (d<8.2 && Math.abs(a.y-tb.y)<3.8) {
+          const inv=1/Math.max(.3,d);
+          b.stepActor(a,(a.x-noseX)*inv*2.2,(a.z-noseZ)*inv*2.2);
+          b.damage(a,64*(1-.45*(d/8.2)),null,[a.x,a.y+.9,a.z],'trainBoss');
+        }
       }
     }
     tb.fire-=dt;
     if (target && tb.fire<=0) {
-      const from=[origin[0],origin[1]+3.55,origin[2]];
-      const to=[target.x,target.y+.9,target.z];
+      const from=[tb.x,tb.y+3.85,tb.z];
+      const to=[target.x+(target.vx??0)*.25,target.y+.9,target.z+(target.vz??0)*.25];
       const dir=unit(sub(to,from));
-      const shooter={team:-1,name:tb.name,isBoss:true};
       b.shots.push({pos:from,vel:scale(dir,TRAIN_BOSS_WEAPON.speed),actor:shooter,weapon:TRAIN_BOSS_WEAPON,power:1,age:0,
-        bend:null,homing:{...TRAIN_BOSS_WEAPON.homing},life:1.4,id:++b.shotSequence});
-      b.burst(from,-1,8,3.2);
+        bend:null,homing:{...TRAIN_BOSS_WEAPON.homing},life:1.5,id:++b.shotSequence});
+      b.burst(from,-1,10,3.6);
       tb.fire=TRAIN_BOSS_WEAPON.delay;
     }
   }
 
-  // ---- God of Destruction Goat (破壊神ゴート: 圧倒的体力・浮遊・8本の腕で無差別蹂躙) ----
+  // ---- God of Destruction Goat (破壊神ゴート: 圧倒的体力・浮遊・16本の極太触手・50m全域射程・高度戦術AI) ----
   spawnGoat(duration=GOAT_DURATION) {
     const b=this.battle, g=this.goat;
     const maxHp=b.teamSize===8?18000:12000;
     Object.assign(g,{
       active:true,hp:maxHp,maxHp,phase:1,
       x:0,y:GOAT_HOVER_Y+2.4,z:-4,yaw:Math.PI,vx:0,vz:0,
-      until:b.elapsed+duration,nextAttack:b.clock+1.5,volley:0,cast:null,arms:GOAT_ARMS
+      until:b.elapsed+duration,nextAttack:b.clock+1.5,volley:0,lastCastKind:null,cast:null,arms:GOAT_ARMS
     });
     this.nextGoat=b.elapsed+GOAT_INTERVAL;
     b.burst([g.x,g.y,g.z],-1,44,7.5);
-    this.announce('⚠ 破壊神ゴート降臨！宙を舞う8本の腕が敵味方関係なく蹂躙する！',5.5,'boss');
-    b.events.unshift({label:'⚠ 破壊神ゴート降臨（HP '+maxHp+'）',team:-1,until:b.clock+5.0});
+    this.announce('⚠ 破壊神ゴート降臨！16本の極太触手が50m全域を賢く狩り尽くす！',5.5,'boss');
+    b.events.unshift({label:'⚠ 破壊神ゴート降臨（HP '+maxHp+' · 16本触手/50m）',team:-1,until:b.clock+5.0});
     b.events.length=Math.min(b.events.length,4);
     return g;
   }
@@ -563,7 +851,7 @@ export class Hazards {
       if (source && source.team>=0) source.kills++;
     } else if (nextPhase!==g.phase) {
       g.phase=nextPhase;
-      this.announce(nextPhase===3?'⚠ 破壊神ゴート【破滅形態】！8本の腕が極限暴走！':'⚠ 破壊神ゴートが激昂した！',4.0,'boss');
+      this.announce(nextPhase===3?'⚠ 破壊神ゴート【破滅形態】！16本の触手が50m全域で極限暴走！':'⚠ 破壊神ゴートが激昂した！',4.0,'boss');
     }
     return lost;
   }
@@ -571,37 +859,63 @@ export class Hazards {
   planGoatAttack(targets) {
     const b=this.battle, g=this.goat, phase=g.phase, clock=b.clock;
     const turn=g.volley++;
-    const pick=turn%3;
-    if (pick===0) {
-      // 8-Arm Annihilation Smash: all 8 arms strike up to 8 targets/spots simultaneously!
-      const near=targets.filter(a=>Math.hypot(a.x-g.x,a.z-g.z)<=GOAT_REACH+2)
-        .sort((a,c)=>b.hnv1?b.hnv1.scoreTarget(g,a,b.hnv1.mind(g).lastTarget)-b.hnv1.scoreTarget(g,c,b.hnv1.mind(g).lastTarget):
-          Math.hypot(a.x-g.x,a.z-g.z)-Math.hypot(c.x-g.x,c.z-g.z));
+    const mind=b.hnv1?b.hnv1.mind(g):null;
+    const ranked=targets.filter(a=>Math.hypot(a.x-g.x,a.z-g.z)<=GOAT_REACH)
+      .sort((a,c)=>b.hnv1?b.hnv1.scoreTarget(g,a,mind?.lastTarget)-b.hnv1.scoreTarget(g,c,mind?.lastTarget):
+        Math.hypot(a.x-g.x,a.z-g.z)-Math.hypot(c.x-g.x,c.z-g.z));
+    const whirlR=Math.min(GOAT_REACH,22+phase*9);
+    let closeCount=0, airborneCount=0, fastCount=0;
+    for (const a of ranked) {
+      const d=Math.hypot(a.x-g.x,a.z-g.z);
+      if (d<=whirlR*.72) closeCount++;
+      if (a.airborne || a.y>(b.world.floor(a.x,a.z).y+1.4)) airborneCount++;
+      if (Math.hypot(a.vx??0,a.vz??0)>5.2) fastCount++;
+    }
+
+    // Smart tactical selection: match attack shape to target geometry & dodge history
+    let pick='smash';
+    if (ranked.length===0) pick='barrage';
+    else if (closeCount>=2 && g.lastCastKind!=='whirl') pick='whirl';
+    else if ((fastCount+airborneCount>=Math.ceil(ranked.length*.55) && g.lastCastKind!=='barrage') || (turn%4===2)) pick='barrage';
+    else if (g.lastCastKind==='smash' && (closeCount>=2 || (closeCount===ranked.length && closeCount>=1))) pick='whirl';
+    g.lastCastKind=pick;
+
+    if (pick==='smash') {
+      // 16-Tentacle Tactical Pinpoint + Flank Trap Smash up to 50m reach!
       const points=[];
+      const leadAnchor=ranked[0] ?? targets[0];
       for (let i=0;i<GOAT_ARMS;i++) {
-        const t=near[i];
         let px, pz;
-        if (t) {
+        if (i<ranked.length) {
+          const t=ranked[i];
           const pred=b.hnv1?b.hnv1.predictAim(g,t,GOAT_WEAPON):null;
-          px=clamp(pred?pred[0]:t.x+(t.vx??0)*.22,-51,51);
-          pz=clamp(pred?pred[2]:t.z+(t.vz??0)*.22,-32,32);
+          px=clamp(pred?pred[0]:t.x+(t.vx??0)*.34,-52,52);
+          pz=clamp(pred?pred[2]:t.z+(t.vz??0)*.34,-34,34);
+        } else if (leadAnchor) {
+          // Spare tentacles surround & cut off escape vectors around priority targets!
+          const t=ranked[i%Math.max(1,ranked.length)] ?? leadAnchor;
+          const ringSlot=Math.floor(i/Math.max(1,ranked.length));
+          const escAng=Math.atan2(t.vz??0,t.vx??0)+(ringSlot-1.5)*0.95+i*0.4;
+          const cutRad=Math.min(6.2,3.4+ringSlot*1.4);
+          px=clamp(t.x+Math.cos(escAng)*cutRad,-52,52);
+          pz=clamp(t.z+Math.sin(escAng)*cutRad,-34,34);
         } else {
-          const ang=i*TAU/GOAT_ARMS+g.yaw, rad=5.5+(i%2)*4.5;
-          px=clamp(g.x+Math.cos(ang)*rad,-51,51);
-          pz=clamp(g.z+Math.sin(ang)*rad,-32,32);
+          const ang=i*TAU/GOAT_ARMS+g.yaw, rad=10+(i%4)*9.5;
+          px=clamp(g.x+Math.cos(ang)*rad,-52,52);
+          pz=clamp(g.z+Math.sin(ang)*rad,-34,34);
         }
         const py=b.world.floor(px,pz).y;
         points.push([px,py,pz]);
       }
-      g.cast={kind:'smash',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.55,end:clock+1.15,done:false,points};
-    } else if (pick===1) {
-      // 360-degree 8-Arm Void Whirlwind Sweep!
-      g.cast={kind:'whirl',x:g.x,z:g.z,start:clock,at:clock+.48,end:clock+1.22,done:false,radius:12.5+phase*1.1,yaw:g.yaw};
+      g.cast={kind:'smash',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.52,end:clock+1.12,done:false,points};
+    } else if (pick==='whirl') {
+      // 360-degree 16-Tentacle Colossal Void Whirlwind Sweep!
+      g.cast={kind:'whirl',x:g.x,z:g.z,start:clock,at:clock+.46,end:clock+1.18,done:false,radius:whirlR,yaw:g.yaw};
     } else {
-      // 8-Arm Ruin Barrage: launches 8 homing destruction orbs from all 8 palms!
-      g.cast={kind:'barrage',x:g.x,z:g.z,radius:10,start:clock,at:clock+.42,end:clock+.95,done:false,yaw:g.yaw};
+      // 16-Tentacle Smart Homing Ruin Barrage covering full 50m range!
+      g.cast={kind:'barrage',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.40,end:clock+.94,done:false,yaw:g.yaw};
     }
-    g.nextAttack=clock+(phase===3?1.35:phase===2?1.8:2.3);
+    g.nextAttack=clock+(phase===3?1.25:phase===2?1.68:2.12);
   }
 
   resolveGoatCast(targets) {
@@ -611,43 +925,44 @@ export class Hazards {
       const dmg=125+g.phase*15;
       for (const [px,py,pz] of cast.points) {
         b.burst([px,py+.35,pz],-1,12,4.4);
-        b.abilities.rings.push({x:px,y:py+.06,z:pz,r:3.4,team:1,until:b.clock+.55});
-        b.stage.damageArea(b,g,px,py,pz,3.2,dmg*.8);
+        b.abilities.rings.push({x:px,y:py+.06,z:pz,r:3.8,team:1,until:b.clock+.55});
+        b.stage.damageArea(b,g,px,py,pz,3.6,dmg*.85);
         for (const a of targets) {
           const d=Math.hypot(a.x-px,a.z-pz);
-          if (d>3.35 || Math.abs(a.y-py)>2.9) continue;
+          if (d>3.75 || Math.abs(a.y-py)>3.1) continue;
           const nx=(a.x-g.x)/Math.max(.3,Math.hypot(a.x-g.x,a.z-g.z));
           const nz=(a.z-g.z)/Math.max(.3,Math.hypot(a.x-g.x,a.z-g.z));
-          b.stepActor(a,nx*2.4,nz*2.4);
+          b.stepActor(a,nx*2.6,nz*2.6);
           b.damage(a,dmg,g,[a.x,a.y+.9,a.z],'goat');
         }
       }
     } else if (cast.kind==='whirl') {
       const rad=cast.radius, dmg=115+g.phase*16;
       b.abilities.rings.push({x:g.x,y:b.world.floor(g.x,g.z).y+.08,z:g.z,r:rad,team:1,until:b.clock+.65});
-      b.stage.damageArea(b,g,g.x,b.world.floor(g.x,g.z).y,g.z,rad*.75,dmg*.7);
+      b.stage.damageArea(b,g,g.x,b.world.floor(g.x,g.z).y,g.z,Math.min(18,rad*.45),dmg*.7);
       for (const a of targets) {
         const dx=a.x-g.x, dz=a.z-g.z, d=Math.hypot(dx,dz);
         if (d>rad) continue;
         const inv=1/Math.max(.3,d);
-        b.stepActor(a,dx*inv*3.1,dz*inv*3.1);
+        b.stepActor(a,dx*inv*3.4,dz*inv*3.4);
         b.damage(a,dmg,g,[a.x,a.y+.9,a.z],'goat');
       }
     } else if (cast.kind==='barrage') {
+      const mind=b.hnv1?b.hnv1.mind(g):null;
       const sorted=targets.slice().sort((a,c)=>b.hnv1
-        ?b.hnv1.scoreTarget(g,a,b.hnv1.mind(g).lastTarget)-b.hnv1.scoreTarget(g,c,b.hnv1.mind(g).lastTarget)
+        ?b.hnv1.scoreTarget(g,a,mind?.lastTarget)-b.hnv1.scoreTarget(g,c,mind?.lastTarget)
         :Math.hypot(a.x-g.x,a.z-g.z)-Math.hypot(c.x-g.x,c.z-g.z));
       for (let i=0;i<GOAT_ARMS;i++) {
         const ang=g.yaw+i*TAU/GOAT_ARMS;
-        const from=[g.x+Math.cos(ang)*2.3,g.y+1.4+(i%2)*.55,g.z+Math.sin(ang)*2.3];
+        const from=[g.x+Math.cos(ang)*2.7,g.y+1.4+(i%3)*.48,g.z+Math.sin(ang)*2.7];
         const tgt=sorted.length?sorted[i%sorted.length]:null;
         const to=tgt?(b.hnv1?b.hnv1.predictAim(g,tgt,GOAT_WEAPON):[tgt.x,tgt.y+.9,tgt.z])
-          :[g.x+Math.cos(ang)*20,b.world.floor(g.x,g.z).y+.6,g.z+Math.sin(ang)*20];
+          :[g.x+Math.cos(ang)*38,b.world.floor(g.x,g.z).y+.6,g.z+Math.sin(ang)*38];
         const dir=unit(sub(to,from));
         b.shots.push({pos:from,vel:scale(dir,GOAT_WEAPON.speed),actor:g,weapon:GOAT_WEAPON,power:1,age:0,
-          bend:null,homing:{...GOAT_WEAPON.homing},life:1.75,id:++b.shotSequence});
+          bend:null,homing:{...GOAT_WEAPON.homing},life:2.15,id:++b.shotSequence});
       }
-      b.burst([g.x,g.y+1.5,g.z],-1,20,5.2);
+      b.burst([g.x,g.y+1.5,g.z],-1,28,6.2);
     }
   }
 
@@ -662,7 +977,7 @@ export class Hazards {
       return;
     }
     const targets=[...b.actors,...b.raiders.live()].filter(a=>a.down<=0 && !a.ride && !a.lift && zoneOf(a.x)===0);
-    // HNV1 Apex Deity Intelligence: hunts clustered fighters & active threats of either team!
+    // Smart Apex Intelligence: target densest threat cluster & weave around incoming specials/trains!
     let focus=b.hnv1?b.hnv1.pickApexTarget(g,targets,dt):null;
     if (!focus) {
       let best=Infinity;
@@ -671,28 +986,45 @@ export class Hazards {
         if (d<best) {best=d;focus=a;}
       }
     }
-    const speed=g.phase===3?8.6:g.phase===2?7.2:5.8;
+    // Hazard & special avoidance force (e.g. evading tsunami wave, express train, prism beams, oncoming fire)
+    let evadeX=0, evadeZ=0;
+    for (const a of targets) {
+      if (a.beaming || a.charge>.45) {
+        const dx=g.x-a.x, dz=g.z-a.z, d=Math.hypot(dx,dz);
+        if (d<24 && d>.2) {evadeX+=-dz/d*4.2; evadeZ+=dx/d*4.2;}
+      }
+    }
+    if (this.tsunami?.phase==='wave') {
+      const td=Math.abs(g.x-this.tsunami.x);
+      if (td<this.tsunami.width) evadeZ+=(g.z>=0?1:-1)*5.5;
+    }
+    const speed=g.phase===3?9.4:g.phase===2?7.9:6.4;
     if (focus) {
-      const dx=focus.x-g.x, dz=focus.z-g.z, d=Math.max(.01,Math.hypot(dx,dz));
-      g.yaw=Math.atan2(dx,-dz);
-      if (d>6.5) {
-        g.vx=dx/d*speed;
-        g.vz=dz/d*speed;
+      // Aim smoothly toward predicted target intercept while circling centroid at optimal standoff (~11m)
+      const leadX=focus.x+(focus.vx??0)*.35, leadZ=focus.z+(focus.vz??0)*.35;
+      const dx=leadX-g.x, dz=leadZ-g.z, d=Math.max(.01,Math.hypot(dx,dz));
+      const targetYaw=Math.atan2(dx,-dz);
+      let dYaw=targetYaw-g.yaw;
+      while (dYaw>Math.PI) dYaw-=TAU; while (dYaw<-Math.PI) dYaw+=TAU;
+      g.yaw+=dYaw*clamp(dt*6.5,0,1);
+      if (d>11.5) {
+        g.vx=dx/d*speed+evadeX;
+        g.vz=dz/d*speed+evadeZ;
       } else {
-        // Orbit menacingly overhead while tearing apart nearby fighters.
-        g.vx=-dz/d*speed*.65;
-        g.vz=dx/d*speed*.65;
+        const pull=(d-8.5)*.35;
+        g.vx=(-dz/d*.75+dx/d*pull)*speed+evadeX;
+        g.vz=(dx/d*.75+dz/d*pull)*speed+evadeZ;
       }
     } else {
-      g.yaw+=dt*.8;
-      g.vx=Math.sin(g.yaw)*speed*.45;
-      g.vz=-Math.cos(g.yaw)*speed*.45;
+      g.yaw+=dt*.85;
+      g.vx=Math.sin(g.yaw)*speed*.45+evadeX;
+      g.vz=-Math.cos(g.yaw)*speed*.45+evadeZ;
     }
     g.x=clamp(g.x+g.vx*dt,-48,48);
     g.z=clamp(g.z+g.vz*dt,-29,29);
     const floor=b.world.floor(g.x,g.z).y;
-    const hoverTarget=floor+GOAT_HOVER_Y+Math.sin(b.clock*2.6)*.55;
-    g.y=g.y+(hoverTarget-g.y)*clamp(dt*4.2,0,1);
+    const hoverTarget=floor+GOAT_HOVER_Y+(focus?.airborne?1.1:0)+Math.sin(b.clock*2.6)*.55;
+    g.y=g.y+(hoverTarget-g.y)*clamp(dt*4.5,0,1);
     if (g.cast) {
       if (!g.cast.done && b.clock>=g.cast.at) this.resolveGoatCast(targets);
       if (b.clock>=g.cast.end) g.cast=null;
@@ -704,6 +1036,7 @@ export class Hazards {
   update(dt) {
     this.updateSnipers(dt);
     this.updateRogueDrones(dt);
+    this.updateHeli(dt);
     this.updateRain(dt);
     this.updateTsunamiAndFlood(dt);
     this.updateTrainBoss(dt);
@@ -713,15 +1046,16 @@ export class Hazards {
   // ---- Serialization for Cloudflare frames and checkpoints ----
   snapshot(zone,mergeStairs=false) {
     const near=x=>{const l=zoneOf(x); return l===zone || mergeStairs && l<2;};
-    const g=this.goat;
-    return {
+    const g=this.goat, tb=this.trainBoss, h=this.heli;
+    const out={
       alert:this.alert,alertUntil:this.alertUntil,
       rain:this.rain.active,
       tsunami:this.tsunami.phase==='idle'?null:{phase:this.tsunami.phase,x:Math.round(this.tsunami.x*100)/100,height:this.tsunami.height,width:this.tsunami.width},
       underFlood:this.underFlood.active?{phase:this.underFlood.phase,depth:Math.round(this.underFlood.depth*100)/100}:null,
-      trainBoss:this.trainBoss.active?{active:true,rail:this.trainBoss.rail,name:this.trainBoss.name,
-        hp:Math.round(this.trainBoss.hp*100)/100,maxHp:this.trainBoss.maxHp,
-        x:Math.round(this.trainBoss.x*100)/100,y:Math.round(this.trainBoss.y*100)/100,z:Math.round(this.trainBoss.z*100)/100}:null,
+      trainBoss:tb.active?{active:true,rail:tb.rail,name:tb.name,stageMode:!!tb.stageMode,
+        hp:Math.round(tb.hp*100)/100,maxHp:tb.maxHp,
+        x:Math.round(tb.x*100)/100,y:Math.round(tb.y*100)/100,z:Math.round(tb.z*100)/100,
+        yaw:Math.round((tb.yaw??0)*100)/100,pitch:Math.round((tb.pitch??0)*100)/100}:null,
       goat:g.active?{active:true,name:g.name,hp:Math.round(g.hp*100)/100,maxHp:g.maxHp,phase:g.phase,
         x:Math.round(g.x*100)/100,y:Math.round(g.y*100)/100,z:Math.round(g.z*100)/100,yaw:Math.round(g.yaw*100)/100,
         cast:near(g.x)?g.cast:null}:null,
@@ -732,6 +1066,17 @@ export class Hazards {
         id:d.id,x:d.x,y:d.y,z:d.z,yaw:d.yaw,hp:d.hp,maxHp:d.maxHp,flash:d.flash,aim:d.aim,active:true
       }))
     };
+    if (h.active) out.heli={
+      active:true,name:h.name,hp:Math.round(h.hp*100)/100,maxHp:h.maxHp,
+      x:Math.round(h.x*100)/100,y:Math.round(h.y*100)/100,z:Math.round(h.z*100)/100,
+      yaw:Math.round(h.yaw*100)/100,pitch:Math.round((h.pitch??0)*100)/100,roll:Math.round((h.roll??0)*100)/100,
+      rotor:Math.round(h.rotor*100)/100
+    };
+    if (this.missiles.length && (zone===0 || mergeStairs)) {
+      out.missiles=this.missiles.slice(0,12).map(m=>[Math.round(m.x*20)/20,Math.round(m.y*20)/20,Math.round(m.z*20)/20,
+        Math.round(m.vx*10)/10,Math.round(m.vy*10)/10,Math.round(m.vz*10)/10]);
+    }
+    return out;
   }
 
   applySnapshot(data) {
@@ -742,6 +1087,8 @@ export class Hazards {
     this.tsunami=data.tsunami?{...this.tsunami,...data.tsunami}:{...this.tsunami,phase:'idle'};
     this.underFlood=data.underFlood?{...this.underFlood,active:true,...data.underFlood}:{...this.underFlood,active:false,phase:'idle',depth:0};
     this.trainBoss=data.trainBoss?{...this.trainBoss,...data.trainBoss}:{...this.trainBoss,active:false};
+    this.heli=data.heli?{...this.heli,...data.heli}:{...this.heli,active:false};
+    this.missiles=Array.isArray(data.missiles)?data.missiles.map((m,i)=>({id:i,x:m[0],y:m[1],z:m[2],vx:m[3],vy:m[4],vz:m[5]})):[];
     this.goat=data.goat?{...this.goat,...data.goat}:{...this.goat,active:false,cast:null};
     this.snipers=data.snipers??[];
     this.rogueDrones=data.rogueDrones??[];
@@ -749,10 +1096,13 @@ export class Hazards {
 
   checkpoint() {
     const {weapon:_gw,...goatData}=this.goat;
+    const {weapon:_hw,...heliData}=this.heli;
     return {
-      seed:this.rng.state(),sniperWave:this.sniperWave,droneWave:this.droneWave,trainBossCount:this.trainBossCount,
+      seed:this.rng.state(),sniperWave:this.sniperWave,droneWave:this.droneWave,heliWave:this.heliWave,trainBossCount:this.trainBossCount,
+      droneSpawnsLeft:this.droneSpawnsLeft,droneSpawnTimer:this.droneSpawnTimer,
       nextSniper:this.nextSniper,sniperRetreatAt:this.sniperRetreatAt,
       nextDrone:this.nextDrone,droneRetreatAt:this.droneRetreatAt,
+      nextHeli:this.nextHeli,heli:structuredClone(heliData),missiles:structuredClone(this.missiles),
       nextRain:this.nextRain,rain:{...this.rain},
       nextTsunami:this.nextTsunami,tsunami:{...this.tsunami},
       underFlood:{...this.underFlood},
@@ -768,14 +1118,17 @@ export class Hazards {
     if (!data) return;
     const b=this.battle;
     if (Number.isInteger(data.seed)) this.rng=randomGenerator(data.seed);
-    for (const k of ['sniperWave','droneWave','trainBossCount','nextSniper','sniperRetreatAt','nextDrone','droneRetreatAt',
+    for (const k of ['sniperWave','droneWave','heliWave','trainBossCount','droneSpawnsLeft','droneSpawnTimer',
+      'nextSniper','sniperRetreatAt','nextDrone','droneRetreatAt','nextHeli',
       'nextRain','nextTsunami','nextTrainBoss','nextGoat','alert','alertUntil']) {
       if (data[k]!==undefined) this[k]=data[k];
     }
     if (data.rain) this.rain={...data.rain};
     if (data.tsunami) this.tsunami={...data.tsunami};
-    if (data.underFlood) this.underFlood={...data.underFlood};
+    if (data.underFlood) this.underFlood={...this.underFlood};
     if (data.trainBoss) this.trainBoss={...data.trainBoss};
+    if (data.heli) this.heli={...this.heli,...structuredClone(data.heli),weapon:HELI_MISSILE_WEAPON};
+    this.missiles=structuredClone(data.missiles??[]);
     if (data.goat) this.goat={...this.goat,...structuredClone(data.goat),weapon:GOAT_WEAPON};
     this.snipers=(data.snipers??[]).map(s=>{const copy={...structuredClone(s),weapon:SNIPER_WEAPON};b.hnv1?.mind(copy);return copy;});
     this.rogueDrones=(data.rogueDrones??[]).map(d=>{const copy={...structuredClone(d),weapon:ROGUE_DRONE_WEAPON};b.hnv1?.mind(copy);return copy;});
@@ -786,7 +1139,7 @@ export class Hazards {
   drawGoat(r,now) {
     const g=this.goat;
     if (!g.active) return;
-    const lite=!!r.lite || !!r.ultra;
+    const lite=!!r.lite || !!r.ultralite;
     const yaw=Math.PI-g.yaw, cy=Math.cos(yaw), sy=Math.sin(yaw);
     const gx=g.x, gy=g.y, gz=g.z;
     const breath=1+Math.sin(now*3.8)*.045;
@@ -853,67 +1206,67 @@ export class Hazards {
       }
     }
 
-    // 8 Articulated Divine Arms with Pauldrons, Bracer Rings, Glowing Palms & 3-Claw Fingers!
+    // 16 Thick Articulated Divine Tentacles in twin tiered wings with Pauldrons, Bracer Rings, Glowing Palms & Claws!
     const links=lite?3:5;
     const pts=links===5?_hzPts6:_hzPts4;
     for (let i=0;i<GOAT_ARMS;i++) {
-      const side=i%2===0?-1:1, tier=i>>1;
-      setAt(pts[0],side*(1.08+tier*.14),2.38-tier*.45,-.12);
+      const side=i%2===0?-1:1, row=(i>>1)&3, layerIdx=i>>3;
+      setAt(pts[0],side*(1.05+row*.16+layerIdx*.36),2.55-row*.44+layerIdx*.34,layerIdx===0?.08:-.52);
       const sx0=pts[0][0], sy0=pts[0][1], sz0=pts[0][2];
-      // Ornate gold shoulder pauldron per arm!
-      if (!lite) r.add('bevel',sx0,sy0+.06,sz0,.56,.42,.56,tier%2?gold:armor,4,_hzDynYP);
+      // Ornate gold shoulder pauldron per tentacle!
+      if (!lite) r.add('bevel',sx0,sy0+.08,sz0,.74,.52,.74,(row+layerIdx)%2?gold:armor,4,_hzDynYP);
       let tx, ty, tz;
       if (cast?.kind==='smash' && cast.points?.[i]) {
         const pt=cast.points[i];
         const prog=clamp((now-cast.start)/Math.max(.05,cast.at-cast.start),0,1);
-        // Dramatic skyward wind-up coil, then lightning-fast downward slam!
+        // Dramatic skyward wind-up coil, then lightning-fast downward slam across up to 50m!
         const strike=now>=cast.at?1:prog*prog*.42;
-        const coilLift=now<cast.at?Math.sin(prog*Math.PI)*3.4:0;
+        const coilLift=now<cast.at?Math.sin(prog*Math.PI)*3.8:0;
         tx=sx0+(pt[0]-sx0)*strike;
-        ty=sy0+(pt[1]+.35-sy0)*strike+coilLift;
+        ty=sy0+(pt[1]+.40-sy0)*strike+coilLift;
         tz=sz0+(pt[2]-sz0)*strike;
         if (!cast.done) {
           _hzDynLabel.label=prog;
-          r.add('hazard',pt[0],pt[1]+.05,pt[2],6.6,1,6.6,crimson,24,_hzDynLabel);
+          r.add('hazard',pt[0],pt[1]+.05,pt[2],7.4,1,7.4,crimson,24,_hzDynLabel);
         }
       } else if (cast?.kind==='whirl') {
-        const spin=now*12.5+i*TAU/GOAT_ARMS, reach=10.8;
-        tx=gx+Math.cos(spin)*reach; ty=gy+.55+Math.sin(spin*2)*.45; tz=gz+Math.sin(spin)*reach;
+        const spin=now*11.5+i*TAU/GOAT_ARMS, reach=Math.min(26,18+(g.phase??1)*3.5);
+        tx=gx+Math.cos(spin)*reach; ty=gy+.55+Math.sin(spin*2)*.6; tz=gz+Math.sin(spin)*reach;
       } else if (cast?.kind==='barrage') {
         const prog=clamp((now-cast.start)/Math.max(.05,cast.at-cast.start),0,1);
-        const ang=i*TAU/GOAT_ARMS, rad=3.2-prog*.8;
-        setAt(_hzA,Math.cos(ang)*rad,2.2+Math.sin(ang)*1.4,1.9+prog*1.1);
+        const ang=i*TAU/GOAT_ARMS, rad=4.2-prog*.9+(layerIdx*.8);
+        setAt(_hzA,Math.cos(ang)*rad,2.2+Math.sin(ang)*1.7,2.1+prog*1.2);
         tx=_hzA[0]; ty=_hzA[1]; tz=_hzA[2];
       } else {
-        const wave=now*3.5+i*.85;
-        const spread=(1.6+tier*.38)*Math.PI/8;
-        setAt(_hzA,side*(2.65+Math.sin(wave)*.6+tier*.32),2.85-tier*.65+Math.cos(wave*1.3)*.5,1.48+Math.sin(wave*.8+spread)*.8);
+        const wave=now*3.4+i*.68;
+        const spread=(1.4+row*.36+layerIdx*.28)*Math.PI/8;
+        setAt(_hzA,side*(3.0+Math.sin(wave)*.75+row*.38+layerIdx*.65),3.05-row*.58+layerIdx*.55+Math.cos(wave*1.3)*.58,1.55-layerIdx*.5+Math.sin(wave*.8+spread)*.9);
         tx=_hzA[0]; ty=_hzA[1]; tz=_hzA[2];
       }
       for (let j=1;j<links;j++) {
-        const t=j/links, arch=Math.sin(t*Math.PI)*(1.30+(i%2)*.42);
+        const t=j/links, arch=Math.sin(t*Math.PI)*(1.45+(i%2)*.46+layerIdx*.25);
         const pDst=pts[j];
-        pDst[0]=sx0+(tx-sx0)*t+side*cy*arch*.36;
-        pDst[1]=sy0+(ty-sy0)*t+arch*.88;
-        pDst[2]=sz0+(tz-sz0)*t-side*sy*arch*.36;
+        pDst[0]=sx0+(tx-sx0)*t+side*cy*arch*.38;
+        pDst[1]=sy0+(ty-sy0)*t+arch*.92;
+        pDst[2]=sz0+(tz-sz0)*t-side*sy*arch*.38;
       }
       pts[links][0]=tx; pts[links][1]=ty; pts[links][2]=tz;
-      drawTentacle(r,pts,.38,dark,gold,lite?0:crimson);
-      // Glowing palm sigil + golden wrist bracer ring + 3 articulated claw fingers!
-      const palmS=cast?.kind==='barrage'?.72:.56;
+      drawTentacle(r,pts,.62,dark,gold,lite?0:crimson);
+      // Glowing palm sigil + golden wrist bracer ring + 3 thick articulated claw fingers!
+      const palmS=cast?.kind==='barrage'?.92:.76;
       r.add('orb',tx,ty,tz,palmS,palmS,palmS,cast?crimson:gold,3,_hzDyn);
       if (!lite) {
         const wrist=pts[links-1];
-        r.add('ring',wrist[0],wrist[1],wrist[2],.48,.07,.48,gold,4,_hzDyn);
-        const clawSpread=cast?.kind==='barrage'?.44:.30;
+        r.add('ring',wrist[0],wrist[1],wrist[2],.68,.09,.68,gold,4,_hzDyn);
+        const clawSpread=cast?.kind==='barrage'?.56:.40;
         const dx=tx-wrist[0], dy=ty-wrist[1], dz=tz-wrist[2];
         const inv=1/Math.max(.01,Math.hypot(dx,dy,dz));
         const fx=dx*inv, fy=dy*inv, fz=dz*inv;
         for (let c=-1;c<=1;c++) {
-          const cx=tx+fx*.55+c*cy*clawSpread, cy2=ty+fy*.55+(c===0?.24:-.12), cz=tz+fz*.55-c*sy*clawSpread;
+          const cx=tx+fx*.72+c*cy*clawSpread, cy2=ty+fy*.72+(c===0?.30:-.15), cz=tz+fz*.72-c*sy*clawSpread;
           _hzA[0]=tx; _hzA[1]=ty; _hzA[2]=tz;
           _hzB[0]=cx; _hzB[1]=cy2; _hzB[2]=cz;
-          r.beam(_hzA,_hzB,.11,.08,gold,4,_hzDyn);
+          r.beam(_hzA,_hzB,.16,.11,gold,4,_hzDyn);
         }
       }
     }
@@ -923,7 +1276,7 @@ export class Hazards {
   draw(r,viewX,viewZ) {
     const now=this.battle.clock+(this.battle.impactAgeOffset??0);
     const zone=zoneOf(viewX);
-    const lite=!!r.lite || !!r.ultra;
+    const lite=!!r.lite || !!r.ultralite;
     const hasFrustum=typeof r.inFrustum==='function';
 
     // 1. Apartment Snipers (Crouched Tactical Stance, Recoil Kickback, Scope Glint & Pulsing Laser Sight!)
@@ -1006,21 +1359,40 @@ export class Hazards {
       }
     }
 
-    // 3. Rain Streaks & Ripples (Precomputed Static Seeds + Frustum Culled!)
+    // 3. Heavy Torrential Downpour Streaks & Ripples + Boss Crimson-Storm Black Ink Rain
+    const bossActive=!!this.battle.boss?.active && !this.battle.timeless;
     if (this.rain.active && zone===0) {
-      const count=r.ultra?18:r.lite?32:56;
+      const count=r.ultralite?52:r.lite?108:172;
       for (let i=0;i<count;i++) {
         const f1=RAIN_SEEDS[i*2], f2=RAIN_SEEDS[i*2+1];
-        const rx=viewX+(f1-.5)*34, rz=viewZ+(f2-.5)*34;
-        const cycle=(now*2.8+f1*3.7+f2*5.1)%1;
-        const ry=16*(1-cycle);
-        if (hasFrustum && !r.inFrustum(rx,ry,rz,1.8)) continue;
+        const span=i<80?20:42;
+        const rx=viewX+(f1-.5)*span, rz=viewZ+(f2-.5)*span;
+        const cycle=(now*(3.2+(i%3)*.35)+f1*3.7+f2*5.1)%1;
+        const ry=18*(1-cycle);
+        if (hasFrustum && !r.inFrustum(rx,ry,rz,2.4)) continue;
         _hzA[0]=rx; _hzA[1]=ry; _hzA[2]=rz;
-        _hzB[0]=rx+.18; _hzB[1]=ry+1.45; _hzB[2]=rz;
-        r.beam(_hzA,_hzB,.024,.024,0x9fd2f0,3,_hzDyn);
-        if (cycle>.92) {
-          _hzDynLabel.label=(cycle-.92)/.08;
-          r.add('ripple',rx,.04,rz,.95,.02,.95,0x8cc9ec,12,_hzDynLabel);
+        _hzB[0]=rx+.34; _hzB[1]=ry+2.45; _hzB[2]=rz+.14;
+        r.beam(_hzA,_hzB,.034,.030,0xbcdcf0,3,_hzDyn);
+        if (cycle>.90 && (i&1)===0) {
+          _hzDynLabel.label=(cycle-.90)/.10;
+          r.add('ripple',rx,.04,rz,1.2,.02,1.2,0x9fd2f0,12,_hzDynLabel);
+        }
+      }
+    }
+    if (bossActive && zone===0) {
+      const bCount=r.ultralite?20:r.lite?38:56;
+      for (let i=0;i<bCount;i++) {
+        const f1=RAIN_SEEDS[i*2], f2=RAIN_SEEDS[i*2+1];
+        const rx=viewX+(f1-.5)*38, rz=viewZ+(f2-.5)*38;
+        const cycle=(now*3.45+f1*4.3+f2*6.7)%1;
+        const ry=18*(1-cycle);
+        if (hasFrustum && !r.inFrustum(rx,ry,rz,2.0)) continue;
+        _hzA[0]=rx; _hzA[1]=ry; _hzA[2]=rz;
+        _hzB[0]=rx-.12; _hzB[1]=ry+1.75; _hzB[2]=rz+.08;
+        r.beam(_hzA,_hzB,.036,.032,0x0b070e,2,_hzDyn);
+        if (cycle>.90) {
+          _hzDynLabel.label=(cycle-.90)/.10;
+          r.add('ripple',rx,.05,rz,1.15,.03,1.15,0x1a0b15,12,_hzDynLabel);
         }
       }
     }
@@ -1043,7 +1415,7 @@ export class Hazards {
       }
     }
 
-    // 5. Underground Flood Water Surface (B1)
+    // 5. Underground Flood Water Surface & Accumulated Boss Black Ink (B1)
     if (this.underFlood.active && this.underFlood.depth>.05 && zone===1) {
       const wy=UNDER_Y+this.underFlood.depth, cx=ZONES[1].x;
       r.add('box',cx,UNDER_Y+this.underFlood.depth*.5,0,126,this.underFlood.depth,90,0x166d91,9,_hzDyn);
@@ -1054,14 +1426,94 @@ export class Hazards {
         r.add('ripple',cx+ox,wy+.04,oz,4.5,.03,4.5,0x8ed8f2,12,_hzDynLabel);
       }
     }
-
-    // 6. Runaway Train Boss Aura
-    if (this.trainBoss.active && sameLevel(this.trainBoss.x,viewX)) {
-      _hzDynLabel.label=(now*2.2)%1;
-      r.add('ripple',this.trainBoss.x,this.trainBoss.y+.35,this.trainBoss.z,14,.06,14,0xff3040,12,_hzDynLabel);
+    const underBossDepth=this.battle.fluid?.underBossDepth??0;
+    if (zone===1 && (underBossDepth>.012 || bossActive)) {
+      const cx=ZONES[1].x;
+      if (underBossDepth>.012) {
+        const d=underBossDepth, wy=UNDER_Y+d;
+        r.add('box',cx,UNDER_Y+d*.5,0,124,d,88,0x0b080e,9,_hzDyn);
+        const step=r.lite?18:13;
+        for (let ox=-46;ox<=46;ox+=step) for (let oz=-30;oz<=30;oz+=step) {
+          if (hasFrustum && !r.inFrustum(cx+ox,wy,oz,4.5)) continue;
+          _hzDynLabel.label=(now*.42+(ox-oz)*.04)%1;
+          r.add('ripple',cx+ox,wy+.03,oz,3.6,.025,3.6,0x451226,12,_hzDynLabel);
+        }
+      }
+      if (bossActive || (this.battle.fluid?.lastPercolationRate??0)>.05) {
+        for (const dr of STORM_DRAINS) {
+          if (hasFrustum && !r.inFrustum(dr.ux,UNDER_Y+3,dr.uz,3.5)) continue;
+          _hzA[0]=dr.ux; _hzA[1]=UNDER_Y+underBossDepth; _hzA[2]=dr.uz;
+          _hzB[0]=dr.ux; _hzB[1]=UNDER_Y+6.4; _hzB[2]=dr.uz;
+          r.beam(_hzA,_hzB,.09,.12,0x0c0810,2,_hzDyn);
+          _hzDynLabel.label=(now*1.8+dr.ux) % 1;
+          r.add('ripple',dr.ux,UNDER_Y+Math.max(.04,underBossDepth+.03),dr.uz,2.4,.03,2.4,0x350d1d,12,_hzDynLabel);
+        }
+      }
     }
 
-    // 7. God of Destruction Goat (破壊神ゴート)
+    // 6. Stage-Rampaging Armored Runaway Express Boss
+    if (this.trainBoss.active && sameLevel(this.trainBoss.x,viewX)) {
+      const tb=this.trainBoss;
+      _hzDynLabel.label=(now*2.2)%1;
+      r.add('ripple',tb.x,tb.y+.35,tb.z,14,.06,14,0xff3040,12,_hzDynLabel);
+      if (tb.stageMode) {
+        const yw=(tb.yaw??0)-Math.PI*.5, fx=Math.sin(tb.yaw??0), fz=-Math.cos(tb.yaw??0);
+        _hzDynYP.yaw=yw; _hzDynYP.pitch=-(tb.pitch??0);
+        r.add('box',tb.x,tb.y+1.82,tb.z,16.2,3.15,2.92,0x2a1d24,20,_hzDynYP);
+        r.add('bevel',tb.x,tb.y+3.36,tb.z,15.6,.52,2.56,0x3d222b,4,_hzDynYP);
+        r.add('box',tb.x,tb.y+2.05,tb.z,16.26,.40,2.98,0xff2838,3,_hzDynYP);
+        r.add('box',tb.x,tb.y+2.36,tb.z,13.2,.84,3.00,0xff7855,8,_hzDynYP);
+        r.add('box',tb.x,tb.y+.42,tb.z,15.4,.58,2.30,0x191c22,4,_hzDynYP);
+        // Reinforced Cowcatcher Plow & Headlights!
+        r.add('bevel',tb.x+fx*8.45,tb.y+1.05,tb.z+fz*8.45,1.25,1.85,3.25,0x495358,4,_hzDynYP);
+        r.add('orb',tb.x+fx*8.6,tb.y+2.05,tb.z+fz*8.6,.75,.65,.95,0xffea8a,3,_hzDyn);
+        // Roof Missile/Canon Turret
+        r.add('cylinder',tb.x,tb.y+3.82,tb.z,1.35,.55,1.35,0x382a33,4,_hzDyn);
+        r.add('orb',tb.x,tb.y+4.18,tb.z,.62,.62,.62,0xff3048,3,_hzDyn);
+      }
+    }
+
+    // 7. Apartment Rooftop Attack Helicopter & Indiscriminate Multi-Missiles
+    if (zone===0 && this.heli.active) {
+      const h=this.heli;
+      _hzDynYP.yaw=Math.PI-h.yaw; _hzDynYP.pitch=h.pitch??.14;
+      r.add('bevel',h.x,h.y,h.z,2.1,1.55,5.8,0x272a30,20,_hzDynYP);
+      r.add('bevel',h.x,h.y+.12,h.z,2.45,.88,3.2,0x373c44,4,_hzDynYP);
+      const fx=Math.sin(h.yaw), fz=-Math.cos(h.yaw), rx=Math.cos(h.yaw), rz=Math.sin(h.yaw);
+      r.add('orb',h.x+fx*1.9,h.y-.08,h.z+fz*1.9,1.35,.95,1.65,0x7ac8e0,8,_hzDyn);
+      // Tail boom & vertical stabilizer
+      _hzA[0]=h.x-fx*2.2; _hzA[1]=h.y+.15; _hzA[2]=h.z-fz*2.2;
+      _hzB[0]=h.x-fx*5.6; _hzB[1]=h.y+.52; _hzB[2]=h.z-fz*5.6;
+      r.beam(_hzA,_hzB,.28,.14,0x2c3038,4,_hzDyn);
+      r.add('box',_hzB[0],_hzB[1]+.42,_hzB[2],.20,1.05,.72,0xff3448,2,_hzDynYP);
+      // Twin stub wings & 6-tube missile pods + crimson nose searchlight
+      for (const s of [-1,1]) {
+        r.add('box',h.x+rx*s*1.55,h.y-.18,h.z+rz*s*1.55,1.55,.20,.95,0x30353e,4,_hzDynYP);
+        r.add('cylinder',h.x+rx*s*2.05,h.y-.35,h.z+rz*s*2.05,.52,1.15,.52,0x494f58,4,_hzDynYP);
+        r.add('orb',h.x+rx*s*2.05+fx*.65,h.y-.35,h.z+rz*s*2.05+fz*.65,.28,.28,.28,0xff3b30,3,_hzDyn);
+      }
+      r.add('orb',h.x+fx*2.35,h.y-.72,h.z+fz*2.35,.48,.48,.48,0xff4458,3,_hzDyn);
+      // Spinning 4-blade main rotor + tail rotor
+      _hzDynYaw.yaw=h.rotor;
+      r.add('cylinder',h.x,h.y+.92,h.z,.26,.45,.26,0x1d2026,4,_hzDyn);
+      r.add('box',h.x,h.y+1.16,h.z,8.2,.05,.38,0xdbe2e0,4,_hzDynYaw);
+      r.add('box',h.x,h.y+1.16,h.z,.38,.05,8.2,0xdbe2e0,4,_hzDynYaw);
+      _hzDynYaw.yaw=h.rotor*2.4;
+      r.add('box',_hzB[0],_hzB[1]+.42,_hzB[2],.12,1.55,.22,0xff5058,3,_hzDynYaw);
+    }
+    if (zone===0 && this.missiles.length) {
+      for (let i=0;i<this.missiles.length;i++) {
+        const m=this.missiles[i];
+        const inv=1/Math.max(.1,Math.hypot(m.vx,m.vy,m.vz));
+        _hzA[0]=m.x-m.vx*inv*1.1; _hzA[1]=m.y-m.vy*inv*1.1; _hzA[2]=m.z-m.vz*inv*1.1;
+        _hzB[0]=m.x; _hzB[1]=m.y; _hzB[2]=m.z;
+        r.beam(_hzA,_hzB,.14,.11,0xe2e8e4,4,_hzDyn);
+        r.add('orb',m.x,m.y,m.z,.28,.28,.28,0xff4828,3,_hzDyn);
+        r.add('orb',_hzA[0],_hzA[1],_hzA[2],.26,.26,.26,0xffd078,3,_hzDyn);
+      }
+    }
+
+    // 8. God of Destruction Goat (破壊神ゴート)
     if (zone===0 && this.goat.active) this.drawGoat(r,now);
   }
 }
@@ -1075,8 +1527,8 @@ const _hzA=[0,0,0], _hzB=[0,0,0], _hzC=[0,0,0];
 const _hzPts6=[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]];
 const _hzPts4=[[0,0,0],[0,0,0],[0,0,0],[0,0,0]];
 const RAIN_SEEDS=(()=>{
-  const out=new Float32Array(56*2);
-  for (let i=0;i<56;i++) {
+  const out=new Float32Array(180*2);
+  for (let i=0;i<180;i++) {
     const h1=Math.sin(i*12.9898)*43758.5453;
     const h2=Math.sin(i*78.233)*43758.5453;
     out[i*2]=h1-Math.floor(h1);

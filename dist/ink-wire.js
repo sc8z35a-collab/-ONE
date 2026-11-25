@@ -12,12 +12,13 @@ function readTile(paint,layer,tile) {
   let changed=0;
   for (let z=0;z<TILE;z++) for (let x=0;x<TILE;x++) {
     if (px+x>=paint.w || pz+z>=paint.h) continue;
-    const index=layer*paint.layerSize+(pz+z)*paint.w+px+x, pixel=index*4, cell=z*TILE+x;
-    const cyan=paint.pixels[pixel], sum=cyan+paint.pixels[pixel+1];
+    const index=layer*paint.layerSize+(pz+z)*paint.w+px+x, pixel=index*4, cell=z*TILE+x, owner=paint.owner[index];
+    const cyan=paint.pixels[pixel], rawSum=cyan+paint.pixels[pixel+1];
+    const sum=owner===3?255:Math.min(255,rawSum);
     const coverage=Math.round(sum/17);
-    const ratio=coverage?Math.round(cyan/sum*31):0;
+    const ratio=owner===3?16:coverage?Math.round(cyan/sum*31):0;
     const depth=Math.round(paint.pixels[pixel+2]*31/255);
-    const value=values[cell]=(paint.owner[index]<<14)|(coverage<<10)|(ratio<<5)|depth;
+    const value=values[cell]=(owner<<14)|(coverage<<10)|(ratio<<5)|depth;
     if (value===paint.netSent[index]) continue;
     bits[cell>>3]|=1<<(cell&7);
     changed++;
@@ -141,10 +142,15 @@ function writeCell(paint,layer,px,pz,cell,value) {
   if (x>=paint.w || z>=paint.h) return;
   const index=layer*paint.layerSize+z*paint.w+x, p=index*4;
   const owner=value>>14, sum=((value>>10)&15)*17;
-  const cyan=Math.round(sum*((value>>5)&31)/31);
   paint.owner[index]=owner;
-  paint.pixels[p]=cyan;
-  paint.pixels[p+1]=sum-cyan;
+  if (owner===3) {
+    paint.pixels[p]=255;
+    paint.pixels[p+1]=255;
+  } else {
+    const cyan=Math.round(sum*((value>>5)&31)/31);
+    paint.pixels[p]=cyan;
+    paint.pixels[p+1]=sum-cyan;
+  }
   paint.pixels[p+2]=Math.round((value&31)*255/31);
   paint.pixels[p+3]=value?paint.floorByte[index]:0;
   paint.touchRow(layer,z);

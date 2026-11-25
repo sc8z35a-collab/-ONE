@@ -194,7 +194,12 @@ export class Boss {
         if (barrier?.t<.95 || b.subweapons.block(origin,destination,this.team)?.t<.95) continue;
         if (b.damage(actor,a.damage,null,destination,'boss')) a.hit.push(key);
       }
-      if (a.done && a.kind!=='sweep') b.stage.damageArea(b,this,a.x,a.y,a.z,a.radius,a.damage*.68);
+      if (a.done && a.kind!=='sweep') {
+        b.stage.damageArea(b,this,a.x,a.y,a.z,a.radius,a.damage*.68);
+        b.stage?.destruction?.applySplashDamage(a.x,a.y,a.z,a.radius*1.45,a.damage*2.2,2,26);
+        b.paint?.stamp(a.x,a.z,a.radius*.78,2,0,b.clock,.055);
+        b.fluid?.splatFluidImpulse(a.x,a.z,0,0,2.4,2);
+      }
     }
     this.attacks=this.attacks.filter(a=>{
       const timing=BOSS_ATTACK_TIMING[a.kind]??BOSS_ATTACK_TIMING.mortar;

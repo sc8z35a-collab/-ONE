@@ -121,9 +121,13 @@ export function buildStreetFacilities(world) {
   const r=world.r;
   for (const [index,s] of STREET_FACILITIES.entries()) {
     const {id,label,x,z,w,d,h,tint}=s, sign=z>0?-1:1, yaw=sign===1?0:Math.PI, front=d*.5;
+    const shopObs=[];
     const p=(type,dx,y,dz,width,height,depth,color,kind=2,solid=false,opts={})=>{
       r.add(type,x+dx*sign,y,z+dz*sign,width,height,depth,color,kind,{...opts,yaw});
-      if (solid) world.obstacle(x+dx*sign,y,z+dz*sign,width,height,depth);
+      if (solid) {
+        const ob=world.obstacle(x+dx*sign,y,z+dz*sign,width,height,depth);
+        if (ob) shopObs.push(ob);
+      }
     };
     const open=id!=='kiosk', doorway=id==='super'?1.87:id==='convenience'?1.51:1.23;
     p('box',0,-.049,0,w+.37,.13,d+.31,STONE,1);
@@ -158,6 +162,11 @@ export function buildStreetFacilities(world) {
       for (let j=0;j<6;j++) p('box',w*.11+j*w*.042,h+.54,-d*.22,.048,.018,d*.26,METAL,4);
     }
     shopDetails(p,s);
+    world.registerDestructible?.({
+      id:'shop-'+id,kind:'shop',material:id==='kiosk'?'wood':'concrete',
+      x,y:h*.5,z,w:w+.4,h:h+.5,d:d+.6,yaw,tint,matKind:2,minY:0.12,maxY:h+1.0,
+      obstacles:shopObs
+    });
     if (open && index!==4 && index!==8) {
       floorWeathering(r,31+index,x,.017,z+sign*(front-.60),Math.min(w-.3,3.9),1.0,STONE);
     } else {

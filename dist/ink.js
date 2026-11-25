@@ -92,8 +92,8 @@ function propagateWordWake(mE,mS,row,z,wIdx,bitRow,canDown,wordsPerRow,awakeBits
 // Compact monomorphic kernel for a single 32-cell flat-bed word (~92% of all words).
 function runWordFlat(
   word,rowBase,colBase,w,canDown,
-  surface,cyan,amber,flowX,flowZ,barrierX,barrierZ,
-  deltaC,deltaA,touched,changedList,cc,
+  surface,cyan,amber,boss,flowX,flowZ,barrierX,barrierZ,
+  deltaC,deltaA,deltaB,touched,changedList,cc,
   hasBarrier,hasStairs,stairEdges,paint,wakeState
 ) {
   const base0=rowBase+colBase;
@@ -104,11 +104,11 @@ function runWordFlat(
     const col=colBase+bit, base=base0+bit;
     const a=surface[base];
     if (a<0) continue;
-    const ac=cyan[a], ha=ac+amber[a], dryA=ha<MIN_DEPTH;
+    const ac=cyan[a], aa=amber[a], ab=boss?boss[a]:0, ha=ac+aa+ab, dryA=ha<MIN_DEPTH;
     if (col+1<w) {
       const b1=surface[base+1];
       if (b1>=0) {
-        const bc=cyan[b1], hb=bc+amber[b1], prev=flowX[base];
+        const bc=cyan[b1], ba=amber[b1], bb=boss?boss[b1]:0, hb=bc+ba+bb, prev=flowX[base];
         if (!dryA || hb>=MIN_DEPTH) {
           const head=ha-hb;
           if (prev!==0 || head<=-ZERO_HEAD || head>=ZERO_HEAD) {
@@ -126,18 +126,21 @@ function runWordFlat(
             }
             if (q!==prev) flowX[base]=q;
             if (q!==0) {
-              let c, t;
+              let c=0, t=0, k=0;
               if (q>0) {
-                if (ac===ha) {c=q;t=0;}
-                else if (ac===0) {c=0;t=q;}
-                else {c=q*(ac/ha);t=q-c;}
+                if (ac===ha) {c=q;}
+                else if (aa===ha) {t=q;}
+                else if (ab===ha) {k=q;}
+                else {c=q*(ac/ha);t=q*(aa/ha);k=q-c-t;}
               } else {
-                if (bc===hb) {c=q;t=0;}
-                else if (bc===0) {c=0;t=q;}
-                else {c=q*(bc/hb);t=q-c;}
+                if (bc===hb) {c=q;}
+                else if (ba===hb) {t=q;}
+                else if (bb===hb) {k=q;}
+                else {c=q*(bc/hb);t=q*(ba/hb);k=q-c-t;}
               }
               if (c!==0) {deltaC[a]-=c;deltaC[b1]+=c;}
               if (t!==0) {deltaA[a]-=t;deltaA[b1]+=t;}
+              if (k!==0 && deltaB) {deltaB[a]-=k;deltaB[b1]+=k;}
               if (!touched[a]) {touched[a]=1;changedList[cc++]=a;}
               if (!touched[b1]) {touched[b1]=1;changedList[cc++]=b1;}
               mE|=1<<bit;
@@ -149,7 +152,7 @@ function runWordFlat(
     if (canDown) {
       const b2=surface[base+w];
       if (b2>=0) {
-        const bc=cyan[b2], hb=bc+amber[b2], prev=flowZ[base];
+        const bc=cyan[b2], ba=amber[b2], bb=boss?boss[b2]:0, hb=bc+ba+bb, prev=flowZ[base];
         if (!dryA || hb>=MIN_DEPTH) {
           const head=ha-hb;
           if (prev!==0 || head<=-ZERO_HEAD || head>=ZERO_HEAD) {
@@ -167,18 +170,21 @@ function runWordFlat(
             }
             if (q!==prev) flowZ[base]=q;
             if (q!==0) {
-              let c, t;
+              let c=0, t=0, k=0;
               if (q>0) {
-                if (ac===ha) {c=q;t=0;}
-                else if (ac===0) {c=0;t=q;}
-                else {c=q*(ac/ha);t=q-c;}
+                if (ac===ha) {c=q;}
+                else if (aa===ha) {t=q;}
+                else if (ab===ha) {k=q;}
+                else {c=q*(ac/ha);t=q*(aa/ha);k=q-c-t;}
               } else {
-                if (bc===hb) {c=q;t=0;}
-                else if (bc===0) {c=0;t=q;}
-                else {c=q*(bc/hb);t=q-c;}
+                if (bc===hb) {c=q;}
+                else if (ba===hb) {t=q;}
+                else if (bb===hb) {k=q;}
+                else {c=q*(bc/hb);t=q*(ba/hb);k=q-c-t;}
               }
               if (c!==0) {deltaC[a]-=c;deltaC[b2]+=c;}
               if (t!==0) {deltaA[a]-=t;deltaA[b2]+=t;}
+              if (k!==0 && deltaB) {deltaB[a]-=k;deltaB[b2]+=k;}
               if (!touched[a]) {touched[a]=1;changedList[cc++]=a;}
               if (!touched[b2]) {touched[b2]=1;changedList[cc++]=b2;}
               mS|=1<<bit;
@@ -196,8 +202,8 @@ function runWordFlat(
 // General kernel for sloped/ramp/stair 32-cell words (~8% of words).
 function runWordSloped(
   word,rowBase,colBase,w,canDown,
-  surface,cyan,amber,bed,flowX,flowZ,barrierX,barrierZ,
-  deltaC,deltaA,touched,changedList,cc,
+  surface,cyan,amber,boss,bed,flowX,flowZ,barrierX,barrierZ,
+  deltaC,deltaA,deltaB,touched,changedList,cc,
   hasBarrier,hasStairs,stairEdges,paint,wakeState
 ) {
   const base0=rowBase+colBase;
@@ -208,11 +214,11 @@ function runWordSloped(
     const col=colBase+bit, base=base0+bit;
     const a=surface[base];
     if (a<0) continue;
-    const ac=cyan[a], ha=ac+amber[a], dryA=ha<MIN_DEPTH, bedA=bed[a];
+    const ac=cyan[a], aa=amber[a], ab=boss?boss[a]:0, ha=ac+aa+ab, dryA=ha<MIN_DEPTH, bedA=bed[a];
     if (col+1<w) {
       const b1=surface[base+1];
       if (b1>=0) {
-        const bc=cyan[b1], hb=bc+amber[b1], prev=flowX[base];
+        const bc=cyan[b1], ba=amber[b1], bb=boss?boss[b1]:0, hb=bc+ba+bb, prev=flowX[base];
         if (!dryA || hb>=MIN_DEPTH) {
           const bd=bedA-bed[b1];
           if (bd<=.41 && bd>=-.41) {
@@ -232,18 +238,21 @@ function runWordSloped(
               }
               if (q!==prev) flowX[base]=q;
               if (q!==0) {
-                let c, t;
+                let c=0, t=0, k=0;
                 if (q>0) {
-                  if (ac===ha) {c=q;t=0;}
-                  else if (ac===0) {c=0;t=q;}
-                  else {c=q*(ac/ha);t=q-c;}
+                  if (ac===ha) {c=q;}
+                  else if (aa===ha) {t=q;}
+                  else if (ab===ha) {k=q;}
+                  else {c=q*(ac/ha);t=q*(aa/ha);k=q-c-t;}
                 } else {
-                  if (bc===hb) {c=q;t=0;}
-                  else if (bc===0) {c=0;t=q;}
-                  else {c=q*(bc/hb);t=q-c;}
+                  if (bc===hb) {c=q;}
+                  else if (ba===hb) {t=q;}
+                  else if (bb===hb) {k=q;}
+                  else {c=q*(bc/hb);t=q*(ba/hb);k=q-c-t;}
                 }
                 if (c!==0) {deltaC[a]-=c;deltaC[b1]+=c;}
                 if (t!==0) {deltaA[a]-=t;deltaA[b1]+=t;}
+                if (k!==0 && deltaB) {deltaB[a]-=k;deltaB[b1]+=k;}
                 if (!touched[a]) {touched[a]=1;changedList[cc++]=a;}
                 if (!touched[b1]) {touched[b1]=1;changedList[cc++]=b1;}
                 mE|=1<<bit;
@@ -256,7 +265,7 @@ function runWordSloped(
     if (canDown) {
       const b2=surface[base+w];
       if (b2>=0) {
-        const bc=cyan[b2], hb=bc+amber[b2], prev=flowZ[base];
+        const bc=cyan[b2], ba=amber[b2], bb=boss?boss[b2]:0, hb=bc+ba+bb, prev=flowZ[base];
         if (!dryA || hb>=MIN_DEPTH) {
           const bd=bedA-bed[b2];
           if (bd<=.41 && bd>=-.41) {
@@ -276,18 +285,21 @@ function runWordSloped(
               }
               if (q!==prev) flowZ[base]=q;
               if (q!==0) {
-                let c, t;
+                let c=0, t=0, k=0;
                 if (q>0) {
-                  if (ac===ha) {c=q;t=0;}
-                  else if (ac===0) {c=0;t=q;}
-                  else {c=q*(ac/ha);t=q-c;}
+                  if (ac===ha) {c=q;}
+                  else if (aa===ha) {t=q;}
+                  else if (ab===ha) {k=q;}
+                  else {c=q*(ac/ha);t=q*(aa/ha);k=q-c-t;}
                 } else {
-                  if (bc===hb) {c=q;t=0;}
-                  else if (bc===0) {c=0;t=q;}
-                  else {c=q*(bc/hb);t=q-c;}
+                  if (bc===hb) {c=q;}
+                  else if (ba===hb) {t=q;}
+                  else if (bb===hb) {k=q;}
+                  else {c=q*(bc/hb);t=q*(ba/hb);k=q-c-t;}
                 }
                 if (c!==0) {deltaC[a]-=c;deltaC[b2]+=c;}
                 if (t!==0) {deltaA[a]-=t;deltaA[b2]+=t;}
+                if (k!==0 && deltaB) {deltaB[a]-=k;deltaB[b2]+=k;}
                 if (!touched[a]) {touched[a]=1;changedList[cc++]=a;}
                 if (!touched[b2]) {touched[b2]=1;changedList[cc++]=b2;}
                 mS|=1<<bit;
@@ -305,33 +317,38 @@ function runWordSloped(
 
 // Inlined fast-skip settle kernel: skips unchanged pixels and avoids divisions.
 function runSettle(
-  count,list,cyan,amber,deltaC,deltaA,touched,ownerArr,pixels,floorByte,
+  count,list,cyan,amber,deltaC,deltaA,boss,deltaB,touched,ownerArr,pixels,floorByte,
   dirtyRows,countArr,zoneCount,ls,w,tilesWide,regionTiles,netDirty,netTiles,paint
 ) {
   const ls2=ls*2, ls3=ls*3, ls4=ls*4, ls5=ls*5, ls6=ls*6;
   const isDefaultW=w===640;
+  const zoneBossCount=paint.zoneBossCount;
   let dMask=paint.dirtyMask;
   for (let i=0;i<count;i++) {
     const idx=list[i];
-    const dc=deltaC[idx], da=deltaA[idx];
-    let nc=cyan[idx], na=amber[idx];
+    const dc=deltaC[idx], da=deltaA[idx], db=deltaB?deltaB[idx]:0;
+    let nc=cyan[idx], na=amber[idx], nb=boss?boss[idx]:0;
     if (dc!==0) {cyan[idx]=nc+dc;nc=cyan[idx];deltaC[idx]=0;}
     if (da!==0) {amber[idx]=na+da;na=amber[idx];deltaA[idx]=0;}
+    if (db!==0 && boss) {boss[idx]=nb+db;nb=boss[idx];deltaB[idx]=0;}
     touched[idx]=0;
-    const depth=nc+na;
-    const ow=depth<COVERAGE?0:nc>=na?1:2;
+    const depth=nc+na+nb;
+    const ow=depth<COVERAGE?0:(nb>nc && nb>na)?3:nc>=na?1:2;
     const prev=ownerArr[idx];
     const thick=depth>=.085?255:depth<=0?0:(depth*3000+.5)|0;
     const pi=idx<<2;
     if (ow===prev && pixels[pi+2]===thick && (depth<=0 || pixels[pi+3]!==0)) continue;
     const layer=idx<ls?0:idx<ls2?1:idx<ls3?2:idx<ls4?3:idx<ls5?4:idx<ls6?5:6;
     if (ow!==prev) {
-      const zc=zoneCount[ZONE_FOR_LAYER[layer]];
-      if (prev) {countArr[prev-1]--;zc[prev-1]--;}
-      if (ow) {countArr[ow-1]++;zc[ow-1]++;}
+      const zIdx=ZONE_FOR_LAYER[layer];
+      const zc=zoneCount[zIdx];
+      if (prev===1 || prev===2) {countArr[prev-1]--;zc[prev-1]--;}
+      else if (prev===3) {paint.bossCount--;zoneBossCount[zIdx]--;}
+      if (ow===1 || ow===2) {countArr[ow-1]++;zc[ow-1]++;}
+      else if (ow===3) {paint.bossCount++;zoneBossCount[zIdx]++;}
       ownerArr[idx]=ow;
-      pixels[pi]=ow===1?255:0;
-      pixels[pi+1]=ow===2?255:0;
+      pixels[pi]=(ow===1 || ow===3)?255:0;
+      pixels[pi+1]=(ow===2 || ow===3)?255:0;
     }
     pixels[pi+2]=thick;
     pixels[pi+3]=depth>0?floorByte[idx]:0;
@@ -370,8 +387,10 @@ export class Paint {
     this.floorByte=new Uint8Array(n);
     this.owner=new Uint8Array(n);
     this.count=[0,0];
+    this.bossCount=0;
     this.total=0;
     this.zoneCount=ZONES.map(()=>[0,0]);
+    this.zoneBossCount=ZONES.map(()=>0);
     this.zoneTotal=ZONES.map(()=>0);
     this.dirtyMask=(1<<this.layers)-1;
     // First and last changed row of each layer, so the renderer uploads only
@@ -389,8 +408,10 @@ export class Paint {
     this.bed=new Float32Array(n);
     this.cyan=new Float32Array(n);
     this.amber=new Float32Array(n);
+    this.boss=new Float32Array(n);
     this.deltaC=new Float32Array(n);
     this.deltaA=new Float32Array(n);
+    this.deltaB=new Float32Array(n);
     this.flowX=new Float32Array(this.layerSize*INK_REGIONS);
     this.flowZ=new Float32Array(this.layerSize*INK_REGIONS);
     this.barrierX=new Uint8Array(this.flowX.length);
@@ -537,7 +558,7 @@ export class Paint {
 
   reset() {
     for (const buffer of [
-      this.owner,this.pixels,this.cyan,this.amber,this.deltaC,this.deltaA,
+      this.owner,this.pixels,this.cyan,this.amber,this.boss,this.deltaC,this.deltaA,this.deltaB,
       this.flowX,this.flowZ,this.touched,this.awakeBits,this.workBits,
       this.awakeRowMask,this.workRowMask
     ]) buffer.fill(0);
@@ -549,7 +570,9 @@ export class Paint {
     this.netDirty?.clear();
     this.netTiles?.clear();
     this.count=[0,0];
+    this.bossCount=0;
     this.zoneCount=ZONES.map(()=>[0,0]);
+    this.zoneBossCount.fill(0);
     this.time=0;
     this.touchLayers((1<<this.layers)-1);
   }
@@ -559,7 +582,7 @@ export class Paint {
   wash(layerMask,amount,minX=-Infinity,maxX=Infinity,minZ=-Infinity,maxZ=Infinity) {
     if (this.visualOnly || !(amount>0)) return 0;
     const w=this.w, h=this.h, ls=this.layerSize, bx=this.boundX, bz=this.boundZ;
-    const cyan=this.cyan, amber=this.amber, flowX=this.flowX, flowZ=this.flowZ;
+    const cyan=this.cyan, amber=this.amber, boss=this.boss, flowX=this.flowX, flowZ=this.flowZ;
     const v0=Number.isFinite(minZ)?Math.max(0,Math.floor(((minZ/bz+1)*.5)*h)):0;
     const v1=Number.isFinite(maxZ)?Math.min(h-1,Math.ceil(((maxZ/bz+1)*.5)*h)):h-1;
     if (v0>v1) return 0;
@@ -575,18 +598,20 @@ export class Paint {
         const rowOff=v*w;
         for (let u=u0;u<=u1;u++) {
           const local=rowOff+u, idx=baseLayer+local;
-          const c=cyan[idx], a=amber[idx], depth=c+a;
+          const c=cyan[idx], a=amber[idx], b=boss[idx], depth=c+a+b;
           if (depth===0) continue;
           const next=amount>=1?0:depth-amount;
           if (next<COVERAGE) {
             cyan[idx]=0;
             amber[idx]=0;
+            boss[idx]=0;
             flowX[regionBase+local]=0;
             flowZ[regionBase+local]=0;
           } else {
             const scale=next/depth;
             cyan[idx]=c*scale;
             amber[idx]=a*scale;
+            boss[idx]=b*scale;
           }
           this.publish(idx);
           washed++;
@@ -612,7 +637,7 @@ export class Paint {
 
   depthAt(x,z,layer=0) {
     const i=this.surfaceIndex(x,z,layer);
-    return i>=0?this.cyan[i]+this.amber[i]:0;
+    return i>=0?this.cyan[i]+this.amber[i]+(this.boss?this.boss[i]:0):0;
   }
 
   surfaceIndex(x,z,layer) {
@@ -623,18 +648,21 @@ export class Paint {
   }
 
   publish(index) {
-    const a=this.cyan[index], b=this.amber[index], depth=a+b;
-    const owner=depth<COVERAGE ? 0 : a>=b ? 1 : 2;
+    const a=this.cyan[index], b=this.amber[index], bk=this.boss?this.boss[index]:0, depth=a+b+bk;
+    const owner=depth<COVERAGE ? 0 : (bk>a && bk>b) ? 3 : a>=b ? 1 : 2;
     const previous=this.owner[index];
     const ls=this.layerSize;
     const layer=index<ls?0:index<ls*2?1:index<ls*3?2:index<ls*4?3:index<ls*5?4:index<ls*6?5:6;
     if (owner!==previous) {
-      const count=this.zoneCount[ZONE_FOR_LAYER[layer]];
-      if (previous) {this.count[previous-1]--;count[previous-1]--;}
-      if (owner) {this.count[owner-1]++;count[owner-1]++;}
+      const zIdx=ZONE_FOR_LAYER[layer];
+      const count=this.zoneCount[zIdx];
+      if (previous===1 || previous===2) {this.count[previous-1]--;count[previous-1]--;}
+      else if (previous===3) {this.bossCount--;this.zoneBossCount[zIdx]--;}
+      if (owner===1 || owner===2) {this.count[owner-1]++;count[owner-1]++;}
+      else if (owner===3) {this.bossCount++;this.zoneBossCount[zIdx]++;}
       this.owner[index]=owner;
     }
-    const c=owner===1?255:0, amber=owner===2?255:0;
+    const c=(owner===1 || owner===3)?255:0, amber=(owner===2 || owner===3)?255:0;
     const thickness=depth>=.085?255:depth<=0?0:(depth*3000+.5)|0;
     const i=index<<2, pixels=this.pixels;
     if (previous!==owner || pixels[i]!==c || pixels[i+1]!==amber || pixels[i+2]!==thickness || (depth>0 && pixels[i+3]===0)) {
@@ -701,7 +729,11 @@ export class Paint {
     const x0=Math.max(0,Math.floor(cx-rx*1.18)), x1=Math.min(w-1,Math.ceil(cx+rx*1.18));
     const z0=Math.max(0,Math.floor(cz-rz*1.18)), z1=Math.min(h-1,Math.ceil(cz+rz*1.18));
     let taken=0, ac=this.awakeCount;
-    const pigment=team===0?this.cyan:this.amber, mask=this.mask, layerOffset=layer*layerSize;
+    const isBoss=team===2 || team===-1;
+    const targetOwner=isBoss?3:team+1;
+    const pigment=isBoss?this.boss:team===0?this.cyan:this.amber;
+    const bossArr=this.boss, cyan=this.cyan, amber=this.amber;
+    const mask=this.mask, layerOffset=layer*layerSize;
     const awakeBits=this.awakeBits, awakeRowMask=this.awakeRowMask, awakeRows=this.awakeRows;
     const wpr=this.wordsPerRow;
     for (let iz=z0;iz<=z1;iz++) {
@@ -720,8 +752,13 @@ export class Paint {
         const rim2=rim*rim;
         if (d2>=rim2) continue;
         const amount=depth*(.23+.77*(1-d2/rim2));
+        if (!isBoss && bossArr[index]>0) bossArr[index]=Math.max(0,bossArr[index]-amount*1.25);
+        else if (isBoss) {
+          if (cyan[index]>0) cyan[index]=Math.max(0,cyan[index]-amount*.35);
+          if (amber[index]>0) amber[index]=Math.max(0,amber[index]-amount*.35);
+        }
         pigment[index]+=amount;
-        if (this.publish(index)===team+1) taken++;
+        if (this.publish(index)===targetOwner) taken++;
         const reg=onStair?((stairCell.regionBase/layerSize)|0):region;
         const row=reg*h+iz, bitRow=row*wpr, w0=ix>>>5;
         awakeBits[bitRow+w0]|=1<<(ix&31);
@@ -760,7 +797,8 @@ export class Paint {
     if (layer===undefined) return false;
     const index=this.surfaceIndex(x,z,layer);
     if (!this.mask[index]) return false;
-    const pigment=team===0?this.cyan:this.amber;
+    const isBoss=team===2 || team===-1;
+    const pigment=isBoss?this.boss:team===0?this.cyan:this.amber;
     pigment[index]+=volume/this.cellArea;
     this.publish(index);
     this.kick(x,z,layer,vx,vz);
@@ -789,8 +827,9 @@ export class Paint {
       flow[base]=0;
       return false;
     }
-    const ac=this.cyan[a], aa=this.amber[a], bc=this.cyan[b], ba=this.amber[b];
-    const ha=ac+aa, hb=bc+ba;
+    const ac=this.cyan[a], aa=this.amber[a], ab=this.boss[a];
+    const bc=this.cyan[b], ba=this.amber[b], bb=this.boss[b];
+    const ha=ac+aa+ab, hb=bc+ba+bb;
     const q=filmFlux(ha,hb,this.bed[a]-this.bed[b],flow[base]);
     flow[base]=q;
     if (!q) return false;
@@ -801,11 +840,15 @@ export class Paint {
         return false;
       }
     }
-    const c=q*(q>0?ac/ha:bc/hb), t=q-c;
+    const c=q>0?q*(ac/ha):q*(bc/hb);
+    const t=q>0?q*(aa/ha):q*(ba/hb);
+    const k=q-c-t;
     this.deltaC[a]-=c;
     this.deltaC[b]+=c;
     this.deltaA[a]-=t;
     this.deltaA[b]+=t;
+    this.deltaB[a]-=k;
+    this.deltaB[b]+=k;
     if (this.changedCount+2>=this.changedList.length) this.growChangedList(this.changedCount+2);
     if (!this.touched[a]) {
       this.touched[a]=1;
@@ -853,9 +896,9 @@ export class Paint {
 
   flowRows(startIdx,endIdx) {
     const w=this.w, h=this.h, wpr=this.wordsPerRow;
-    const surface=this.surface, cyan=this.cyan, amber=this.amber, bed=this.bed;
+    const surface=this.surface, cyan=this.cyan, amber=this.amber, boss=this.boss, bed=this.bed;
     const flowX=this.flowX, flowZ=this.flowZ, barrierX=this.barrierX, barrierZ=this.barrierZ;
-    const deltaC=this.deltaC, deltaA=this.deltaA, touched=this.touched;
+    const deltaC=this.deltaC, deltaA=this.deltaA, deltaB=this.deltaB, touched=this.touched;
     let changedList=this.changedList;
     const workBits=this.workBits, workRowMask=this.workRowMask, workRows=this.workRows;
     const awakeBits=this.awakeBits, awakeRowMask=this.awakeRowMask, awakeRows=this.awakeRows;
@@ -884,15 +927,15 @@ export class Paint {
         if ((rowFlat & (1<<wIdx))!==0) {
           cc=runWordFlat(
             word,rowBase,colBase,w,canDown,
-            surface,cyan,amber,flowX,flowZ,barrierX,barrierZ,
-            deltaC,deltaA,touched,changedList,cc,
+            surface,cyan,amber,boss,flowX,flowZ,barrierX,barrierZ,
+            deltaC,deltaA,deltaB,touched,changedList,cc,
             hasBarrier,hasStairs,stairEdges,this,wakeState
           );
         } else {
           cc=runWordSloped(
             word,rowBase,colBase,w,canDown,
-            surface,cyan,amber,bed,flowX,flowZ,barrierX,barrierZ,
-            deltaC,deltaA,touched,changedList,cc,
+            surface,cyan,amber,boss,bed,flowX,flowZ,barrierX,barrierZ,
+            deltaC,deltaA,deltaB,touched,changedList,cc,
             hasBarrier,hasStairs,stairEdges,this,wakeState
           );
         }
@@ -910,7 +953,7 @@ export class Paint {
     const count=this.changedCount;
     if (!count) return;
     runSettle(
-      count,this.changedList,this.cyan,this.amber,this.deltaC,this.deltaA,
+      count,this.changedList,this.cyan,this.amber,this.deltaC,this.deltaA,this.boss,this.deltaB,
       this.touched,this.owner,this.pixels,this.floorByte,this.dirtyRows,
       this.count,this.zoneCount,this.layerSize,this.w,this.tilesWide,
       this.regionTiles,this.netDirty,this.netTiles,this
@@ -969,6 +1012,10 @@ export class Paint {
 
   percent(team,zone=null) {
     const total=zone===null?this.total:this.zoneTotal[zone];
+    if (team===2 || team===-1) {
+      const bc=zone===null?this.bossCount:this.zoneBossCount[zone];
+      return bc*100/Math.max(1,total);
+    }
     const count=zone===null?this.count:this.zoneCount[zone];
     return count[team]*100/Math.max(1,total);
   }

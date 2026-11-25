@@ -333,6 +333,7 @@ export class HNV1 {
     // World threat weighting for crew NPCs
     if (enemy.isRogueDrone) score-=2.6; // fast, fragile, dangerous if ignored
     if (enemy.isSniper) score-=1.8;     // clear high-ground snipers
+    if (enemy.isHeli) score-=3.2;       // suppress missile helicopter
     if (enemy.isGoat) score+=d<17?-3.5:3.0; // focus fire Goat when in range
     if (enemy.isBoss && !enemy.isGoat) score+=(actor.index??0)%2===0?-1.5:3.5;
 
@@ -363,7 +364,7 @@ export class HNV1 {
     const isSight=!!sightOrTarget?.point;
     const basePoint=isSight
       ?sightOrTarget.point
-      :[sightOrTarget.x,sightOrTarget.y+(sightOrTarget.isGoat?2.2:sightOrTarget.isBoss?2.1:sightOrTarget.isRogueDrone?0:sightOrTarget.swimming?.36:1.06),sightOrTarget.z];
+      :[sightOrTarget.x,sightOrTarget.y+(sightOrTarget.isGoat?2.2:sightOrTarget.isHeli?1.1:sightOrTarget.isBoss?2.1:sightOrTarget.isRogueDrone?0:sightOrTarget.swimming?.36:1.06),sightOrTarget.z];
     const foe=isSight?sightOrTarget.enemy:sightOrTarget;
     const vx=isSight?(sightOrTarget.velocity?.[0]??foe?.vx??0):(foe?.vx??0);
     const vy=isSight?(sightOrTarget.velocity?.[1]??foe?.vy??0):(foe?.vy??0);
@@ -391,7 +392,7 @@ export class HNV1 {
 
     // Clamp predicted point to walkable floor / avoid aiming through walls
     let aimX=px, aimY=py, aimZ=pz;
-    if (b.world && !foe?.isGoat && !foe?.isRogueDrone && !foe?.isSniper) {
+    if (b.world && !foe?.isGoat && !foe?.isHeli && !foe?.isRogueDrone && !foe?.isSniper) {
       const fl=b.world.floor?.(aimX,aimZ);
       if (fl && aimY<fl.y+.24) aimY=fl.y+.35;
     }
@@ -498,12 +499,20 @@ export class HNV1 {
       }
     }
 
-    // 3) GOD OF DESTRUCTION GOAT 8-ARM TELEGRAPH AVOIDANCE
+    // 3) GOD OF DESTRUCTION GOAT 16-TENTACLE TELEGRAPH AVOIDANCE
     if (level===0 && h.goat?.active && h.goat.cast && !h.goat.cast.done) {
       const cast=h.goat.cast;
-      const dx=actor.x-cast.x, dz=actor.z-cast.z, d=Math.hypot(dx,dz);
-      const safeR=(cast.radius??11)+2.2;
-      if (d<safeR && (cast.at-b.clock)<1.15) {
+      let cx=cast.x, cz=cast.z, safeR=(cast.radius??14)+2.2;
+      if (cast.kind==='smash' && cast.points?.length) {
+        let bestD=Infinity;
+        for (let i=0;i<cast.points.length;i++) {
+          const pt=cast.points[i], pd=Math.hypot(actor.x-pt[0],actor.z-pt[2]);
+          if (pd<bestD) {bestD=pd; cx=pt[0]; cz=pt[2];}
+        }
+        safeR=4.8;
+      }
+      const dx=actor.x-cx, dz=actor.z-cz, d=Math.hypot(dx,dz);
+      if (d<safeR && (cast.at-b.clock)<1.2) {
         const inv=1/Math.max(.1,d);
         const sideX=-dz*inv*m.strafeDir, sideZ=dx*inv*m.strafeDir;
         const escapeX=actor.x+(dx*inv*.82+sideX*.45)*5.5;
@@ -512,7 +521,7 @@ export class HNV1 {
         if (target) {
           const f=b.world.floor(actor.x,actor.z);
           const ownInk=b.paint.get(actor.x,actor.z,f.layer)===actor.team+1;
-          actor.intent='HNV1: 破壊神ゴートの8本腕を回避';
+          actor.intent='HNV1: 破壊神ゴートの16本触手を回避';
           const look=bearingTo(actor,[h.goat.x,h.goat.y+1.8,h.goat.z]);
           if (b.navigate(actor,target,dt,6.0,ownInk,{look,ready:.95,emergency:true})) {
             // Keep firing back at Goat while retreating!
@@ -907,14 +916,27 @@ export class HNV1 {
 
   /**
    * HNV1 target selector for Giant Squid Boss & God of Destruction Goat.
-   * Hunts clustered fighters & top damage threats indiscriminately.
+   * Hunts clustered fighters, active special users, and low-HP finishers within 50m.
    */
   pickApexTarget(apex,candidates,dt) {
     const m=this.tick(apex,dt);
     let best=null, bestScore=Infinity;
     for (let i=0;i<candidates.length;i++) {
       const c=candidates[i];
-      const sc=this.scoreTarget(apex,c,m.lastTarget);
+      let sc=this.scoreTarget(apex,c,m.lastTarget);
+      if (apex.isGoat) {
+        // Cluster bonus: prefer targets surrounded by teammates for multi-kill AoE
+        let neighbors=0;
+        for (let j=0;j<candidates.length;j++) {
+          if (i===j) continue;
+          const o=candidates[j];
+          if ((o.x-c.x)**2+(o.z-c.z)**2<64) neighbors++;
+        }
+        sc-=neighbors*10.5;
+        if (c.beaming || c.giant || c.superUntil>(this.battle?.clock??0)) sc-=11;
+        if ((c.hp??100)<48) sc-=8;
+        if (c.isPlayer) sc-=4.5;
+      }
       if (sc<bestScore) {bestScore=sc;best=c;}
     }
     m.lastTarget=best;

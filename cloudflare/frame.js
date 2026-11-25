@@ -62,9 +62,12 @@ export function frameOf(b,zone,fullInk,sounds,mergeStairs=false) {
     drones:a.drones.filter(d=>nearby(d.x)).map(d=>({x:q(d.x),y:q(d.y),z:q(d.z),yaw:q(d.yaw),owner:{team:d.owner.team},
       flash:q(d.flash??-9),aim:q(d.aim??d.yaw)})),
     stage:b.stage.snapshot(),
+    dynStage:b.dynamicStage?b.dynamicStage.snapshot():null,
+    underBossDepth:q(b.fluid?.underBossDepth ?? 0),
     rings:a.rings.filter(r=>nearby(r.x)).slice(-38),events:b.events,
     chip:{x:b.chip.x,y:b.chip.y,z:b.chip.z,yaw:b.chip.yaw,owner:!!b.chip.owner},
-    zone,fullInk,count:b.paint.count,total:b.paint.total,zoneCount:b.paint.zoneCount,zoneTotal:b.paint.zoneTotal,sounds,
+    zone,fullInk,count:b.paint.count,bossCount:b.paint.bossCount??0,total:b.paint.total,
+    zoneCount:b.paint.zoneCount,zoneBossCount:b.paint.zoneBossCount??[0,0,0,0],zoneTotal:b.paint.zoneTotal,sounds,
     merged:mergeStairs
   };
 }
@@ -75,7 +78,7 @@ function changed(previous,next) {
   for (const key of Object.keys(next)) if (!same(previous?.[key],next[key])) out[key]=next[key];
   return out;
 }
-const RARE=['mode','teamSize','timeless','unlimited','stage','events','chip','total','zoneTotal','wakes'];
+const RARE=['mode','teamSize','timeless','unlimited','stage','dynStage','vehicles','hazards','bossCount','zoneBossCount','underBossDepth','events','chip','total','zoneTotal','wakes'];
 
 // The wire form of a snapshot. A link that already holds a snapshot receives
 // only what changed since: sparse crew rows, the changed train and boss

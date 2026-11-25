@@ -64,6 +64,27 @@ export function multiply(a, b) {
   return out;
 }
 
+function invertMat4Into(m, out = new Float32Array(16)) {
+  const m00=m[0],m01=m[1],m02=m[2],m03=m[3], m10=m[4],m11=m[5],m12=m[6],m13=m[7];
+  const m20=m[8],m21=m[9],m22=m[10],m23=m[11], m30=m[12],m31=m[13],m32=m[14],m33=m[15];
+  const b00=m00*m11-m01*m10, b01=m00*m12-m02*m10, b02=m00*m13-m03*m10;
+  const b03=m01*m12-m02*m11, b04=m01*m13-m03*m11, b05=m02*m13-m03*m12;
+  const b06=m20*m31-m21*m30, b07=m20*m32-m22*m30, b08=m20*m33-m23*m30;
+  const b09=m21*m32-m22*m31, b10=m21*m33-m23*m31, b11=m22*m33-m23*m32;
+  let det=b00*b11-b01*b10+b02*b09+b03*b08-b04*b07+b05*b06;
+  if (!det) return out;
+  det=1/det;
+  out[0]=(m11*b11-m12*b10+m13*b09)*det; out[1]=(m02*b10-m01*b11-m03*b09)*det;
+  out[2]=(m31*b05-m32*b04+m33*b03)*det; out[3]=(m22*b04-m21*b05-m23*b03)*det;
+  out[4]=(m12*b08-m10*b11-m13*b07)*det; out[5]=(m00*b11-m02*b08+m03*b07)*det;
+  out[6]=(m32*b02-m30*b05-m33*b01)*det; out[7]=(m20*b05-m22*b02+m23*b01)*det;
+  out[8]=(m10*b10-m11*b08+m13*b06)*det; out[9]=(m01*b08-m00*b10-m03*b06)*det;
+  out[10]=(m30*b04-m31*b02+m33*b00)*det; out[11]=(m21*b02-m20*b04-m23*b00)*det;
+  out[12]=(m11*b07-m10*b09-m12*b06)*det; out[13]=(m00*b09-m01*b07+m02*b06)*det;
+  out[14]=(m31*b01-m30*b03-m32*b00)*det; out[15]=(m20*b03-m21*b01+m22*b00)*det;
+  return out;
+}
+
 export function view(eye, target) {
   const back = unit(sub(eye, target));
   const right = unit(cross(UP, back));
@@ -522,14 +543,16 @@ function labelTexture(gl,anisotropy) {
 
 const SCENE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uShape','uQuality','uHDR','uMirrorPass',
   'uShadowOn','uCascades','uShadowM0','uShadowM1','uShadowTexel','uAtlasGrid','uReflectOn','uViewport','uEnvLod','uClock',
-  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge','uDrawFar'];
+  'uZoneX','uUnderX','uUnderY','uCabinX','uRailCabinX','uCabinY','uInkTexel','uInkBounds','uExposure','uSurfaceSheets','uSurfaceEdge','uDrawFar',
+  'uBossRage','uRaytrace','uWetLevel','uRainLevel'];
 const ARCH_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uQuality','uHDR','uShadowOn',
-  'uCascades','uShadowM0','uShadowM1','uShadowTexel','uInkTexel','uInkBounds','uEnvLod','uViewport','uExposure','uSurfaceSheets','uSurfaceEdge','uDrawFar'];
+  'uCascades','uShadowM0','uShadowM1','uShadowTexel','uInkTexel','uInkBounds','uEnvLod','uViewport','uExposure','uSurfaceSheets','uSurfaceEdge','uDrawFar',
+  'uBossRage','uRaytrace','uWetLevel','uRainLevel'];
 const ARCH_INTERIOR_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uHDR','uInkTexel','uInkBounds','uUnderX','uUnderY','uCabinX',
   'uRailCabinX','uCabinY','uViewport','uExposure','uSurfaceSheets','uSurfaceEdge'];
 const MIRROR_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uSunColor','uEnvLod','uSurfaceSheets','uSurfaceEdge'];
 const DEPTH_UNIFORMS=['uVP','uDrawOffset','uMergeStairs'];
-const SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uField','uClock','uInterior','uHDR','uViewport','uExposure'];
+const SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uField','uClock','uInterior','uHDR','uViewport','uExposure','uBossRage','uRainLevel'];
 const MIRROR_SKY_UNIFORMS=['uRight','uUp','uForward','uField'];
 const UNIT={shadow0:0,ink:1,atlas:2,reflection:3,env:4,detail:5,shadow1:6,postA:7,postB:8,postC:9,surface:10,sheet:11,small:12};
 const SCENE_SAMPLERS={uShadow0:UNIT.shadow0,uInk:UNIT.ink,uAtlas:UNIT.atlas,uReflection:UNIT.reflection,
@@ -554,8 +577,8 @@ const SHADOW_C1={lodDist:0,bevelLodDist:0,tierDist:[0,0,72,Infinity],cull:Infini
 export const LITE_LINES=400, ULTRA_LINES=300;
 const LITE_FOG=[.74,.80,.85];
 const LITE_UNIFORMS=['uVP','uDrawOffset','uMergeStairs','uEye','uSun','uClock','uAtlasGrid','uUnderX','uUnderY','uCabinX',
-  'uRailCabinX','uCabinY','uInkBounds','uFog','uFogRange','uShape','uSurfaceSheets','uSurfaceEdge'];
-const LITE_SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uFog','uField','uInterior'];
+  'uRailCabinX','uCabinY','uInkBounds','uFog','uFogRange','uShape','uSurfaceSheets','uSurfaceEdge','uBossRage','uRainLevel'];
+const LITE_SKY_UNIFORMS=['uRight','uUp','uForward','uSun','uFog','uField','uInterior','uBossRage','uRainLevel'];
 const ENV_SIZE=[256,128];
 
 export class Renderer {
@@ -564,8 +587,16 @@ export class Renderer {
     this.zone=0;
     this.quality='high';
     this.lite=false;
+    this.ultralite=false;
     this.ultra=false;
+    this.raytrace=false;
     this.fidelity=true;
+    this.bossRage=0;
+    this.wetLevel=0;
+    this.envBossRage=0;
+    this._invVP=new Float32Array(16);
+    this._lastEye=[0,3,18];
+    this._sunColor=new Float32Array(SUN_RADIANCE);
     this.scale=1;
     this.adaptive=true;
     // Display refresh interval in ms; the frame budget follows it up to 120 fps.
@@ -851,6 +882,8 @@ export class Renderer {
     gl.uniform2f(gl.getUniformLocation(this.envProgram,'uSize'),width,height);
     gl.uniform3fv(gl.getUniformLocation(this.envProgram,'uSun'),SUN);
     gl.uniform1f(gl.getUniformLocation(this.envProgram,'uClock'),clock);
+    gl.uniform1f(gl.getUniformLocation(this.envProgram,'uBossRage'),this.bossRage ?? 0);
+    gl.uniform1f(gl.getUniformLocation(this.envProgram,'uRainLevel'),this.rainLevel ?? 0);
     gl.viewport(0,0,width,height);
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
@@ -862,6 +895,8 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D,this.envTexture);
     gl.generateMipmap(gl.TEXTURE_2D);
     this.envClock=clock;
+    this.envBossRage=this.bossRage ?? 0;
+    this.envRainLevel=this.rainLevel ?? 0;
     return this.envTexture;
   }
 
@@ -896,10 +931,24 @@ export class Renderer {
     }
   }
 
-  // 'high', 'lite' (400p, no shadows or reflections, short draw distance) or
-  // 'ultra' (300p, nearest-cell ink, the shortest draw distance).
+  // Updates atmospheric crimson boss storm, blinding downpour, and street wetness levels smoothly.
+  setMood({bossActive = false, raining = false, dt = 1/60} = {}) {
+    const step=clamp(dt*1.35,0,1);
+    const targetRage=bossActive?1:0;
+    const targetWet=raining?1:bossActive?.68:0;
+    const targetRain=raining?1:0;
+    this.bossRage=mix(this.bossRage??0,targetRage,step);
+    this.wetLevel=mix(this.wetLevel??0,targetWet,step);
+    this.rainLevel=mix(this.rainLevel??0,targetRain,step);
+    const r=this.bossRage, dim=1-(this.rainLevel??0)*.72;
+    this._sunColor[0]=mix(SUN_RADIANCE[0],1.48,r)*dim;
+    this._sunColor[1]=mix(SUN_RADIANCE[1],.34,r)*dim;
+    this._sunColor[2]=mix(SUN_RADIANCE[2],.36,r)*dim;
+  }
+
+  // 'ultra' (real-time WebGL2 raytracing), 'high', 'lite' (400p) or 'ultralite' (300p).
   setQuality(level) {
-    const quality=level===true?'lite':level===false?'high':['lite','ultra'].includes(level)?level:'high';
+    const quality=level===true?'lite':level===false?'high':['ultra','lite','ultralite'].includes(level)?level:'high';
     if (this.quality!==quality) {
       this.frame=0;
       this.scale=1;
@@ -907,8 +956,10 @@ export class Renderer {
       this.releaseShadows();
     }
     this.quality=quality;
-    this.lite=quality!=='high';
+    this.lite=quality==='lite' || quality==='ultralite';
+    this.ultralite=quality==='ultralite';
     this.ultra=quality==='ultra';
+    this.raytrace=quality==='ultra';
     this.fidelity=!this.lite;
   }
 
@@ -1006,10 +1057,11 @@ export class Renderer {
       samplers(gl,post.blur,{uAO:UNIT.postA,uDepth:UNIT.postB});
       samplers(gl,post.down,{uSrc:UNIT.postA});
       samplers(gl,post.up,{uSrc:UNIT.postA});
-      samplers(gl,post.composite,{uColor:UNIT.postA,uAO:UNIT.postB,uBloom:UNIT.postC});
+      samplers(gl,post.composite,{uColor:UNIT.postA,uAO:UNIT.postB,uBloom:UNIT.postC,uDepth:UNIT.detail});
       for (const key of ['ssao','blur','down','up','composite']) post[key+'U']=uniforms(gl,post[key],
         ['uInvSize','uProj','uRadius','uIntensity','uStep','uTexel','uFirst','uThreshold','uWeight','uExposure',
-          'uBloomStrength','uAOStrength','uTime','uInterior','uAOOn','uBloomOn','uFXAA']);
+          'uBloomStrength','uAOStrength','uTime','uInterior','uAOOn','uBloomOn','uFXAA',
+          'uRaytrace','uBossRage','uWetLevel','uRainLevel','uVP','uInvVP','uEye','uSun']);
       const counts=gl.getInternalformatParameter(gl.RENDERBUFFER,gl.RGBA16F,gl.SAMPLES);
       post.deviceSamples=counts && counts.length?Math.max(...counts):0;
       // Live play runs 1x RGBA16F + Subpixel FXAA + FidelityFX CAS (eliminating
@@ -1195,15 +1247,27 @@ export class Renderer {
     gl.bindTexture(gl.TEXTURE_2D,post.aoA);
     gl.activeTexture(gl.TEXTURE0+UNIT.postC);
     gl.bindTexture(gl.TEXTURE_2D,post.bloom[0].texture);
+    gl.activeTexture(gl.TEXTURE0+UNIT.detail);
+    gl.bindTexture(gl.TEXTURE_2D,post.depth);
     gl.uniform2f(u.uTexel,1/width,1/height);
     gl.uniform1f(u.uExposure,this.exposure());
-    gl.uniform1f(u.uBloomStrength,this.interior>.5?.085:.06);
+    gl.uniform1f(u.uBloomStrength,(this.interior>.5?.085:.06)+(this.raytrace?.022:0)+(this.bossRage??0)*.018);
     gl.uniform1f(u.uAOStrength,.92);
     gl.uniform1f(u.uTime,clock);
     gl.uniform1f(u.uInterior,this.interior);
     gl.uniform1i(u.uAOOn,ambient?1:0);
     gl.uniform1i(u.uBloomOn,1);
     gl.uniform1i(u.uFXAA,post.msaa?0:1);
+    gl.uniform1f(u.uRaytrace,this.raytrace?1:0);
+    gl.uniform1f(u.uBossRage,this.bossRage??0);
+    gl.uniform1f(u.uWetLevel,Math.max(this.wetLevel??0,this.raytrace?.24:0));
+    gl.uniform1f(u.uRainLevel,this.rainLevel??0);
+    if (this.vp) {
+      gl.uniformMatrix4fv(u.uVP,false,this.vp);
+      gl.uniformMatrix4fv(u.uInvVP,false,invertMat4Into(this.vp,this._invVP));
+    }
+    gl.uniform3fv(u.uEye,this._lastEye);
+    gl.uniform3fv(u.uSun,SUN);
     gl.drawArrays(gl.TRIANGLES,0,3);
     gl.depthMask(true);
   }
@@ -1314,6 +1378,38 @@ export class Renderer {
     bo.effect=opts.effect;
     bo.windowId=opts.windowId;
     this.add(opts.shape ?? 'box',(a[0]+b[0])*.5,(a[1]+b[1])*.5,(a[2]+b[2])*.5,width,len,depth,tint,kind,bo);
+  }
+
+  hideStaticRegion(zoneIndex,minX,maxX,minY,maxY,minZ,maxZ) {
+    const z=this.zones?.[zoneIndex];
+    if (!z || !z.batches) return 0;
+    const gl=this.gl;
+    let hidden=0;
+    for (const batch of z.batches) {
+      if (!batch || !batch.data || !batch.count) continue;
+      const data=batch.data, count=batch.count;
+      let dirtyMin=-1, dirtyMax=-1;
+      for (let i=0;i<count;i++) {
+        const o=i*STRIDE;
+        if (data[o]===0 && data[o+4]===0 && data[o+8]===0) continue;
+        const kind=Math.round(data[o+19]);
+        // Never hide floors (1) or asphalt roads (5) or lane markings (22) or sky/emissive ground markers (0)
+        if (kind===1 || kind===5 || kind===22 || kind===0 || kind===27) continue;
+        const px=data[o+12], py=data[o+13], pz=data[o+14];
+        if (px>=minX && px<=maxX && py>=minY && py<=maxY && pz>=minZ && pz<=maxZ) {
+          for (let k=0;k<11;k++) if (k!==3 && k!==7) data[o+k]=0;
+          data[o+13]=-9000;
+          if (dirtyMin<0) dirtyMin=i;
+          dirtyMax=i;
+          hidden++;
+        }
+      }
+      if (dirtyMin>=0 && gl && batch.buffer) {
+        gl.bindBuffer(gl.ARRAY_BUFFER,batch.buffer);
+        gl.bufferSubData(gl.ARRAY_BUFFER,dirtyMin*STRIDE*4,data.subarray(dirtyMin*STRIDE,(dirtyMax+1)*STRIDE));
+      }
+    }
+    return hidden;
   }
 
   seal() {
@@ -1585,9 +1681,10 @@ export class Renderer {
     // Offline video uses its exact frame size; the lightweight modes a fixed
     // 400p / 300p; high quality the display's own pixels within a budget.
     const pixels=RESOLUTION_PIXELS[this.options?.resolution];
-    const ratio=this.fixedSize?1:this.lite?Math.min(dpr,(this.ultra?ULTRA_LINES:LITE_LINES)/Math.min(cw,ch),limit/cw,limit/ch):
+    const ratio=this.fixedSize?1:this.lite?Math.min(dpr,(this.ultralite?ULTRA_LINES:LITE_LINES)/Math.min(cw,ch),limit/cw,limit/ch):
       pixels?Math.min(Math.sqrt(pixels/(cw*ch)),limit/cw,limit/ch):
       Math.min(dpr,2,Math.sqrt(2.9e6/(cw*ch)),limit/cw,limit/ch)*(this.scale||1);
+    this._lastEye=camera.eye;
     this.viewZone=zoneOf(camera.eye[0]);
     this.mergeStairs=!!camera.stair && this.viewZone<2;
     this.interior=interiorBlend(camera);
@@ -1643,7 +1740,7 @@ export class Renderer {
     const visibleMask=ZONES[this.viewZone].inkMask | (this.mergeStairs?ZONES[1-this.viewZone].inkMask:0);
     const changed=paint.dirtyMask & visibleMask;
     const visibilityChanged=this.lastInkMask!==visibleMask;
-    if (changed && (visibilityChanged || clock-this.inkTime>(this.ultra?.085:this.lite?.055:.033) || clock<this.inkTime)) {
+    if (changed && (visibilityChanged || clock-this.inkTime>(this.ultralite?.085:this.lite?.055:.033) || clock<this.inkTime)) {
       const length=paint.layerSize*4, stride=paint.w*4;
       for (let layer=0;layer<paint.layers;layer++) {
         if (!(changed & (1<<layer))) continue;
@@ -1659,7 +1756,7 @@ export class Renderer {
       this.inkTime=clock;
     }
     this.lastInkMask=visibleMask;
-    if (this.envTexture && outdoor && Math.abs(clock-this.envClock)>20) this.renderEnv(clock);
+    if (this.envTexture && outdoor && (Math.abs(clock-this.envClock)>20 || Math.abs((this.bossRage??0)-(this.envBossRage??0))>.08 || Math.abs((this.rainLevel??0)-(this.envRainLevel??0))>.08)) this.renderEnv(clock);
     if (this.reflections) {
       const reflected=([x,y,z])=>[x,-y,z];
       gl.bindFramebuffer(gl.FRAMEBUFFER,this.mirrorBuffer);
@@ -1700,7 +1797,7 @@ export class Renderer {
       gl.uniform1i(u.uMergeStairs,0);
       gl.uniform3fv(u.uEye,eye);
       gl.uniform3fv(u.uSun,SUN);
-      gl.uniform3fv(u.uSunColor,SUN_RADIANCE);
+      gl.uniform3fv(u.uSunColor,this._sunColor);
       gl.uniform1f(u.uEnvLod,8);
       this.bindSurfaces(u,this.surfaceSheets);
     };
@@ -1738,11 +1835,15 @@ export class Renderer {
     const gl=this.gl;
     gl.uniformMatrix4fv(u.uVP,false,vp);
     gl.uniform3fv(u.uSun,SUN);
-    gl.uniform3fv(u.uSunColor,SUN_RADIANCE);
+    gl.uniform3fv(u.uSunColor,this._sunColor);
     gl.uniform1i(u.uQuality,this.lite?0:2);
     gl.uniform1i(u.uHDR,hdr?1:0);
     gl.uniform1i(u.uMirrorPass,0);
     gl.uniform1f(u.uExposure,this.exposure());
+    gl.uniform1f(u.uBossRage,this.bossRage??0);
+    gl.uniform1f(u.uRaytrace,this.raytrace?1:0);
+    gl.uniform1f(u.uWetLevel,Math.max(this.wetLevel??0,this.raytrace?.24:0));
+    gl.uniform1f(u.uRainLevel,this.rainLevel??0);
     const far=this.options?.drawDistance ?? Infinity;
     gl.uniform1f(u.uDrawFar,this.overview || !Number.isFinite(far)?0:far);
     gl.uniform2f(u.uViewport,w,h);
@@ -1771,11 +1872,15 @@ export class Renderer {
     gl.uniform1i(u.uMergeStairs,0);
     gl.uniform3f(u.uEye,eye[0],eye[1],eye[2]);
     gl.uniform3fv(u.uSun,SUN);
-    gl.uniform3fv(u.uSunColor,SUN_RADIANCE);
+    gl.uniform3fv(u.uSunColor,this._sunColor);
     gl.uniform1i(u.uQuality,this.lite?0:2);
     gl.uniform1i(u.uHDR,hdr?1:0);
     gl.uniform1i(u.uShadowOn,this.effects?1:0);
     gl.uniform1f(u.uExposure,this.exposure());
+    gl.uniform1f(u.uBossRage,this.bossRage??0);
+    gl.uniform1f(u.uRaytrace,this.raytrace?1:0);
+    gl.uniform1f(u.uWetLevel,Math.max(this.wetLevel??0,this.raytrace?.24:0));
+    gl.uniform1f(u.uRainLevel,this.rainLevel??0);
     const far=this.options?.drawDistance ?? Infinity;
     gl.uniform1f(u.uDrawFar,this.overview || !Number.isFinite(far)?0:far);
     gl.uniform2f(u.uViewport,w,h);
@@ -1955,6 +2060,8 @@ export class Renderer {
       gl.uniform1i(s.uHDR,hdr?1:0);
       gl.uniform2f(s.uViewport,w,h);
       gl.uniform1f(s.uExposure,this.exposure());
+      gl.uniform1f(s.uBossRage,this.bossRage??0);
+      gl.uniform1f(s.uRainLevel,this.rainLevel??0);
       gl.depthMask(false);
       gl.bindVertexArray(this.empty);
       this._boundVao=null;
@@ -1971,6 +2078,8 @@ export class Renderer {
     gl.uniformMatrix4fv(u.uVP,false,vp);
     gl.uniform3fv(u.uSun,SUN);
     gl.uniform1f(u.uClock,clock);
+    gl.uniform1f(u.uBossRage,this.bossRage??0);
+    gl.uniform1f(u.uRainLevel,this.rainLevel??0);
     gl.uniform2f(u.uInkBounds,paint.boundX,paint.boundZ);
     gl.uniform2f(u.uAtlasGrid,ATLAS_COLUMNS,ATLAS_ROWS);
     gl.uniform1f(u.uUnderX,UNDER_X);
@@ -1982,7 +2091,7 @@ export class Renderer {
     if (Number.isFinite(reach)) gl.uniform2f(u.uFogRange,reach*.5,reach*.97);
     else gl.uniform2f(u.uFogRange,1e7,2e7);
     // The ultra-light mode keeps flat colours: no texture taps at all.
-    this.bindSurfaces(u,this.ultra?0:this.surfaceSheets);
+    this.bindSurfaces(u,this.ultralite?0:this.surfaceSheets);
   }
 
   // The lightweight frame: CPU Hi-Z + Selective Z-prepass + zero-discard opaque pass.
@@ -1994,13 +2103,21 @@ export class Renderer {
     gl.depthMask(true);
     gl.depthFunc(gl.LEQUAL);
     gl.disable(gl.BLEND);
-    gl.clearColor(...(this.interior>.5?[.055,.062,.058]:LITE_FOG),1);
+    const r=this.bossRage??0, rain=this.rainLevel??0;
+    const skyClear=[
+      mix(mix(LITE_FOG[0],.24,rain*.88),.085,r),
+      mix(mix(LITE_FOG[1],.28,rain*.88),.018,r),
+      mix(mix(LITE_FOG[2],.33,rain*.88),.022,r)
+    ];
+    gl.clearColor(...(this.interior>.5?[.055,.062,.058]:skyClear),1);
     gl.clear(gl.DEPTH_BUFFER_BIT|gl.COLOR_BUFFER_BIT);
     gl.enable(gl.DEPTH_TEST);
     gl.activeTexture(gl.TEXTURE0+UNIT.ink);
     gl.bindTexture(gl.TEXTURE_2D_ARRAY,this.inkTexture);
     gl.activeTexture(gl.TEXTURE0+UNIT.atlas);
     gl.bindTexture(gl.TEXTURE_2D,this.atlas);
+    gl.activeTexture(gl.TEXTURE0+UNIT.detail);
+    gl.bindTexture(gl.TEXTURE_2D,this.detail);
     this._boundVao=null;
     const planes=frustumInto(vp,this._planes);
     const useOcc=this.viewZone===0 && !this.overview && !this.mergeStairs && !!this.occluder;
@@ -2055,6 +2172,8 @@ export class Renderer {
       gl.uniform3fv(s.uFog,LITE_FOG);
       gl.uniform2f(s.uField,f*w/h,f);
       gl.uniform1f(s.uInterior,this.interior);
+      gl.uniform1f(s.uBossRage,this.bossRage??0);
+      gl.uniform1f(s.uRainLevel,this.rainLevel??0);
       gl.depthMask(false);
       gl.bindVertexArray(this.empty);
       this._boundVao=null;
@@ -2067,7 +2186,7 @@ export class Renderer {
   }
 
   drawSettings(mirror) {
-    const preset=mirror?MIRROR_DRAW:!this.lite?(this.overview?OVERVIEW_DRAW:HIGH_DRAW):this.overview?OVERVIEW_DRAW:this.ultra?ULTRA_DRAW:LITE_DRAW;
+    const preset=mirror?MIRROR_DRAW:!this.lite?(this.overview?OVERVIEW_DRAW:HIGH_DRAW):this.overview?OVERVIEW_DRAW:this.ultralite?ULTRA_DRAW:LITE_DRAW;
     const far=this.options?.drawDistance ?? Infinity;
     if (mirror || this.overview || !Number.isFinite(far)) return preset;
     // The draw-distance setting replaces the mode's own cut, near or far.
@@ -2117,7 +2236,7 @@ export class Renderer {
           if (!staticBatch.count && !dyn.count) continue;
           if (shapeId!==lastShape) {gl.uniform1i(u.uShape,shapeId); lastShape=shapeId;}
           this.drawStatic(type,staticBatch,planes,eye,offset,settings,'all',u.uShape,useOcc);
-          this.drawDynamic(type,dyn,this.ultra,u.uShape);
+          this.drawDynamic(type,dyn,this.ultralite,u.uShape);
         } else if (isHiOpaque) {
           const b=staticBatch.buckets?staticBatch.buckets[stage]:staticBatch.chunks;
           if (!staticBatch.count || !b || !b.length) continue;

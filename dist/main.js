@@ -77,7 +77,7 @@ function readPrefs() {
     teamSize:saved.teamSize===4?4:8,
     unlimitedTime:saved.unlimitedTime===true,
     sensitivity:Number.isFinite(saved.sensitivity)?clamp(saved.sensitivity,.55,1.75):1,
-    quality:['ultra','lite','high'].includes(saved.quality)?saved.quality:'auto',
+    quality:['ultra','ultralite','lite','high'].includes(saved.quality)?saved.quality:'auto',
     resolution:['fhd','2k'].includes(saved.resolution)?saved.resolution:'auto',
     fps:[30,60].includes(saved.fps)?saved.fps:120,
     reflections:saved.reflections!==false,
@@ -86,17 +86,17 @@ function readPrefs() {
 }
 
 
-const QUALITY_NAMES={high:'高画質',lite:'軽量 400p',ultra:'超軽量 300p'};
+const QUALITY_NAMES={ultra:'ULTRA (RT)',high:'高画質',lite:'軽量 400p',ultralite:'超軽量 300p'};
 
 // Automatic: phones and software rendering use the lightweight 400p mode,
 // and step down to the ultra-light mode while a server match is streaming.
 function qualityLevel() {
   if (prefs.quality!=='auto') return prefs.quality;
   if (!usingTouch && !renderer?.cpuRenderer) return 'high';
-  return remote?'ultra':'lite';
+  return remote?'ultralite':'lite';
 }
 
-const lightQuality=()=>qualityLevel()!=='high';
+const lightQuality=()=>['lite','ultralite'].includes(qualityLevel());
 
 function applyQuality() {
   const level=qualityLevel();
@@ -106,7 +106,7 @@ function applyQuality() {
   // The frame loop skips display frames that come sooner than the FPS cap.
   if (renderer) renderer.minFrameGap=frameGap(prefs.fps);
   $('quality').querySelector('b').textContent=QUALITY_NAMES[level];
-  $('quality').setAttribute('aria-pressed',String(level!=='high'));
+  $('quality').setAttribute('aria-pressed',String(!['high','ultra'].includes(level)));
 }
 
 function createRenderer() {
@@ -371,8 +371,8 @@ function settings() {
   const labelGraphics=document.createElement('span');
   labelGraphics.textContent='描画品質';
   const quality=document.createElement('select');
-  for (const [value,name] of [['auto','自動（スマホは軽量・サーバー戦は超軽量）'],['ultra','超軽量（300p・最短の描画距離）'],
-      ['lite','軽量（400p・影と反射なし・短い描画距離）'],['high','高画質（全エフェクト）']]) {
+  for (const [value,name] of [['auto','自動（スマホは軽量・サーバー戦は超軽量）'],['ultra','ULTRA（超リアルレイトレーシング）'],
+      ['high','高画質（全エフェクト）'],['lite','軽量（400p・影と反射なし・短い描画距離）'],['ultralite','超軽量（300p・最短の描画距離）']]) {
     const option=document.createElement('option');
     option.value=value;
     option.textContent=name;
@@ -441,11 +441,12 @@ function guide() {
     <dt>SW OUT / SW OUT II</dt><dd>1回で2発撃つ拳銃。照準が敵をロックしているときに撃つと、弾が敵をある程度追いかけます。SW OUTは追従が働く射撃だけインクを2倍使い、攻撃力は通常の半分。プレイヤー専用のSW OUT IIは追従中も消費が増えず、基本消費4割減・弾速1.3倍・追従力と範囲と射程1.5倍。COモード（CキーかCOボタン）では発射間隔が2倍になる代わりに追従力がさらに2倍になります。</dd>
     <dt>See Elite</dt><dd>投げた場所の半径3mに敵が入ると、その敵を20秒間マーキングします。壁越しに名前が見え、ミニマップにも表示されます。</dd>
     <dt>復活とEXP</dt><dd>倒されると復活まで12秒、オオモノイカに倒された場合は15秒かかります。敵を1人倒すごとに30 EXP。試合終了後に全員分が集計され、リザルトで全クルーの記録とEXPを確認できます。EXPはこの端末に貯まります。</dd>
-    <dt>画質とフレームレート</dt><dd>軽量は400p・影と反射なし・短い描画距離、超軽量は300pでさらに軽い描画です。下の設定で、解像度（自動・FHD・2K）、フレームレートの上限（30・60・120fps）、路面の反射の有無、描画距離（60m〜最大）を選べます。</dd>
+    <dt>画質とフレームレート</dt><dd>ULTRA（RT）ではリアルタイムレイトレーシング（SSR・コンタクトシャドウ・SSGI・ボリュメトリック光）が有効になります。軽量は400p・影と反射なし、超軽量は300pでさらに軽い描画です。下の設定で、解像度・フレームレート上限・路面の反射・描画距離を選べます。</dd>
     <dt>スーパーギガチップ</dt><dd>ステージに落ちたチップを拾うと、その試合中は持てるインクが2倍になります。</dd>
-    <dt>街の遮蔽物</dt><dd>木箱、レンガ、コンクリートブロックや、マンションと店舗のガラスはインク弾で壊せます。舗装路の先にある3棟は、1試合につき各キャラ1棟1回入れて室内を塗れます。</dd>
+    <dt>街の破壊物理</dt><dd>インク弾の衝撃と浸透で、木箱・キオスク・コンテナ・街路施設から高層ビル・マンションまでリアルな物理演算で破損・傾倒・崩壊します。</dd>
+    <dt>動的ステージ制御</dt><dd>対戦中に地形の昇降、高架道路の降下、ステージへ伸びる線路と特級列車の突入、地上とB1を繋ぐ大穴、移動するビル、競り上がる壁などダイナミックなギミックが発動します。</dd>
     <dt>タイムレスバトル</dt><dd>時間無制限の4対4。最初の襲撃は80秒後で、以降118秒ごとにオクトパスゼイアン4体が現れます。</dd>
-    <dt>7分のナワバリ戦</dt><dd>床の塗り面積で勝敗が決まり、開始3分でオオモノイカが乱入します。</dd>
+    <dt>7分のナワバリ戦</dt><dd>開始3分でオオモノイカが乱入し、空が赤黒く染まり黒い雨と黒インクが降り注ぎ（地下B1へも浸透・蓄積）、倒されずに生き残るとボスの塗り面積も含めて勝敗が決まります。</dd>
     <dt>PC</dt><dd>WASD、マウス、左クリックまたはFで射撃、Shiftで潜る、Spaceでジャンプ、Gでサブ、Qでスーパー、Eでドローン、CでSW OUT IIのCOモード。</dd>
   </dl>`;
   content.append(settings());
@@ -691,10 +692,12 @@ function pause() {
 function finish() {
   state='result';
   if (remote) forgetRoom(remote.ticket,battle.mode);
-  const {scores,title}=inkResult(paint);
+  const {scores,title,bossAlive}=inkResult(paint,battle);
   drawMap();
   const content=document.createElement('div');
-  content.innerHTML='<div class="result-scores"><div>CYAN<b>'+scores[0]+'</b></div><div>AMBER<b>'+scores[1]+'</b></div></div>';
+  content.innerHTML=bossAlive
+    ?'<div class="result-scores three"><div>CYAN<b>'+scores[0]+'</b></div><div>AMBER<b>'+scores[1]+'</b></div><div class="boss">BOSS<b>'+scores[2]+'</b></div></div>'
+    :'<div class="result-scores"><div>CYAN<b>'+scores[0]+'</b></div><div>AMBER<b>'+scores[1]+'</b></div></div>';
   matchRecord(content);
   showDialog('result',title,content,[
     button('もう一戦','primary',()=>start(battle.mode,'new')),
@@ -994,7 +997,7 @@ function showTitle() {
   $('start').focus({preventScroll:true});
 }
 
-const MAP_CYAN32=0xffbed128, MAP_AMBER32=0xff4476f4;
+const MAP_CYAN32=0xffbed128, MAP_AMBER32=0xff4476f4, MAP_BOSS32=0xff2a1820;
 const MAP_FLOOR32=0xff57523e, MAP_RAISED32=0xff747561, MAP_WALL32=0xff2f2918;
 let mapPixels32=null;
 
@@ -1027,7 +1030,7 @@ function drawMap() {
   const out=mapPixels32, owners=paint.owner;
   for (let i=0,n=indices.length;i<n;i++) {
     const index=indices[i], owner=index===-1?0:owners[index];
-    out[i]=owner===1?MAP_CYAN32:owner===2?MAP_AMBER32:colors32[i];
+    out[i]=owner===1?MAP_CYAN32:owner===2?MAP_AMBER32:owner===3?MAP_BOSS32:colors32[i];
   }
   miniCtx.putImageData(mapImage,0,0);
   const outer=level===0 && zoneOf(view.x)===0 && (Math.abs(view.x)>boundX || Math.abs(view.z)>boundZ);
@@ -1044,6 +1047,45 @@ function drawMap() {
       miniCtx.strokeStyle='#94b9ad';
       miniCtx.lineWidth=1;
       miniCtx.beginPath();miniCtx.moveTo(px(10.9),pz(-35));miniCtx.lineTo(px(10.9),pz(35));miniCtx.stroke();
+    }
+    const ds=battle.dynamicStage;
+    if (ds?.active || ds?.manualOverride) {
+      for (const h of ds.sinkholes) if (h.radius>0.4) {
+        miniCtx.strokeStyle='#f2b544';
+        miniCtx.fillStyle='#090b0f';
+        miniCtx.lineWidth=1.4;
+        miniCtx.beginPath();
+        miniCtx.arc(px(h.x),pz(h.z),Math.max(2.5,h.radius*1.6),0,Math.PI*2);
+        if (level===0) miniCtx.fill();
+        miniCtx.stroke();
+      }
+      if (level===0) {
+        for (const rw of ds.risingWalls) if (rw.h>0.3) {
+          miniCtx.save();
+          miniCtx.translate(px(rw.x),pz(rw.z));
+          miniCtx.rotate(rw.yaw);
+          miniCtx.fillStyle='#d4c59a';
+          miniCtx.fillRect(-rw.w*1.1,-rw.d*1.1,rw.w*2.2,rw.d*2.2);
+          miniCtx.restore();
+        }
+        if (ds.railIntrusion.trackProgress>0.05) {
+          const count=Math.max(1,Math.floor(ds.railIntrusion.trackProgress*(ds.railIntrusion.segments.length-1)));
+          miniCtx.strokeStyle='#ffb957';
+          miniCtx.lineWidth=1.6;
+          miniCtx.beginPath();
+          for (let k=0;k<=count;k++) {
+            const seg=ds.railIntrusion.segments[k];
+            if (k===0) miniCtx.moveTo(px(seg.x),pz(seg.z));
+            else miniCtx.lineTo(px(seg.x),pz(seg.z));
+          }
+          miniCtx.stroke();
+          if (ds.railIntrusion.pose) {
+            const tp=ds.railIntrusion.pose;
+            miniCtx.fillStyle='#ff4936';
+            miniCtx.fillRect(px(tp.x)-4,pz(tp.z)-2,8,4);
+          }
+        }
+      }
     }
     for (const stair of STAIRS) {
       const l=stairPoint(stair,level);
@@ -1087,6 +1129,30 @@ function drawMap() {
     }
     const hz=battle.hazards;
     if (hz) {
+      if (level===0 && hz.trainBoss?.active) {
+        miniCtx.save();
+        miniCtx.translate(px(hz.trainBoss.x),pz(hz.trainBoss.z));
+        miniCtx.rotate(hz.trainBoss.yaw??Math.PI/2);
+        miniCtx.fillStyle='#ff2838';
+        miniCtx.fillRect(-3.2,-7.5,6.4,15);
+        miniCtx.strokeStyle='#ffd45a';
+        miniCtx.lineWidth=1.4;
+        miniCtx.strokeRect(-3.2,-7.5,6.4,15);
+        miniCtx.restore();
+      }
+      if (level===0 && hz.heli?.active) {
+        const hx=px(hz.heli.x), hzPos=pz(hz.heli.z);
+        miniCtx.fillStyle='#ff5432';
+        miniCtx.strokeStyle='#ffe270';
+        miniCtx.lineWidth=1.6;
+        miniCtx.beginPath();
+        miniCtx.arc(hx,hzPos,4.8,0,Math.PI*2);
+        miniCtx.fill();
+        miniCtx.beginPath();
+        miniCtx.moveTo(hx-7,hzPos); miniCtx.lineTo(hx+7,hzPos);
+        miniCtx.moveTo(hx,hzPos-7); miniCtx.lineTo(hx,hzPos+7);
+        miniCtx.stroke();
+      }
       if (level===0 && hz.tsunami?.phase==='wave') {
         miniCtx.fillStyle='rgba(36,166,214,0.48)';
         const wx=px(hz.tsunami.x);
@@ -1223,9 +1289,10 @@ function updateAbilities(p) {
   $('transit-action').disabled=option?.kind==='busy';
   $('transit-label').textContent=option?.label ?? '';
   $('transit-action').setAttribute('aria-label',option?.label ?? '列車・車に乗る・降りる');
-  const inTransit=!!p.ride || !!p.lift || !!p.car || !!p.inCar;
-  $('reticle').hidden=inTransit;
-  game.classList.toggle('in-transit',inTransit);
+  const inTrain=!!p.ride || !!p.lift, inCar=!!p.car || !!p.inCar;
+  $('reticle').hidden=inTrain || inCar;
+  game.classList.toggle('in-transit',inTrain);
+  game.classList.toggle('in-car',inCar);
 }
 
 function updateHud() {
@@ -1234,10 +1301,11 @@ function updateHud() {
   const format=s=>Math.floor(s/60)+':'+String(s%60).padStart(2,'0');
   setText('time',battle.unlimited?'∞':format(time));
   $('time').classList.toggle('urgent',!battle.unlimited && time<=30);
-  const boss=battle.boss, raiders=battle.raiders, hz=battle.hazards, tb=hz?.trainBoss, goat=hz?.goat, view=battle.cameraActor(), level=watchingAerial()?0:zoneOf(view.x);
+  const boss=battle.boss, raiders=battle.raiders, hz=battle.hazards, tb=hz?.trainBoss, goat=hz?.goat, heli=hz?.heli, view=battle.cameraActor(), level=watchingAerial()?0:zoneOf(view.x);
   const showGoat=!!goat?.active;
   const showTrainBoss=!showGoat && !!tb?.active && !boss.active;
-  $('boss-hud').hidden=!showGoat && !boss.active && !showTrainBoss;
+  const showHeli=!showGoat && !showTrainBoss && !boss.active && !!heli?.active;
+  $('boss-hud').hidden=!showGoat && !boss.active && !showTrainBoss && !showHeli;
   const stationService=!watchingAerial() && level<2?battle.transportService(view):null;
   const transit=level>=2?battle.cabinTrain(view.x):stationService?.rail ??
     [battle.transit,battle.metro].find(rail=>rail.section===level && (rail.failed() || rail.alertUntil>rail.time)) ??
@@ -1286,19 +1354,26 @@ function updateHud() {
     $('boss-bar').style.transform='scaleX('+ratio+')';
   } else if (boss.active) {
     setText('boss-name',boss.name);
-    $('boss-phase').textContent='第'+boss.phase+'段階';
+    $('boss-phase').textContent='第'+boss.phase+'段階 · 黒塗 '+paint.percent(2).toFixed(1)+'%';
     const ratio=boss.hp/boss.maxHp;
     $('boss-pct').textContent=Math.ceil(ratio*100)+'%';
     $('boss-bar').style.transform='scaleX('+ratio+')';
   } else if (showTrainBoss) {
     setText('boss-name',tb.name);
-    $('boss-phase').textContent='暴走ボス';
+    $('boss-phase').textContent='ステージ蹂躙ボス';
     const ratio=clamp(tb.hp/tb.maxHp,0,1);
     $('boss-pct').textContent=Math.ceil(ratio*100)+'%';
     $('boss-bar').style.transform='scaleX('+ratio+')';
+  } else if (showHeli) {
+    setText('boss-name',heli.name);
+    $('boss-phase').textContent='無差別ミサイル';
+    const ratio=clamp(heli.hp/heli.maxHp,0,1);
+    $('boss-pct').textContent=Math.ceil(ratio*100)+'%';
+    $('boss-bar').style.transform='scaleX('+ratio+')';
   }
-  const primaryAlert=battle.timeless?raiders:boss, alert=$('boss-alert');
-  const activeAlert=hz && hz.alertUntil>battle.clock && hz.alertUntil>=primaryAlert.alertUntil?hz:primaryAlert;
+  const primaryAlert=battle.timeless?raiders:boss, ds=battle.dynamicStage, alert=$('boss-alert');
+  let activeAlert=hz && hz.alertUntil>battle.clock && hz.alertUntil>=primaryAlert.alertUntil?hz:primaryAlert;
+  if (ds && ds.alertUntil>battle.clock && ds.alertUntil>=activeAlert.alertUntil) activeAlert=ds;
   alert.hidden=activeAlert.alertUntil<=battle.clock;
   if (!alert.hidden && alert.textContent!==activeAlert.alert) alert.textContent=activeAlert.alert;
   for (let i=0;i<2;i++) {
@@ -1310,7 +1385,7 @@ function updateHud() {
   for (const {actor,dot} of tags) dot?.classList.toggle('down',actor.down>0);
   const p=battle.player;
   if (p) {
-    const readout=inkReadout(p),ratio=readout.ratio,giga=p.tankMax>BASE_TANK;
+    const readout=inkReadout(p),ratio=readout.ratio,giga=p.tankMax>=BASE_TANK*2;
     $('player-meter').setAttribute('aria-label',readout.empty?'インク不足':readout.low?'インク残りわずか':'インクと体力のゲージ');
     $('player-meter').classList.toggle('ink-low',readout.low);
     $('player-meter').classList.toggle('ink-empty',readout.empty);
@@ -1333,8 +1408,8 @@ function updateHud() {
       const gear=drivenCar.gear===0 && drivenCar.speed<-.2?'R':(drivenCar.gear||1)+'速';
       const tag=drivenCar.boostFlame>.05?' · TURBO!!':drivenCar.drifting?' · DRIFT':'';
       const stain=Math.round(drivenCar.stain*100);
-      if (drivenCar.stain>=.7) return '⚠ 敵インク汚染 '+stain+'% · 爆発危険！ '+kmh+'km/h ('+gear+') · [R] 脱出';
-      return kmh+' km/h · '+gear+tag+' · Spaceドリフト / [R] 降りる'+(stain>2?' · 敵インク '+stain+'%':'');
+      if (drivenCar.stain>=.7) return '⚠ 敵インク汚染 '+stain+'% · 爆発危険！ '+kmh+'km/h ('+gear+') · [R/Enter] 脱出';
+      return kmh+' km/h · '+gear+tag+' · WASD運転 / Spaceドリフト / [R・Enter] 降車'+(stain>2?' · 敵インク '+stain+'%':'');
     })();
     setText('meter-tip',carTip ?? (p.climbing?'インク壁を登っています':p.swimming?(p.inkSwimming?'自インク · 高速回復':'イカ状態 · ゆっくり回復'):
       p.inkPenalty?'敵インク · 移動と回復低下':p.charge>.03?(p.charge>=1?'最大チャージ · 離して発射':'チャージ中'):
@@ -1348,6 +1423,7 @@ function updateHud() {
     const downNote=p.downBy==='goat'?'破壊神ゴートに蹂躙された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
       p.downBy==='boss'?'オオモノイカに倒された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
       p.downBy==='trainBoss'?'暴走列車に撃破された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
+      p.downBy==='heli'?'暴走ヘリのミサイルに撃破された · 復帰まで '+BOSS_RESPAWN_SECONDS+'秒':
       p.downBy==='carBomb'?'車の爆発に巻き込まれた · 復帰まで '+RESPAWN_SECONDS+'秒':
       p.downBy==='car'?'車に轢き倒された · 復帰まで '+RESPAWN_SECONDS+'秒':
       p.downBy==='drown'?'水没して溺死した · 復帰まで '+RESPAWN_SECONDS+'秒':
@@ -1718,6 +1794,11 @@ function frame(now) {
     demoStage.draw(renderer,camera.eye[0],activeClock);
     for (const actor of demoActors) drawCrew(renderer,actor,activeClock);
   }
+  renderer.setMood?.({
+    bossActive:!!battle?.boss?.active && !battle?.timeless,
+    raining:!!battle?.hazards?.rain?.active,
+    dt
+  });
   renderer.draw(camera,paint,activeClock);
   renderedWidth=width;
   renderedHeight=height;
@@ -1780,7 +1861,7 @@ $('time-limit')?.addEventListener('click',()=>{
 });
 $('change-loadout').addEventListener('click',()=>{if (!dialogKind) loadout(true);});
 $('quality').addEventListener('click',()=>{
-  prefs.quality={high:'lite',lite:'ultra',ultra:'high'}[qualityLevel()];
+  prefs.quality={high:'ultra',ultra:'lite',lite:'ultralite',ultralite:'high'}[qualityLevel()];
   savePrefs();
 });
 $('film').addEventListener('click',()=>filmDialog());
@@ -1866,7 +1947,7 @@ document.addEventListener('keydown',event=>{
     if (event.code==='KeyE') droneQueued=true;
     if (event.code==='KeyG') subQueued=true;
     if (event.code==='KeyC') coQueued=true;
-    if (event.code==='KeyR') useQueued=true;
+    if (event.code==='KeyR' || event.code==='Enter' || event.code==='NumpadEnter') useQueued=true;
     if (event.code==='KeyB') loadout(true);
   }
 });

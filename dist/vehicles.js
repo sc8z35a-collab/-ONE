@@ -7,7 +7,7 @@ import {stairLane} from './stairs.js';
 export const CAR_EXPLOSION_RADIUS=8.4;
 export const CAR_EXPLOSION_DAMAGE=520;
 export const CAR_RESPAWN_SECONDS=38;
-export const CAR_ENTER_RANGE=3.6;
+export const CAR_ENTER_RANGE=5.6;
 
 const T=Math.PI/2;
 const INK_COLORS=[TEAM_INK[0],TEAM_INK[1],0xa66fbd];
@@ -199,10 +199,16 @@ export class Vehicles {
     for (let i=0;i<this.cars.length;i++) {
       const car=this.cars[i];
       if (!car.alive || car.driver) continue;
-      const d=Math.hypot(car.x-actor.x,car.z-actor.z);
-      if (d<best && Math.abs(car.y-actor.y)<2.1) {best=d;nearest=car;}
+      const dx=actor.x-car.x, dz=actor.z-car.z;
+      const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
+      const rx=Math.cos(car.yaw), rz=Math.sin(car.yaw);
+      const lx=Math.abs(dx*fx+dz*fz), lz=Math.abs(dx*rx+dz*rz);
+      const edgeDist=Math.hypot(Math.max(0,lx-car.w*.5),Math.max(0,lz-car.d*.5));
+      if (edgeDist<=2.85 && Math.hypot(dx,dz)<best+car.w*.5 && Math.abs(car.y-actor.y)<2.4) {
+        best=edgeDist; nearest=car;
+      }
     }
-    return nearest?{kind:'car-enter',car:nearest,label:'車に乗る'}:null;
+    return nearest?{kind:'car-enter',car:nearest,label:'🚗 車に乗る'}:null;
   }
 
   enter(actor,car) {
@@ -361,7 +367,7 @@ export class Vehicles {
       const falloff=clamp(1-.55*(dist/CAR_EXPLOSION_RADIUS),.42,1);
       const dmg=CAR_EXPLOSION_DAMAGE*falloff;
       const inv=1/Math.max(.3,dist);
-      if (!target.isBoss && !target.isGoat && !target.isSniper && !target.isRogueDrone) {
+      if (!target.isBoss && !target.isGoat && !target.isSniper && !target.isRogueDrone && !target.isHeli) {
         b.stepActor(target,dx*inv*2.8,dz*inv*2.8);
       }
       b.damage(target,dmg,source,[target.x,target.y+.9,target.z],'carBomb');
@@ -741,7 +747,7 @@ export class Vehicles {
 
 function drawVehicle(r,car,clock,dist=10,raining=false,hasFrustum=false) {
   const {x,y,z,yaw,w,d,style,baseTint,stain,stainTeam,driver,hitFlash}=car;
-  const hi=!r.lite && !r.ultra && dist<42;
+  const hi=!r.lite && !r.ultralite && dist<42;
   const inView=!hasFrustum || r.inFrustum(x,y+1,z,w+2.4);
   const inkColor=INK_COLORS[stainTeam>=0?stainTeam:1] ?? INK_COLORS[1];
   const flash=clock-hitFlash<.10?.38:0;
@@ -757,6 +763,13 @@ function drawVehicle(r,car,clock,dist=10,raining=false,hasFrustum=false) {
   if (inView) {
     _vShadeOpts.yaw=visualYaw-T;
     r.add('shade',x,y+.018,z,w*1.14,1,d*1.30,0,28,_vShadeOpts);
+    if (!driver && dist<16) {
+      const bob=Math.sin(clock*4.2+car.index)*.11;
+      const hover=dist<CAR_ENTER_RANGE+2;
+      _vRipOpts.label=(clock*.85+car.index*.2)%1;
+      r.add('ripple',x,y+.06,z,w+2.0,.04,w+2.0,hover?0x38ffe0:0xa5e6dc,12,_vRipOpts);
+      r.add('orb',x,y+car.h+.78+bob,z,.24,.30,.24,hover?0x38ffe0:0xc4efe6,3,_vDyn);
+    }
   }
 
   // Full 3D sprung chassis coordinate frame (yaw+drift, pitch squat/dive, cornering roll, engine idle hum)
