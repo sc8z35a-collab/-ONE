@@ -1,7 +1,7 @@
-import {TAU,add,clamp,forward,mix,scale} from './render.js';
+import {TAU,add,clamp,cross,forward,mix,scale,unit} from './render.js';
 import {TEAM_INK} from './world.js';
 import {PAINT_RADIUS_FACTOR} from './weapons.js';
-import {isCabin,localX,sameLevel,zoneOf} from './layout.js';
+import {localX,sameLevel,zoneOf} from './layout.js';
 import {stairLane} from './stairs.js';
 
 export const CAR_EXPLOSION_RADIUS=8.4;
@@ -24,19 +24,33 @@ function lerpRgb(base,tint,t) {
 
 const angleDiff=(a,b)=>Math.atan2(Math.sin(b-a),Math.cos(b-a));
 
+// Builds a full 3D orthonormal basis [fwd, up, right] for a sprung vehicle chassis
+// incorporating heading (yaw + drift slip), acceleration/brake/slope pitch, and cornering roll.
+function chassisBasis(yaw,pitch,roll) {
+  const fx0=Math.sin(yaw), fz0=-Math.cos(yaw);
+  const rx0=Math.cos(yaw), rz0=Math.sin(yaw);
+  const cp=Math.cos(pitch), sp=Math.sin(pitch);
+  const cr=Math.cos(roll), sr=Math.sin(roll);
+  // Apply pitch around right axis (positive pitch lifts the nose during hard acceleration)
+  const fx=fx0*cp, fy=sp, fz=fz0*cp;
+  const ux0=-fx0*sp, uy0=cp, uz0=-fz0*sp;
+  // Apply roll around forward axis (positive roll tilts roof toward right)
+  const ux=ux0*cr+rx0*sr, uy=uy0*cr, uz=uz0*cr+rz0*sr;
+  const rx=rx0*cr-ux0*sr, ry=-uy0*sr, rz=rz0*cr-uz0*sr;
+  return [[fx,fy,fz],[ux,uy,uz],[rx,ry,rz]];
+}
+
 // Ray vs oriented bounding box in car-local space (local X = forward, local Z = right, local Y = up).
 function rayCar(car,start,end,clearance=0,limit=1) {
   const dx=end[0]-start[0], dy=end[1]-start[1], dz=end[2]-start[2];
   const hw=car.w*.5+clearance, hh=car.h*.5+clearance, hd=car.d*.5+clearance;
   const cx=car.x, cy=car.y+car.h*.5, cz=car.z;
   const rBound=Math.hypot(hw,hd)+.25;
-  // Fast sphere/AABB reject before trig
   const minX=start[0]<end[0]?start[0]:end[0], maxX=start[0]>end[0]?start[0]:end[0];
   const minZ=start[2]<end[2]?start[2]:end[2], maxZ=start[2]>end[2]?start[2]:end[2];
   const minY=start[1]<end[1]?start[1]:end[1], maxY=start[1]>end[1]?start[1]:end[1];
   if (maxX<cx-rBound || minX>cx+rBound || maxZ<cz-rBound || minZ>cz+rBound || maxY<car.y-clearance || minY>car.y+car.h+clearance) return null;
 
-  // Car forward axis = [sin(yaw), 0, -cos(yaw)], right axis = [cos(yaw), 0, sin(yaw)]
   const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
   const rx=Math.cos(car.yaw), rz=Math.sin(car.yaw);
   const ox=start[0]-cx, oy=start[1]-cy, oz=start[2]-cz;
@@ -97,7 +111,11 @@ export class Vehicles {
       index,
       spawnX:def.x, spawnY:y, spawnZ:def.z, spawnYaw:yaw,
       x:def.x, y, z:def.z, yaw,
-      vx:0, vz:0, speed:0, steer:0, wheelSpin:0, pitch:0, roll:0,
+      vx:0, vz:0, speed:0, steer:0, wheelSpin:0,
+      // Upgraded 4-wheel suspension, powerslide drift & transmission engine state
+      pitch:0, roll:0, driftAngle:0, susY:0, susVel:0,
+      rpm:900, gear:1, throttle:0, braking:false, drifting:false, driftCharge:0,
+      boostFlame:0, impactShake:0,
       w, d, h, style, baseTint:def.tint ?? 0x688f86,
       alive:true, hp:maxHp, maxHp,
       stain:0, stainTeam:-1,
@@ -157,7 +175,7 @@ export class Vehicles {
     return best;
   }
 
-  // ---- Boarding & Exiting ([E] key / transport button) ----
+  // ---- Boarding & Exiting ([R] key / transport button) ----
   option(actor) {
     if (!actor || actor.down>0 || actor.ride || actor.lift || zoneOf(actor.x)!==0) return null;
     if (actor.car) {
@@ -179,6 +197,9 @@ export class Vehicles {
     if (actor.giant || actor.beaming || actor.slam) b.abilities.clearSuper(actor);
     car.driver=actor;
     car.ownerTeam=actor.team;
+    // Suspension compression bounce when hopping into the driver's seat!
+    car.susVel=-.95;
+    car.rpm=1450;
     actor.car=car;
     actor.swimming=actor.inkSwimming=actor.climbing=actor.rolling=false;
     actor.charge=actor.rollHold=0;
@@ -218,6 +239,9 @@ export class Vehicles {
       }
     }
     car.driver=null;
+    car.braking=false;
+    car.drifting=false;
+    car.susVel=.65;
     actor.car=null;
     actor.x=ex; actor.y=ey; actor.z=ez;
     actor.vx=0; actor.vz=0; actor.vy=0;
@@ -247,12 +271,14 @@ export class Vehicles {
     const lost=Math.min(car.hp,amount);
     car.hp-=lost;
     car.hitFlash=b.clock;
-    // Dye the car progressively in the enemy's ink color!
+    // Chassis shudders on impact!
+    car.susVel-=.72;
+    car.impactShake=Math.min(1,(car.impactShake??0)+.45);
     car.stain=clamp(1-car.hp/car.maxHp,0,1);
     if (attackerTeam>=0) car.stainTeam=attackerTeam;
     else if (car.stainTeam<0) car.stainTeam=2;
     const p=point ?? [car.x,car.y+car.h*.65,car.z];
-    b.burst(p,attackerTeam,6,2.3);
+    b.burst(p,attackerTeam,8,2.7);
     if (source?.isPlayer) b.callbacks.sound?.('hit');
     if (car.hp<=0 || car.stain>=1) {
       this.explode(car,source);
@@ -282,23 +308,24 @@ export class Vehicles {
     car.hp=0;
     car.stain=1;
     car.speed=0; car.vx=0; car.vz=0;
+    car.drifting=false; car.braking=false; car.boostFlame=0;
     car.explodedAt=b.clock;
     car.explodeTeam=team;
     car.respawnAt=b.elapsed+CAR_RESPAWN_SECONDS;
     if (driver) {
       this.exit(driver,true);
-      // Place ejected driver right at blast center so the explosion hits them cleanly!
       driver.x=cx; driver.y=cy+.1; driver.z=cz;
     }
-    // Massive ink splash & visual shockwaves
+    // Massive ink splash & multi-layered shockwave rings
     const floor=b.world.floor(cx,cz);
     if (team>=0 && b.paint.hasSurface(cx,cz,floor.layer)) {
       const painted=b.paint.stampGround(cx,cz,6.2*PAINT_RADIUS_FACTOR,team,floor.layer,0,.095);
       if (source && source.team>=0) source.painted=(source.painted??0)+painted;
     }
-    b.burst([cx,cy+1.1,cz],team,34,7.4);
-    b.abilities.rings.push({x:cx,y:floor.y+.08,z:cz,r:CAR_EXPLOSION_RADIUS,team:Math.max(0,team),until:b.clock+.75});
-    b.abilities.rings.push({x:cx,y:floor.y+.12,z:cz,r:CAR_EXPLOSION_RADIUS*.55,team:1,until:b.clock+.48});
+    b.burst([cx,cy+1.1,cz],team,42,8.4);
+    b.addInkImpact?.({p:[cx,cy+1.25,cz],team:Math.max(0,team),kind:2});
+    b.abilities.rings.push({x:cx,y:floor.y+.08,z:cz,r:CAR_EXPLOSION_RADIUS,team:Math.max(0,team),until:b.clock+.82});
+    b.abilities.rings.push({x:cx,y:floor.y+.14,z:cz,r:CAR_EXPLOSION_RADIUS*.6,team:1,until:b.clock+.52});
     b.callbacks.sound?.('bossDown');
     b.stage.damageArea(b,source ?? {team},cx,cy,cz,CAR_EXPLOSION_RADIUS,CAR_EXPLOSION_DAMAGE*.8);
     b.events.unshift({label:'💥 車が敵インクに染まり大爆発！',team,until:b.clock+4.0});
@@ -314,7 +341,6 @@ export class Vehicles {
     for (let i=0;i<victims.length;i++) {
       const target=victims[i];
       if (!sameLevel(target.x,cx) || (target.down??0)>0 || target.ride || target.lift) continue;
-      // Friendly source does not splat teammates unless they were driving an enemy-blown car
       if (source && source.team>=0 && target.team===source.team && target!==driver) continue;
       const dx=target.x-cx, dz=target.z-cz, dist=Math.hypot(dx,dz);
       if (dist>CAR_EXPLOSION_RADIUS || Math.abs(target.y-cy)>4.2) continue;
@@ -322,7 +348,7 @@ export class Vehicles {
       const dmg=CAR_EXPLOSION_DAMAGE*falloff;
       const inv=1/Math.max(.3,dist);
       if (!target.isBoss && !target.isGoat && !target.isSniper && !target.isRogueDrone) {
-        b.stepActor(target,dx*inv*2.6,dz*inv*2.6);
+        b.stepActor(target,dx*inv*2.8,dz*inv*2.8);
       }
       b.damage(target,dmg,source,[target.x,target.y+.9,target.z],'carBomb');
     }
@@ -331,51 +357,85 @@ export class Vehicles {
     this.damageArea(cx,cy,cz,CAR_EXPLOSION_RADIUS*.9,CAR_EXPLOSION_DAMAGE*.65,source,car);
   }
 
-  // ---- Driving Physics, Ink Painting & Roadkill Ramming ----
+  // ---- Upgraded 4-Wheel Suspension, Drift, Gear & Driving Dynamics Engine ----
   drive(actor,input,dt) {
     const car=actor?.car;
     if (!car || !car.alive) return false;
     const b=this.battle;
     const throttle=clamp(input.z??0,-1,1);
     const steerInput=clamp(input.x??0,-1,1);
-    const drift=!!input.jump;
+    const handbrake=!!input.jump;
 
-    // Arcade-crisp acceleration, braking, reverse, and handbrake drift
-    const maxFwd=16.2, maxRev=-8.8;
-    if (throttle>.05) {
-      const accel=car.speed<0?34:19.5;
-      car.speed=Math.min(maxFwd,car.speed+accel*throttle*dt);
-    } else if (throttle<-.05) {
-      const accel=car.speed>0?36:14.5;
-      car.speed=Math.max(maxRev,car.speed+accel*throttle*dt);
+    const prevSpeed=car.speed;
+    const prevGear=car.gear ?? 1;
+    const wasDrifting=!!car.drifting;
+
+    // Archetype handling tuning: coupe is snappy/fast, pickup has torque, van is heavy rammer
+    const topFwd=car.style===0?17.6:car.style===1?16.4:15.2;
+    const topRev=-9.2;
+    const accelRate=car.style===0?22.5:car.style===1?20.5:18.2;
+
+    const braking=(throttle<-.08 && car.speed>.8) || (throttle>.08 && car.speed<-.8) || (handbrake && Math.abs(car.speed)>1.5 && Math.abs(steerInput)<.15);
+    car.braking=braking;
+    car.throttle=throttle;
+
+    // Active powerslide drift when holding Space while steering at speed!
+    const canDrift=handbrake && car.speed>4.4 && Math.abs(steerInput)>.12;
+    car.drifting=canDrift;
+    if (canDrift) {
+      car.driftCharge=Math.min(1.4,(car.driftCharge??0)+dt);
+    } else if (wasDrifting && (car.driftCharge??0)>.45 && throttle>.2) {
+      // Mini-turbo exit boost out of a clean drift!
+      car.speed=Math.min(topFwd+2.6,car.speed+3.4);
+      car.boostFlame=.55;
+      car.susVel-=.7;
+      car.driftCharge=0;
+      if (actor.isPlayer) b.callbacks.sound?.('drone');
     } else {
-      const drag=(drift?22:9.5)*dt;
+      car.driftCharge=Math.max(0,(car.driftCharge??0)-dt*2.5);
+    }
+
+    // Longitudinal engine torque, braking, and rolling/aerodynamic drag
+    if (throttle>.05) {
+      const boostMul=car.boostFlame>0?1.32:1;
+      const accel=car.speed<0?38:accelRate*boostMul*(car.drifting?.86:1);
+      const cap=car.boostFlame>0?topFwd+2.6:topFwd;
+      car.speed=Math.min(cap,car.speed+accel*throttle*dt);
+      if (prevSpeed<2.5 && throttle>.7) car.boostFlame=Math.max(car.boostFlame??0,.28);
+    } else if (throttle<-.05) {
+      const accel=car.speed>0?40:15.5;
+      car.speed=Math.max(topRev,car.speed+accel*throttle*dt);
+    } else {
+      const drag=(handbrake?24:9.2)*dt;
       car.speed=Math.abs(car.speed)<=drag?0:car.speed-Math.sign(car.speed)*drag;
     }
 
-    // Smooth steering (turn rate scales smoothly with speed & allows tight drift turns)
-    const targetSteer=steerInput*.55;
-    car.steer=mix(car.steer,targetSteer,1-Math.exp(-dt*14));
+    // Speed-sensitive steering & powerslide slip angle
+    const targetSteer=steerInput*(canDrift?.68:.54);
+    car.steer=mix(car.steer,targetSteer,1-Math.exp(-dt*16));
     const speedMag=Math.abs(car.speed);
-    if (speedMag>.25) {
+    if (speedMag>.22) {
       const dirSign=car.speed>=0?1:-1;
-      const turnRate=(drift?3.15:2.35)*clamp(speedMag/4.5,.28,1);
-      // Standard game yaw: forward = [sin(yaw), 0, -cos(yaw)], so turning right (steerInput > 0) increases yaw!
+      const lowSpeedGrip=clamp(speedMag/3.8,.32,1);
+      const highSpeedStability=clamp(1.08-speedMag*.018,.78,1.05);
+      const turnRate=(canDrift?3.45:2.48)*lowSpeedGrip*highSpeedStability;
       car.yaw=angleDiff(0,car.yaw+steerInput*dirSign*turnRate*dt);
     }
 
+    // Slip angle sweeps rear end visually outward during powerslide drifts
+    const targetDrift=canDrift?steerInput*.38:0;
+    car.driftAngle=mix(car.driftAngle??0,targetDrift,1-Math.exp(-dt*(canDrift?9:7)));
+
     const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
     const dx=fx*car.speed*dt, dz=fz*car.speed*dt;
-    const oldX=car.x, oldZ=car.z;
+    const oldX=car.x, oldZ=car.z, oldY=car.y;
 
-    // Move car with sliding collision along world walls & other cars
     const canPlace=(nx,nz)=>{
       const lx=localX(nx);
       if (Math.abs(lx)>53.5 || Math.abs(nz)>33.5) return null;
       if (stairLane(nx,nz,.9)) return null;
       const fl=b.world.support(nx,car.y+.55,nz);
       if (Math.abs(fl.y-car.y)>.62) return null;
-      // Check front, center, and rear footprint circles against static world & other cars
       const r=car.d*.46;
       const offsets=[car.w*.34,0,-car.w*.34];
       for (let i=0;i<offsets.length;i++) {
@@ -397,19 +457,54 @@ export class Vehicles {
     if (moved) {
       car.x+=dx; car.z+=dz; car.y=moved.y;
     } else {
-      // Try sliding along X or Z independently so driving along curbs/walls feels great
       const slideX=canPlace(car.x+dx,car.z);
       const slideZ=canPlace(car.x,car.z+dz);
-      if (slideX) {car.x+=dx;car.y=slideX.y;car.speed*=.86;}
-      else if (slideZ) {car.z+=dz;car.y=slideZ.y;car.speed*=.86;}
-      else {car.speed*=-.22;}
+      if (slideX) {car.x+=dx;car.y=slideX.y;car.speed*=.86;car.impactShake=Math.min(1,(car.impactShake??0)+.22);}
+      else if (slideZ) {car.z+=dz;car.y=slideZ.y;car.speed*=.86;car.impactShake=Math.min(1,(car.impactShake??0)+.22);}
+      else {
+        if (speedMag>4) {car.susVel-=.85;car.impactShake=Math.min(1,(car.impactShake??0)+.55);}
+        car.speed*=-.22;
+      }
     }
+
+    // 4-Gear Automatic Transmission & RPM curve
+    const speedRatio=clamp(Math.abs(car.speed)/topFwd,0,1.15);
+    const gear=car.speed<-.3?0:speedRatio<.26?1:speedRatio<.54?2:speedRatio<.82?3:4;
+    if (gear>prevGear && gear>=2 && throttle>.4) {
+      // Subtle exhaust pop + squat impulse on upshift!
+      car.boostFlame=Math.max(car.boostFlame??0,.18);
+      car.susVel-=.35;
+    }
+    car.gear=gear;
+    const gearMin=[0,0,.24,.50,.78][gear];
+    const gearSpan=[.45,.30,.32,.34,.36][gear];
+    const targetRpm=900+clamp((speedRatio-gearMin)/gearSpan,0,1)*5800+(Math.abs(throttle)>.1?700:0)+(canDrift?650:0);
+    car.rpm=mix(car.rpm??900,clamp(targetRpm,900,7600),1-Math.exp(-dt*12));
+
+    // Real 3D Suspension Physics: slope alignment + accel squat + brake dive + cornering roll + spring-damper bounce!
+    const frontFl=b.world.support(car.x+fx*(car.w*.42),car.y+.6,car.z+fz*(car.w*.42));
+    const rearFl=b.world.support(car.x-fx*(car.w*.42),car.y+.6,car.z-fz*(car.w*.42));
+    const slopePitch=Math.abs(frontFl.y-rearFl.y)<1.2?Math.atan2(frontFl.y-rearFl.y,car.w*.84):0;
+    const longAccel=(car.speed-prevSpeed)/Math.max(.001,dt);
+    // Positive pitch lifts the nose (accel squat); negative dips the nose (hard braking)
+    const dynamicPitch=clamp(longAccel*.0042+(car.boostFlame>0?.035:0),-.095,.085);
+    car.pitch=mix(car.pitch??0,clamp(slopePitch+dynamicPitch,-.24,.24),1-Math.exp(-dt*12));
+
+    // Body roll leans outward against centrifugal cornering force
+    const targetRoll=clamp(-steerInput*car.speed*(canDrift?.016:.011),-.17,.17);
+    car.roll=mix(car.roll??0,targetRoll,1-Math.exp(-dt*11));
+
+    // Vertical suspension spring-damper reacts to road elevation jumps
+    const dyRoad=car.y-oldY;
+    if (Math.abs(dyRoad)>.02) car.susVel-=clamp(dyRoad*12,-.9,.9);
+    const springF=-92*(car.susY??0)-13*(car.susVel??0);
+    car.susVel=(car.susVel??0)+springF*dt;
+    car.susY=clamp((car.susY??0)+car.susVel*dt,-.16,.16);
+    car.boostFlame=Math.max(0,(car.boostFlame??0)-dt);
 
     car.vx=(car.x-oldX)/Math.max(.001,dt);
     car.vz=(car.z-oldZ)/Math.max(.001,dt);
-    car.wheelSpin+=car.speed*dt*2.8;
-    car.roll=mix(car.roll,clamp(-steerInput*car.speed*.012,-.14,.14),1-Math.exp(-dt*10));
-    car.pitch=mix(car.pitch,clamp(-throttle*.045,-.06,.06),1-Math.exp(-dt*9));
+    car.wheelSpin+=car.speed*dt*2.85;
 
     // Keep driver synchronized inside cabin
     actor.x=car.x;
@@ -420,31 +515,42 @@ export class Vehicles {
     actor.vy=0;
     actor.airborne=false;
 
-    // 1) PAINT THE ROAD WITH DRIVER'S OWN INK!
+    // 1) PAINT THE ROAD WITH DRIVER'S OWN INK + DRIFT SPRAY PLUMES!
     car.paintTimer-=dt;
     const actualSpeed=Math.hypot(car.vx,car.vz);
     if (actualSpeed>=.6 && car.paintTimer<=0 && actor.team>=0) {
-      car.paintTimer=.055;
+      car.paintTimer=.052;
       const rx=Math.cos(car.yaw), rz=Math.sin(car.yaw);
-      const tread=car.d*.36;
-      const paintR=car.d*.52*PAINT_RADIUS_FACTOR;
+      const tread=car.d*.38;
+      const paintR=car.d*(canDrift?.60:.52)*PAINT_RADIUS_FACTOR;
       for (const side of [-1,0,1]) {
         const px=car.x+rx*side*tread-fx*.35;
         const pz=car.z+rz*side*tread-fz*.35;
         const fl=b.world.support(px,car.y+.3,pz);
         if (Math.abs(fl.y-car.y)>.6) continue;
         if (!fl.raised && b.paint.hasSurface(px,pz,fl.layer)) {
-          const gained=b.paint.stampGround(px,pz,paintR,actor.team,fl.layer,car.wheelSpin,.052);
+          const gained=b.paint.stampGround(px,pz,paintR,actor.team,fl.layer,car.wheelSpin,.054);
           actor.painted+=gained;
-          if (gained>0) b.paint.kick(px,pz,fl.layer,car.vx*.45,car.vz*.45);
+          if (gained>0) b.paint.kick(px,pz,fl.layer,car.vx*.48,car.vz*.48);
         }
       }
-      if (actualSpeed>4) b.drops.push({p:[car.x-fx*car.w*.46,car.y+.25,car.z-fz*car.w*.46],
-        v:[-car.vx*.18+(b.rng()-.5)*2.5,2.2+b.rng()*1.4,-car.vz*.18+(b.rng()-.5)*2.5],
-        team:actor.team,size:.14,life:.32,max:.32});
+      // Twin rear tire ink rooster-tails & drift sparks
+      if (actualSpeed>4.5) {
+        const sprayCount=canDrift?2:1;
+        for (let k=0;k<sprayCount;k++) {
+          const tireSide=k===0?-1:1;
+          b.drops.push({
+            p:[car.x-fx*car.w*.42+rx*tireSide*car.d*.46,car.y+.22,car.z-fz*car.w*.42+rz*tireSide*car.d*.46],
+            v:[-car.vx*.22+rx*tireSide*(canDrift?3.6:1.2)+(b.rng()-.5)*2.0,
+               (canDrift?3.1:2.1)+b.rng()*1.4,
+               -car.vz*.22+rz*tireSide*(canDrift?3.6:1.2)+(b.rng()-.5)*2.0],
+            team:actor.team,size:canDrift?.18:.13,life:.36,max:.36
+          });
+        }
+      }
     }
 
-    // 2) RAM / RUN OVER ENEMIES（「引き倒せたり」）!
+    // 2) RAM / RUN OVER ENEMIES!
     if (actualSpeed>=2.8) {
       this.ramTargets(car,actor,actualSpeed);
     }
@@ -474,15 +580,15 @@ export class Vehicles {
       const lastHit=this.ramHits.get(target) ?? -99;
       if (b.clock-lastHit<.38) continue;
       this.ramHits.set(target,b.clock);
-      // Heavy impact damage: cruising/top speed (>10 m/s) runs over & splats regular fighters in one hit!
-      // (Remember Battle.damage scales by DAMAGE_SCALE = 1/3, so base 340 -> ~113 actual HP!)
       const impactBase=140+speed*24;
       const sideSign=lz>=0?1:-1;
       const pushX=fx*2.2+rx*sideSign*1.8, pushZ=fz*2.2+rz*sideSign*1.8;
       if (!target.isBoss && !target.isGoat) b.stepActor(target,pushX,pushZ);
       b.damage(target,impactBase,driver,[target.x,target.y+.9,target.z],'car');
-      b.burst([target.x,target.y+.85,target.z],driver.team,14,4.2);
-      // Slight recoil on vehicle
+      b.burst([target.x,target.y+.85,target.z],driver.team,16,4.8);
+      b.addInkImpact?.({p:[target.x,target.y+.95,target.z],team:driver.team,kind:(target.down??0)>0?2:1});
+      car.susVel-=1.1;
+      car.impactShake=1;
       car.speed*=.91;
     }
   }
@@ -493,43 +599,53 @@ export class Vehicles {
       const car=this.cars[i];
       if (!car.alive) {
         if (car.respawnAt>0 && b.elapsed>=car.respawnAt) {
-          // Respawn intact car cleanly at its original parking spot if unobstructed
           const occupied=b.actors.some(a=>a.down<=0 && sameLevel(a.x,car.spawnX) && Math.hypot(a.x-car.spawnX,a.z-car.spawnZ)<3.2);
           if (!occupied) {
             Object.assign(car,{
               x:car.spawnX,y:car.spawnY,z:car.spawnZ,yaw:car.spawnYaw,
-              vx:0,vz:0,speed:0,steer:0,pitch:0,roll:0,
+              vx:0,vz:0,speed:0,steer:0,pitch:0,roll:0,driftAngle:0,susY:0,susVel:0,
+              rpm:900,gear:1,throttle:0,braking:false,drifting:false,driftCharge:0,boostFlame:0,impactShake:0,
               alive:true,hp:car.maxHp,stain:0,stainTeam:-1,ownerTeam:-1,driver:null,respawnAt:0
             });
           }
         }
         continue;
       }
-      // If driver died or got forcibly disconnected, release driver seat
+      car.impactShake=Math.max(0,(car.impactShake??0)-dt*4.5);
       if (car.driver && (car.driver.down>0 || car.driver.car!==car)) {
         if (car.driver.car===car) car.driver.car=null;
         car.driver=null;
       }
-      // Coasting empty car decelerates smoothly to a stop
-      if (!car.driver && Math.abs(car.speed)>.05) {
-        const drag=14*dt;
-        car.speed=Math.abs(car.speed)<=drag?0:car.speed-Math.sign(car.speed)*drag;
-        const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
-        const nx=car.x+fx*car.speed*dt, nz=car.z+fz*car.speed*dt;
-        if (Math.abs(localX(nx))<53.5 && Math.abs(nz)<33.5 && !b.world.blocked(nx,car.y+.05,nz,car.d*.46,car.h)) {
-          car.x=nx; car.z=nz;
-          car.wheelSpin+=car.speed*dt*2.8;
-        } else {
-          car.speed=0;
+      // Settle empty car suspension, pitch, roll, rpm, and coasting speed
+      if (!car.driver) {
+        car.braking=false; car.drifting=false; car.boostFlame=Math.max(0,(car.boostFlame??0)-dt*2);
+        car.rpm=mix(car.rpm??900,900,1-Math.exp(-dt*6));
+        car.pitch=mix(car.pitch??0,0,1-Math.exp(-dt*8));
+        car.roll=mix(car.roll??0,0,1-Math.exp(-dt*8));
+        car.driftAngle=mix(car.driftAngle??0,0,1-Math.exp(-dt*8));
+        const springF=-92*(car.susY??0)-14*(car.susVel??0);
+        car.susVel=(car.susVel??0)+springF*dt;
+        car.susY=clamp((car.susY??0)+car.susVel*dt,-.16,.16);
+        if (Math.abs(car.speed)>.05) {
+          const drag=14*dt;
+          car.speed=Math.abs(car.speed)<=drag?0:car.speed-Math.sign(car.speed)*drag;
+          const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
+          const nx=car.x+fx*car.speed*dt, nz=car.z+fz*car.speed*dt;
+          if (Math.abs(localX(nx))<53.5 && Math.abs(nz)<33.5 && !b.world.blocked(nx,car.y+.05,nz,car.d*.46,car.h)) {
+            car.x=nx; car.z=nz;
+            car.wheelSpin+=car.speed*dt*2.85;
+          } else {
+            car.speed=0;
+          }
         }
       }
-      // Danger smoke/sparks when heavily dyed by enemy ink (>= 70%)
-      if (car.stain>=.70 && b.rng()<dt*10) {
+      // Dripping enemy ink & warning sparks when heavily dyed by enemy ink (>= 65%)
+      if (car.stain>=.65 && b.rng()<dt*(8+car.stain*12)) {
         b.drops.push({
-          p:[car.x+(b.rng()-.5)*1.2,car.y+1.35,car.z+(b.rng()-.5)*1.2],
-          v:[(b.rng()-.5)*1.8,2.6+b.rng()*1.8,(b.rng()-.5)*1.8],
+          p:[car.x+(b.rng()-.5)*1.4,car.y+1.35,car.z+(b.rng()-.5)*1.4],
+          v:[(b.rng()-.5)*2.1,2.6+b.rng()*2.2,(b.rng()-.5)*2.1],
           team:car.stainTeam>=0?car.stainTeam:1,
-          size:.18,life:.45,max:.45
+          size:.19,life:.48,max:.48
         });
       }
     }
@@ -541,7 +657,9 @@ export class Vehicles {
     const q=n=>Math.round(n*100)/100;
     return this.cars.map(c=>({
       id:c.id,x:q(c.x),y:q(c.y),z:q(c.z),yaw:q(c.yaw),speed:q(c.speed),steer:q(c.steer),
-      wheelSpin:q(c.wheelSpin),pitch:q(c.pitch),roll:q(c.roll),
+      wheelSpin:q(c.wheelSpin),pitch:q(c.pitch),roll:q(c.roll),driftAngle:q(c.driftAngle??0),
+      susY:q(c.susY??0),rpm:Math.round(c.rpm??900),gear:c.gear??1,
+      braking:!!c.braking,drifting:!!c.drifting,boostFlame:q(c.boostFlame??0),
       alive:c.alive,hp:q(c.hp),maxHp:c.maxHp,stain:q(c.stain),stainTeam:c.stainTeam,
       ownerTeam:c.ownerTeam,driverIndex:c.driver?this.battle.actors.indexOf(c.driver):-1,
       explodedAt:q(c.explodedAt),explodeTeam:c.explodeTeam,hitFlash:q(c.hitFlash)
@@ -561,6 +679,8 @@ export class Vehicles {
   checkpoint() {
     return this.cars.map(c=>({
       id:c.id,x:c.x,y:c.y,z:c.z,yaw:c.yaw,speed:c.speed,steer:c.steer,wheelSpin:c.wheelSpin,
+      pitch:c.pitch??0,roll:c.roll??0,driftAngle:c.driftAngle??0,susY:c.susY??0,
+      rpm:c.rpm??900,gear:c.gear??1,
       alive:c.alive,hp:c.hp,stain:c.stain,stainTeam:c.stainTeam,ownerTeam:c.ownerTeam,
       driverIndex:c.driver?this.battle.actors.indexOf(c.driver):-1,
       explodedAt:c.explodedAt,explodeTeam:c.explodeTeam,respawnAt:c.respawnAt
@@ -580,10 +700,10 @@ export class Vehicles {
     this.ramHits.clear();
   }
 
-  // ---- 3D Dynamic Vehicle Rendering (with live enemy-ink dyeing & explosion debris) ----
+  // ---- High-Craft Dynamic 3D Vehicle Rendering ----
   draw(r,viewX,viewZ,clock) {
     if (zoneOf(viewX)!==0) return;
-    const reach=r.reach??Infinity, lim2=reach===Infinity?Infinity:(reach+10)*(reach+10);
+    const reach=r.reach??Infinity, lim2=reach===Infinity?Infinity:(reach+12)*(reach+12);
     for (let i=0;i<this.cars.length;i++) {
       const car=this.cars[i];
       if (lim2!==Infinity) {
@@ -592,94 +712,235 @@ export class Vehicles {
       }
       if (!car.alive) {
         const age=clock-car.explodedAt;
-        if (age>=0 && age<1.35) drawExplosionDebris(r,car,age);
+        if (age>=0 && age<1.55) drawExplosionDebris(r,car,age);
         continue;
       }
-      drawVehicle(r,car,clock);
+      const dist=Math.hypot(car.x-viewX,car.z-viewZ);
+      drawVehicle(r,car,clock,dist);
     }
   }
 }
 
-function drawVehicle(r,car,clock) {
+function drawVehicle(r,car,clock,dist=10) {
   const {x,y,z,yaw,w,d,style,baseTint,stain,stainTeam,driver,hitFlash}=car;
+  const hi=!r.lite && !r.ultra && dist<38;
   const inkColor=INK_COLORS[stainTeam>=0?stainTeam:1] ?? INK_COLORS[1];
-  // Smoothly dye the entire car body toward the attacking enemy's ink color!
-  const flash=clock-hitFlash<.10?.35:0;
-  const warnPulse=stain>=.72 && Math.sin(clock*20)>0?.22:0;
+  const flash=clock-hitFlash<.10?.38:0;
+  const warnPulse=stain>=.72 && Math.sin(clock*22)>0?.26:0;
+  // Clearcoat metallic paint smoothly dyes toward enemy ink color as stain builds!
   const bodyTint=lerpRgb(baseTint,inkColor,clamp(stain*.92+flash*.4,0,1));
   const roofTint=lerpRgb(baseTint,inkColor,clamp(stain*1.05+warnPulse,0,1));
-  const trim=0x959f9e, rubber=0x293438, glass=driver?0x588a99:0x405e68;
+  const trim=0x9ba6a4, chrome=0xcfd6d2, darkMetal=0x2c363b, rubber=0x1e2629, glass=driver?0x4c7e8f:0x36525c;
+  const bodyMat=20; // Metallic armor clearcoat sheen for automotive lacquer!
 
-  // Car local frame: forward = [sin(yaw), 0, -cos(yaw)], right = [cos(yaw), 0, sin(yaw)]
-  // In renderer, box yaw rotation maps local X -> [cos(ry), 0, -sin(ry)] and local Z -> [sin(ry), 0, cos(ry)].
-  // So to align box local +X with car forward [sin(yaw), 0, -cos(yaw)], use ry = yaw - PI/2!
-  const ry=yaw-T;
-  const fx=Math.sin(yaw), fz=-Math.cos(yaw);
-  const rx=Math.cos(yaw), rz=Math.sin(yaw);
-  const at=(dx,dy,dz)=>[x+fx*dx+rx*dz,y+dy,z+fz*dx+rz*dz];
-  const p=(type,dx,dy,dz,sx,sy,sz,c,k=2,extra={})=>
-    r.add(type,...at(dx,dy,dz),sx,sy,sz,c,k,{dynamic:true,yaw:ry,...extra});
+  // Soft grounded AO contact shadow beneath the car!
+  const visualYaw=yaw+(car.driftAngle??0);
+  const ry=visualYaw-T;
+  r.add('shade',x,y+.018,z,w*1.12,1,d*1.28,0,28,{dynamic:true,yaw:ry,label:.72});
 
-  // Undercarriage & main sculpted chassis
-  p('box',0,.39,0,w-.16,.28,d-.06,rubber,4);
-  p('bevel',0,.65,0,w-.04,.45,d,bodyTint,4);
-  p('bevel',.40,.875,0,w-.86,.25,d-.10,bodyTint,4);
-  p('box',w/2-.57,.79,0,1.06,.20,d-.08,bodyTint,4);
-  p('box',-w/2+.54,.83,0,1.04,.27,d-.06,bodyTint,2);
+  // Full 3D sprung chassis coordinate frame (yaw+drift, pitch squat/dive, cornering roll, engine idle hum)
+  const idleVib=driver?Math.sin(clock*(32+(car.rpm??900)*.008))*.0045:0;
+  const shake=(car.impactShake??0)*Math.sin(clock*58)*.045;
+  const bodyLift=(car.susY??0)+idleVib;
+  const basis=chassisBasis(visualYaw,(car.pitch??0)+shake*.4,(car.roll??0)+shake);
+  const [bf,bu,br]=basis;
+  const at=(dx,dy,dz)=>[
+    x+bf[0]*dx+bu[0]*(dy+bodyLift)+br[0]*dz,
+    y+bf[1]*dx+bu[1]*(dy+bodyLift)+br[1]*dz,
+    z+bf[2]*dx+bu[2]*(dy+bodyLift)+br[2]*dz
+  ];
+  const opts={dynamic:true,basis};
+  const p=(type,dx,dy,dz,sx,sy,sz,c,k=bodyMat)=>r.add(type,...at(dx,dy,dz),sx,sy,sz,c,k,opts);
 
-  // Front & rear bumpers, grilles, headlights, taillights, and 4 rotating wheels
+  // ---- 1. Sculpted Chassis, Hood, Fenders & Underbody ----
+  p('box',0,.38,0,w-.16,.24,d-.08,darkMetal,4);
+  p('bevel',0,.64,0,w-.04,.44,d,bodyTint,bodyMat);
+  p('bevel',.38,.87,0,w-.86,.24,d-.12,bodyTint,bodyMat);
+  // Sculpted front hood + twin recessed air intake vents (GT / pickup detail)
+  p('bevel',w/2-.60,.82,0,1.14,.18,d-.12,bodyTint,bodyMat);
+  if (hi) {
+    for (const side of [-1,1]) p('box',w/2-.62,.925,side*.28,.46,.026,.22,darkMetal,4);
+  }
+  // Rear deck / trunk
+  p('bevel',-w/2+.56,.85,0,1.06,.24,d-.10,bodyTint,bodyMat);
+
+  // ---- 2. Front Fascia, Slatted Grille, Bumpers, Headlights, Taillights, Exhausts ----
+  // Front & rear bumpers + front aero splitter / rear diffuser
+  p('bevel',w/2-.04,.43,0,.22,.16,d+.10,darkMetal,4);
+  p('box',w/2+.05,.32,0,.16,.055,d+.04,rubber,21); // front chin splitter
+  p('bevel',-w/2+.04,.44,0,.22,.17,d+.10,darkMetal,4);
+  p('box',-w/2-.04,.33,0,.12,.08,d*.76,0x1d2528,4); // rear diffuser
+  // Front slatted grille & metallic badge emblem
+  p('box',w/2-.01,.63,0,.12,.22,d-.48,0x1d2629,4);
+  if (hi) {
+    for (const gy of [.57,.63,.69]) p('box',w/2+.055,gy,0,.02,.018,d-.54,chrome,4);
+    p('orb',w/2+.07,.64,0,.04,.07,.10,chrome,4);
+  }
+  // License plates front & rear
+  for (const sign of [-1,1]) p('box',sign*(w/2+.065),.48,0,.022,.13,.38,0xe6e7dc,0);
+
+  // LED Headlights, Turn Signals, Brake Lights, Reverse Lamps
+  const headBright=driver?0xfffce0:0xede3c4;
+  const brakeActive=!!car.braking;
+  const reverseActive=car.speed<-.35;
+  const tailColor=brakeActive?0xff2218:driver?0xd63626:0x8e2c22;
+  for (const oz of [-.56,.56]) {
+    // Front headlight housing + bright inner LED strip
+    p('bevel',w/2+.01,.73,oz,.09,.17,.36,darkMetal,4);
+    p('box',w/2+.055,.74,oz,.035,.12,.28,headBright,3);
+    p('box',w/2+.06,.66,oz,.03,.032,.26,0xffbe42,3);
+    // Subtle road headlight glow cones when driven!
+    if (driver && hi) {
+      p('orb',w/2+.55,.55,oz,.65,.34,.55,0xfff6d2,3);
+    }
+    // Rear taillight housing + blazing brake bar + white reverse lamp
+    p('bevel',-w/2-.01,.74,oz,.08,.17,.38,darkMetal,4);
+    p('box',-w/2-.052,.75,oz,.036,.12,.30,tailColor,3);
+    if (reverseActive) p('box',-w/2-.058,.66,oz*.72,.03,.05,.12,0xffffff,3);
+  }
+  // Twin chrome exhaust tailpipes + dynamic acceleration/shift turbo flames!
+  for (const ez of [-.42,.42]) {
+    const exBase=[bu,bf,br];
+    r.add('cylinder',...at(-w/2-.08,.33,ez),.10,.22,.10,chrome,4,{dynamic:true,basis:exBase});
+    r.add('cylinder',...at(-w/2-.18,.33,ez),.07,.04,.07,0x101416,4,{dynamic:true,basis:exBase});
+    if (driver && ((car.boostFlame??0)>0 || (car.throttle>.5 && car.speed>2))) {
+      const fLen=(car.boostFlame??0)>0?.42+.18*Math.sin(clock*48):.18+.06*Math.sin(clock*36);
+      const flameColor=(car.boostFlame??0)>0?0x66e8ff:0xffa83c;
+      r.add('cone',...at(-w/2-.22-fLen*.4,.33,ez),.11,fLen,.11,flameColor,3,{dynamic:true,basis:[bu,[-bf[0],-bf[1],-bf[2]],br]});
+      if ((car.boostFlame??0)>0) {
+        r.add('orb',...at(-w/2-.24,.33,ez),.12,.12,.12,0xffffff,3,opts);
+      }
+    }
+  }
+
+  // ---- 3. Cabin, Reflective Windows, Pillars, Mirrors, Door Handles & Interior ----
   for (const sign of [-1,1]) {
-    p('box',sign*(w/2-.04),.46,0,.19,.17,d+.09,trim,4);
-    p('box',sign*(w/2-.04),.66,0,.13,.25,d-.10,0x505b58,4);
-    const lightTint=sign>0?(driver?0xfffbe0:0xf5eacc):(car.speed<-.5?0xff4d3b:0xb33c2b);
-    for (const oz of [-.57,.57]) {
-      p('box',sign*(w/2+.03),.735,oz,.045,.155,.31,lightTint,3);
-    }
-    for (const ox of [-w*.315,w*.303]) {
-      const wheelYaw=ry+(ox>0?car.steer:0);
-      r.add('cylinder',...at(ox,.38,sign*(d/2+.015)),.71,.24,.71,rubber,2,{dynamic:true,yaw:wheelYaw,pitch:T});
-      r.add('cylinder',...at(ox,.38,sign*(d/2+.151)),.46,.05,.46,0x7f8c8c,4,{dynamic:true,yaw:wheelYaw,pitch:T});
-    }
-    // Side windows & pillars
-    p('box',-.06,1.10,sign*(d/2-.12),1.66,.45,.05,glass,8);
-    p('box',-.81,1.12,sign*(d/2-.12),.084,.50,.08,bodyTint,4);
-    p('box',.73,1.12,sign*(d/2-.12),.088,.50,.08,bodyTint,4);
+    // Wheel-well fender flares & side aero skirt
+    p('box',0,.34,sign*(d/2+.02),w*.52,.09,.07,darkMetal,4);
+    p('box',0,.53,sign*(d/2+.025),1.78,.04,.04,chrome,4);
+    // Side windows, A/B/C pillars, door handles, side mirrors
+    p('box',-.08,1.11,sign*(d/2-.12),1.70,.44,.05,glass,8);
+    p('box',-.82,1.12,sign*(d/2-.115),.09,.50,.085,bodyTint,bodyMat);
+    p('box',-.12,1.14,sign*(d/2-.105),.075,.46,.075,darkMetal,4);
+    p('box',.72,1.12,sign*(d/2-.115),.09,.50,.085,bodyTint,bodyMat);
+    // Flush metallic door handles
+    p('box',-.34,.89,sign*(d/2+.015),.20,.042,.045,chrome,4);
+    p('box',.34,.89,sign*(d/2+.015),.20,.042,.045,chrome,4);
+    // Sculpted wing mirror arm + housing
+    p('box',.62,1.01,sign*(d/2+.06),.07,.045,.15,darkMetal,4);
+    p('bevel',.64,1.06,sign*(d/2+.16),.18,.13,.19,bodyTint,bodyMat);
   }
-  // Roof & windshields
-  p('bevel',-.07,1.39,0,1.65,.115,d-.22,roofTint,4);
-  p('box',.76,1.15,0,d-.20,.50,.076,glass,8,{yaw:ry+T,pitch:.42});
-  p('box',-.92,1.17,0,d-.24,.48,.08,glass,8,{yaw:ry+T,pitch:-.35});
+  // Roof panel + windshield + rear glass + wipers
+  p('bevel',-.09,1.39,0,1.68,.11,d-.20,roofTint,bodyMat);
+  const frontGlassPitch=.42, rearGlassPitch=-.35;
+  const wfBasis=chassisBasis(visualYaw,(car.pitch??0)-frontGlassPitch,(car.roll??0));
+  const wrBasis=chassisBasis(visualYaw,(car.pitch??0)-rearGlassPitch,(car.roll??0));
+  r.add('box',...at(.75,1.15,0),.072,.50,d-.20,glass,8,{dynamic:true,basis:wfBasis});
+  r.add('box',...at(-.92,1.17,0),.076,.48,d-.22,glass,8,{dynamic:true,basis:wrBasis});
+  if (hi) {
+    // Interior dashboard, headrests & steering wheel visible through windows
+    p('box',.52,.95,0,.34,.18,d-.34,0x1f282b,21);
+    for (const sz of [-.34,.34]) p('soft',-.18,1.08,sz,.16,.28,.28,0x2a3338,21);
+  }
 
-  if (style===1) {
-    // Pickup bed
-    p('box',-w/2+.57,.955,0,1.10,.12,d-.12,0x8c978a,4);
-    for (const sign of [-1,1]) p('box',-w/2+.55,1.08,sign*(d/2-.09),1.2,.22,.12,bodyTint,2);
+  // ---- 4. Archetype Signature Equipment ----
+  if (style===0) {
+    // Street GT Coupe: high-mounted rear wing spoiler + twin struts + roof shark-fin antenna!
+    for (const sz of [-.52,.52]) p('box',-w/2+.36,1.06,sz,.12,.22,.05,darkMetal,4);
+    p('bevel',-w/2+.32,1.19,0,.28,.055,d+.04,darkMetal,4);
+    for (const sz of [-1,1]) p('box',-w/2+.32,1.19,sz*(d*.5+.03),.32,.14,.03,bodyTint,bodyMat);
+    p('bevel',-.72,1.47,0,.22,.09,.04,darkMetal,4);
+  } else if (style===1) {
+    // Tactical Pickup Truck: front bull-bar, roll-bar with 4 amber rally lights, ribbed truck bed
+    p('bevel',w/2+.14,.62,0,.10,.34,d*.74,darkMetal,4);
+    for (const fz of [-.36,.36]) p('orb',w/2+.20,.68,fz,.14,.14,.08,0xffe8a0,3);
+    p('box',-w/2+.57,.955,0,1.12,.11,d-.12,0x76827c,4);
+    for (const sign of [-1,1]) {
+      p('box',-w/2+.55,1.08,sign*(d/2-.09),1.22,.22,.12,bodyTint,bodyMat);
+      p('box',-.76,1.38,sign*(d/2-.18),.08,.56,.08,darkMetal,4);
+    }
+    p('box',-.76,1.64,0,.09,.08,d-.32,darkMetal,4);
+    for (const lz of [-.42,-.14,.14,.42]) p('orb',-.72,1.72,lz,.11,.10,.12,driver?0xfff6c0:0xd4a852,3);
   } else if (style===2) {
-    // Delivery van cargo box
+    // Armored Delivery Cargo Van: corrugated high-roof cargo box + roof utility rack + clearance lights
     const cargoTint=lerpRgb(0xd7d4bc,inkColor,clamp(stain*.95,0,1));
-    p('box',-w/2+.76,1.16,0,1.47,.83,d-.07,cargoTint,2);
+    p('bevel',-w/2+.86,1.22,0,1.78,.94,d-.06,cargoTint,2);
+    if (hi) {
+      for (let i=0;i<5;i++) for (const sign of [-1,1]) {
+        p('box',-w/2+.18+i*.34,1.22,sign*(d/2-.01),.055,.80,.045,trim,4);
+      }
+      // Roof utility rack + amber clearance markers
+      for (const sz of [-.68,.68]) p('box',-.42,1.74,sz,1.95,.05,.05,chrome,4);
+      for (const lx of [-1.2,-.42,.36]) p('box',lx,1.72,0,.06,.04,1.38,chrome,4);
+    }
+    for (const lz of [-.62,0,.62]) p('orb',.54,1.50,lz,.08,.07,.10,0xffa834,3);
   }
 
-  // Team beacon strip on roof when occupied by a driver
+  // ---- 5. True 4-Wheel Rotating Assemblies (Spokes + Alloy Rims + Brake Calipers!) ----
+  const wheelY=.36;
+  for (const [axIdx,ox] of [[-1,-w*.315],[1,w*.303]]) {
+    const steerAng=axIdx>0?(car.steer??0):0;
+    const wyaw=visualYaw+steerAng;
+    const wfx=Math.sin(wyaw), wfz=-Math.cos(wyaw);
+    const wrx=Math.cos(wyaw), wrz=Math.sin(wyaw);
+    // Wheel spin rotates around the axle axis [wrx, 0, wrz]
+    const spin=car.wheelSpin??0;
+    const cs=Math.cos(spin), ss=Math.sin(spin);
+    const spA=[wfx*cs,ss,wfz*cs];
+    const spB=[-wfx*ss,cs,-wfz*ss];
+    const wheelBasis=[spA,[wrx,0,wrz],spB];
+    const axleBasis=[[wfx,0,wfz],[wrx,0,wrz],[0,1,0]];
+    for (const sign of [-1,1]) {
+      // Wheel center stays grounded on road while chassis bounces above it!
+      const wz=sign*(d/2+.02);
+      const wc=[x+bf[0]*ox+br[0]*wz, y+wheelY, z+bf[2]*ox+br[2]*wz];
+      // Wide sculpted rubber tire
+      r.add('cylinder',...wc,.72,.26,.72,rubber,21,{dynamic:true,basis:axleBasis});
+      // Deep-dish metallic alloy rim + hub center cap
+      const rimPos=[wc[0]+wrx*sign*.115,wc[1],wc[2]+wrz*sign*.115];
+      r.add('cylinder',...rimPos,.47,.06,.47,0x6e7c7d,4,{dynamic:true,basis:axleBasis});
+      r.add('cylinder',wc[0]+wrx*sign*.145,wc[1],wc[2]+wrz*sign*.145,.16,.04,.16,chrome,4,{dynamic:true,basis:axleBasis});
+      // Brake caliper glowing behind the rim!
+      if (hi) {
+        const calPos=[wc[0]+wrx*sign*.07-wfx*.14,wc[1]+.08,wc[2]+wrz*sign*.07-wfz*.14];
+        r.add('box',...calPos,.13,.18,.07,driver?(TEAM_INK[driver.team]??0xe63939):0xc43c32,4,{dynamic:true,basis:axleBasis});
+        // Rotating alloy spokes visibly spinning with wheelSpin!
+        const spokePos=[wc[0]+wrx*sign*.132,wc[1],wc[2]+wrz*sign*.132];
+        r.add('box',...spokePos,.40,.03,.055,chrome,4,{dynamic:true,basis:wheelBasis});
+        r.add('box',...spokePos,.055,.03,.40,chrome,4,{dynamic:true,basis:wheelBasis});
+      }
+    }
+  }
+
+  // ---- 6. Occupied Cockpit Beacon & Driver Silhouette ----
   if (driver) {
     const teamColor=TEAM_INK[driver.team] ?? 0xffffff;
-    p('box',-.07,1.48,0,.95,.08,.48,teamColor,3);
-    // Driver silhouette visible inside cockpit
-    p('orb',-.02,1.12,-.28,.34,.36,.34,teamColor,3);
+    p('bevel',-.09,1.48,0,1.02,.085,.54,darkMetal,4);
+    p('box',-.09,1.50,0,.88,.065,.40,teamColor,3);
+    p('orb',-.02,1.14,-.28,.34,.36,.34,teamColor,3);
+    p('box',.12,1.15,-.28,.08,.12,.26,0x101c22,8);
   }
 
-  // Dynamic glossy enemy ink coating layers growing across hood, roof & flanks as stain rises!
-  if (stain>.04) {
+  // ---- 7. Progressive Enemy Ink Dyeing & Critical Detonation Aura ----
+  if (stain>.03) {
     const s=clamp(stain,0,1);
-    p('box',w*.24,.92,0,1.15*s+.25,.05,(d-.18)*(.45+.55*s),inkColor,9);
-    p('box',-.07,1.455,0,1.55*s+.2,.045,(d-.26)*(.45+.55*s),inkColor,9);
+    // Organic spreading glossy ink blotches across hood, roof, flanks & fenders!
+    p('bevel',w*.24,.94,0,1.18*s+.26,.055,(d-.18)*(.45+.55*s),inkColor,9);
+    p('bevel',-.09,1.46,0,1.58*s+.22,.05,(d-.24)*(.45+.55*s),inkColor,9);
     for (const sign of [-1,1]) {
-      p('box',0,.68,sign*(d*.5+.025),w*.86*s+.35,.38*(.4+.6*s),.03,inkColor,9);
+      p('bevel',.15,.68,sign*(d*.5+.026),w*.86*s+.38,.40*(.42+.58*s),.036,inkColor,9);
+      if (s>.35) p('orb',-w*.26,.78,sign*(d*.5+.02),(.45+.55*s)*.85,.34*s,.08,inkColor,9);
     }
-    // Critical detonation glow ring around car when almost completely dyed (>= 78%)
-    if (stain>=.78) {
-      const pulse=.5+.5*Math.sin(clock*24);
-      r.add('ripple',x,y+.08,z,(w+1.4)*(1+pulse*.18),.04,(w+1.4)*(1+pulse*.18),inkColor,12,{dynamic:true,label:.25+pulse*.65});
+    if (s>.55) {
+      p('orb',w*.32,.96,.22,.44*s,.14,.42*s,inkColor,9);
+      p('orb',-.48,1.45,-.18,.52*s,.12,.48*s,inkColor,9);
+    }
+    // Critical detonation overload glow + dual expanding warning shock-rings (>= 76%)
+    if (stain>=.76) {
+      const pulse=.5+.5*Math.sin(clock*26);
+      r.add('ripple',x,y+.08,z,(w+1.5)*(1+pulse*.22),.04,(w+1.5)*(1+pulse*.22),inkColor,12,{dynamic:true,label:.22+pulse*.70});
+      r.add('ripple',x,y+.12,z,(w+2.8)*(1-pulse*.12),.04,(w+2.8)*(1-pulse*.12),0xfff4cf,12,{dynamic:true,label:.4+pulse*.5});
+      p('orb',w*.25,1.02,0,.32+pulse*.18,.26+pulse*.14,.32+pulse*.18,0xfff2c2,3);
     }
   }
 }
@@ -687,20 +948,32 @@ function drawVehicle(r,car,clock) {
 function drawExplosionDebris(r,car,age) {
   const {x,y,z,w,d,baseTint,explodeTeam}=car;
   const ink=INK_COLORS[explodeTeam>=0?explodeTeam:1] ?? INK_COLORS[1];
-  const life=clamp(1-age/1.35,0,1);
-  // Expanding blast fireball & shockwave rings
-  if (age<.48) {
-    const t=age/.48, core=(1-t)*3.2+1.2;
-    r.add('orb',x,y+1.1+t*1.6,z,core,core,core,t<.25?0xfff5cc:ink,3,{dynamic:true});
-    r.add('ripple',x,y+.12,z,2+t*CAR_EXPLOSION_RADIUS*2,.05,2+t*CAR_EXPLOSION_RADIUS*2,ink,12,{dynamic:true,label:t});
+  const life=clamp(1-age/1.55,0,1);
+  // Multi-stage fireball core + double shockwave dome + blazing energy halo
+  if (age<.58) {
+    const t=age/.58, core=(1-t)*3.8+1.4;
+    r.add('orb',x,y+1.2+t*1.9,z,core,core,core,t<.22?0xffffff:t<.45?0xffe8a8:ink,3,{dynamic:true});
+    r.add('orb',x,y+1.2+t*1.9,z,core*1.55,core*1.45,core*1.55,ink,9,{dynamic:true});
+    r.add('ripple',x,y+.12,z,2.4+t*CAR_EXPLOSION_RADIUS*2.1,.05,2.4+t*CAR_EXPLOSION_RADIUS*2.1,ink,12,{dynamic:true,label:t});
+    r.add('ripple',x,y+.20,z,1.4+t*CAR_EXPLOSION_RADIUS*1.5,.05,1.4+t*CAR_EXPLOSION_RADIUS*1.5,0xfff4cf,12,{dynamic:true,label:clamp(t*1.3,0,1)});
   }
-  const count=r.lite?10:18;
+  // 4 flying spinning tires blown outward from wheel corners!
+  for (let tIdx=0;tIdx<4;tIdx++) {
+    const ang=car.yaw+tIdx*T+.6, spd=4.4+(tIdx%2)*1.4, lift=6.4+(tIdx%2)*1.1;
+    const tx=x+Math.cos(ang)*(1.1+age*spd), tz=z+Math.sin(ang)*(1.1+age*spd);
+    const ty=Math.max(y+.26,y+.5+age*lift-age*age*6.8);
+    const sc=.68*Math.max(.02,life);
+    r.add('cylinder',tx,ty,tz,sc,.24*Math.max(.02,life),sc,0x1e2629,21,{dynamic:true,yaw:ang+age*9,pitch:age*11});
+  }
+  // Tumbling charred chassis panels & glowing ink sparks
+  const count=r.lite?10:20;
   for (let i=0;i<count;i++) {
-    const a=i*2.399+car.index, speed=3.2+(i%5)*1.45, lift=4.8+(i%4)*1.6;
+    const a=i*2.399+car.index, speed=3.4+(i%5)*1.55, lift=5.2+(i%4)*1.8;
     const px=x+Math.cos(a)*(w*.22+age*speed), pz=z+Math.sin(a)*(d*.22+age*speed);
-    const py=Math.max(y+.1,y+.8+age*lift-age*age*6.2);
-    const sz=(.32+(i%3)*.16)*Math.max(.01,life);
-    r.add(i%3===0?'cylinder':'box',px,py,pz,sz,sz*.7,sz*1.1,i%2===0?ink:baseTint,i%2===0?9:4,
-      {dynamic:true,yaw:a+age*6.5,pitch:age*(i%4+2.5)});
+    const py=Math.max(y+.1,y+.9+age*lift-age*age*6.4);
+    const sz=(.34+(i%3)*.17)*Math.max(.01,life);
+    const fiery=i%5===0 && age<.85;
+    r.add(i%3===0?'bevel':'box',px,py,pz,sz,sz*.65,sz*1.15,fiery?0xffe090:i%2===0?ink:baseTint,fiery?3:i%2===0?9:20,
+      {dynamic:true,yaw:a+age*7.2,pitch:age*(i%4+2.8)});
   }
 }

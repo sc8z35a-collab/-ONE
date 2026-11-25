@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {RoomEngine} from './room-engine.js';
 import {BOSS_RESPAWN_SECONDS,EXP_PER_KILL,RESPAWN_SECONDS} from '../dist/battle.js';
 import {bankResults,levelOf,loadCareer,matchResults,mostActive} from '../dist/progress.js';
-import {DRONE_WEAPON,CHEATER_WEAPON,EBOT,GOAT_WEAPON,NPC_WEAPONS,ROGUE_DRONE_WEAPON,SNIPER_WEAPON,SUPERS,weaponById} from '../dist/weapons.js';
+import {DRONE_WEAPON,CHEATER_WEAPON,EBOT,GOAT_WEAPON,NPC_WEAPONS,ROGUE_DRONE_WEAPON,SNIPER_WEAPON,SUPERS,WEAPONS,weaponById} from '../dist/weapons.js';
 import {RAIL,UNDER_X,UNDER_Y} from '../dist/layout.js';
 import {GOAT_ARMS} from '../dist/hazards.js';
 import {HNV1_GAIN,HNV1_VERSION} from '../dist/hnv1.js';
@@ -672,6 +672,127 @@ test('map cars are drivable, paint own ink while driving, ram/run over enemies, 
   assert(p.down>0 && p.downBy==='carBomb','driver takes massive explosion damage');
   assert(ally.down>0 && ally.downBy==='carBomb','nearby fighter takes heavy explosion damage');
   assert(b.paint.zoneCount[0][enemy.team]>0,'explosion splatters enemy ink crater');
+});
+
+test('upgraded vehicle dynamics engine, hit VFX, projectiles, and all 16 bespoke weapon models simulate & render cleanly',()=>{
+  const engine=new RoomEngine({...options,cheater:false}), b=engine.battle, p=b.player;
+  const enemy=b.actors.find(a=>a.team===1);
+  b.countdown=0;
+  alone(b,p,enemy);
+
+  // 1. Vehicle dynamics: 4-gear shift, RPM, suspension pitch/roll, powerslide drift + mini-turbo exit boost.
+  const car=b.vehicles.cars.find(c=>Math.abs(c.x+17.85)<1 && Math.abs(c.z+3.80)<1) ?? b.vehicles.cars[0];
+  Object.assign(p,{x:car.x,y:car.y,z:car.z+2.2,down:0,shield:0});
+  assert(b.useTransport(p));
+  for (let i=0;i<14;i++) {
+    b.clock+=.04;
+    b.vehicles.drive(p,{x:.05,z:1,jump:false},.04);
+  }
+  assert(car.gear>=2 && car.rpm>1500 && Math.abs(car.wheelSpin)>4,'vehicle shifts gears and spins wheels');
+  assert(Math.abs(car.roll)>.005,'cornering induces body roll');
+
+  // Hold Space (jump) while turning to initiate powerslide drift, charge mini-turbo, then release!
+  for (let i=0;i<14;i++) {
+    b.clock+=.04;
+    b.vehicles.drive(p,{x:-.45,z:1,jump:true},.04);
+  }
+  assert(car.drifting && Math.abs(car.driftAngle)>.08 && car.driftCharge>.45,'powerslide builds drift angle and charge');
+  const speedBeforeBoost=car.speed;
+  b.clock+=.04;
+  b.vehicles.drive(p,{x:0,z:1,jump:false},.04);
+  assert(car.boostFlame>.3 && car.speed>speedBeforeBoost,'releasing charged drift fires mini-turbo exit boost');
+
+  // Checkpoint preserves upgraded vehicle dynamics fields.
+  const restored=new RoomEngine({...options,cheater:false},new Map(Object.entries(engine.checkpoint()))).battle;
+  const rc=restored.vehicles.byId(car.id);
+  assert(rc && rc.gear===car.gear && Math.abs(rc.rpm-car.rpm)<1 && Number.isFinite(rc.pitch) && Number.isFinite(rc.roll));
+  b.vehicles.exit(p);
+
+  // 2. Render verification harness with strict finite-geometry & basis checks + seal() to exercise drawPlainCrew.
+  const makeRenderer=(lite=false)=>{
+    const draws=[];
+    const checkNum=(v,label)=>assert(typeof v==='number' && Number.isFinite(v),label+' must be finite, got '+v);
+    return {
+      lite,
+      draws,
+      seal() {},
+      add(shape,x,y,z,sx,sy,sz,color,mat,opts) {
+        assert(typeof shape==='string' && shape.length>0,'shape name required');
+        checkNum(x,shape+'.x'); checkNum(y,shape+'.y'); checkNum(z,shape+'.z');
+        checkNum(sx,shape+'.sx'); checkNum(sy,shape+'.sy'); checkNum(sz,shape+'.sz');
+        checkNum(color,shape+'.color'); checkNum(mat,shape+'.mat');
+        if (opts?.basis) {
+          for (const v of opts.basis) for (const c of v) checkNum(c,shape+'.basis');
+        }
+        draws.push({shape,x,y,z,sx,sy,sz,color,mat,opts});
+      },
+      beam(a,c,r,color) {
+        for (const v of [...a,...c,r,color]) checkNum(v,'beam');
+        draws.push({shape:'beam',a,c,r,color});
+      },
+      label() {}
+    };
+  };
+
+  // 3. Draw every single weapon (all 15 player weapons + Cheater Auto-Eima II Super) idle, firing, charged, and CO mode!
+  const allWeapons=[...WEAPONS,CHEATER_WEAPON];
+  assert.equal(allWeapons.length,16);
+  Object.assign(p,{x:0,y:0,z:-16,yaw:0,pitch:0,down:0,swimming:false,tank:140,tankMax:140});
+  for (const w of allWeapons) {
+    p.weapon=w;
+    p.muzzle=.07;
+    p.charge=w.charge?.92:0;
+    p.coMode=w.co?1:0;
+    const r=makeRenderer(false);
+    b.draw(r,0,-10,null,2.4);
+    assert(r.draws.length>40,'weapon '+w.id+' emits rich upgraded 3D geometry ('+r.draws.length+' primitives)');
+  }
+
+  // 4. Draw all upgraded projectile classes (homing, precision, heavy, swirl, Goat, standard) + hit VFX (surface, body, KO)!
+  const shotWeapons=[
+    weaponById('autoeima'),CHEATER_WEAPON,GOAT_WEAPON,
+    weaponById('charge'),weaponById('prism'),SNIPER_WEAPON,
+    weaponById('lob'),weaponById('blast'),weaponById('rd2'),
+    weaponById('coil'),weaponById('surge'),weaponById('jet')
+  ];
+  b.shots=shotWeapons.map((w,i)=>({
+    pos:[-10+i*1.8,2.2,-16],
+    vel:[18,0,-6],
+    actor:i===1?enemy:p,
+    weapon:w,
+    power:1,
+    age:.14,
+    homing:!!w.homing,
+    cheater:w.id==='autoeima2s',
+    goat:w.id==='goat',
+    trainBoss:false
+  }));
+  b.drops.length=0;
+  b.inkImpacts.length=0;
+  Object.assign(enemy,{x:3,y:0,z:-16,hp:100,shield:0,down:0});
+  b.inkHit(enemy,30,p,[2,1.6,-16]);
+  b.clock+=.04;
+  b.inkHit(enemy,200,p,[4,1.6,-16]);
+  b.addInkImpact({p:[6,.1,-16],team:1,normal:[0,1,0],kind:0});
+  assert(b.drops.length>=18,'KO hit spawns celebratory splash fountain droplets');
+
+  // Also test stained + exploding vehicle archetypes (0=GT Coupe, 1=Pickup, 2=Armored Van).
+  const coupe=b.vehicles.cars.find(c=>c.style===0);
+  const pickup=b.vehicles.cars.find(c=>c.style===1);
+  const van=b.vehicles.cars.find(c=>c.style===2);
+  assert(coupe && pickup && van,'all 3 bespoke vehicle archetypes present');
+  coupe.stain=.82; coupe.stainTeam=1; coupe.boostFlame=.9; coupe.drifting=true; coupe.driftAngle=.22;
+  pickup.stain=.45; pickup.stainTeam=1; pickup.braking=true;
+  b.vehicles.damageCar(van,van.maxHp,enemy,[van.x,van.y+1,van.z]);
+  assert(!van.alive && van.explodedAt>=0,'armored van enters flying-wheel explosion debris state');
+  b.clock+=.25;
+
+  const rFull=makeRenderer(false), rLite=makeRenderer(true);
+  b.draw(rFull,0,-6,null,2.6);
+  b.draw(rLite,0,-6,null,2.6);
+  assert(rFull.draws.length>rLite.draws.length,'full renderer emits extra upgraded hit VFX, projectile & vehicle details over lite mode');
+  assert(rFull.draws.some(d=>d.shape==='shade' && d.mat===28),'vehicles cast grounded contact AO shadows');
+  assert(rFull.draws.some(d=>d.shape==='ring' && d.mat===3),'homing & precision projectiles emit glowing lock/Mach rings');
 });
 
 

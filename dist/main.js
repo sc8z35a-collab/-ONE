@@ -176,29 +176,50 @@ function initAudio() {
   }
 }
 
+let cameraShake=0;
+function triggerShake(amount) {
+  cameraShake=Math.min(1,Math.max(cameraShake,amount));
+}
+
 function sound(kind) {
-  if (kind==='hit') showHit(false);
-  else if (kind==='down') showHit(true);
+  if (kind==='hit') {showHit(false);triggerShake(.10);}
+  else if (kind==='down') {showHit(true);triggerShake(.34);}
+  else if (kind==='damage') triggerShake(.28);
+  else if (kind==='bossDown' || kind==='bomb' || kind==='blast') triggerShake(.46);
   if (!audio || mute || audio.state!=='running') return;
   const now=audio.currentTime;
   const out=audio.createGain();
   out.connect(audio.destination);
   const hit=['shot','lob','damage','hit','blast','bomb'].includes(kind);
-  const duration={shot:.11,lob:.19,hit:.10,damage:.19,tick:.13,go:.31,down:.29,super:.30,drone:.22,boss:.65,bossDown:.59,finish:.5,
+  const duration={shot:.11,lob:.19,hit:.11,damage:.19,tick:.13,go:.31,down:.32,super:.30,drone:.22,boss:.65,bossDown:.59,finish:.5,
     blast:.34,bomb:.30,mark:.18}[kind] || .14;
   out.gain.setValueAtTime(.001,now);
-  out.gain.exponentialRampToValueAtTime(kind==='shot'?.08:.12,now+.006);
+  out.gain.exponentialRampToValueAtTime(kind==='shot'?.08:kind==='down'?.15:.12,now+.005);
   out.gain.exponentialRampToValueAtTime(.001,now+duration);
   const oscillator=audio.createOscillator();
   oscillator.type=kind==='shot'?'sine':kind==='damage'?'triangle':'sine';
-  const freq={shot:260,lob:142,hit:840,damage:127,tick:554,go:830,down:730,super:620,drone:440,boss:110,bossDown:493,finish:660,
+  const freq={shot:260,lob:142,hit:920,damage:127,tick:554,go:830,down:780,super:620,drone:440,boss:110,bossDown:493,finish:660,
     blast:92,bomb:104,mark:988}[kind] || 440;
   oscillator.frequency.setValueAtTime(freq,now);
-  oscillator.frequency.exponentialRampToValueAtTime(freq*(kind==='shot'?.44:kind==='damage'?.58:1.34),now+duration*.73);
+  oscillator.frequency.exponentialRampToValueAtTime(freq*(kind==='shot'?.44:kind==='damage'?.58:kind==='down'?1.52:1.36),now+duration*.73);
   oscillator.connect(out);
   oscillator.onended=()=>out.disconnect();
   oscillator.start(now);
   oscillator.stop(now+duration);
+  if (kind==='hit' || kind==='down') {
+    // Crisp high-harmonic hit-confirm chime layer
+    const chime=audio.createOscillator(), cg=audio.createGain();
+    chime.type='triangle';
+    chime.frequency.setValueAtTime(kind==='down'?1320:1480,now);
+    chime.frequency.exponentialRampToValueAtTime(kind==='down'?1980:1760,now+.085);
+    cg.gain.setValueAtTime(.001,now);
+    cg.gain.exponentialRampToValueAtTime(kind==='down'?.09:.055,now+.004);
+    cg.gain.exponentialRampToValueAtTime(.001,now+(kind==='down'?.22:.09));
+    chime.connect(cg).connect(audio.destination);
+    chime.onended=()=>cg.disconnect();
+    chime.start(now);
+    chime.stop(now+(kind==='down'?.23:.095));
+  }
   if (hit) {
     const burst=audio.createBufferSource(), filter=audio.createBiquadFilter();
     burst.buffer=noise;
@@ -238,14 +259,18 @@ async function fullScreen(toggle=false,help=false) {
   showDialog('fullscreen','横画面でプレイ',content,actions);
 }
 
-// A cross snaps open around the reticle when a shot connects; a splat gets a
-// larger red one.
+// A layered kinetic cross & reticle kick snaps open when a shot connects; a KO gets a red-gold burst.
 function showHit(kill) {
-  const node=$('hit-marker');
+  const node=$('hit-marker'), ret=$('reticle');
   if (!node || !battle?.player) return;
   node.classList.remove('hit','kill');
   void node.offsetWidth;
   node.classList.add(kill?'kill':'hit');
+  if (ret) {
+    ret.classList.remove('kick','ko-kick');
+    void ret.offsetWidth;
+    ret.classList.add(kill?'ko-kick':'kick');
+  }
 }
 
 function clearControls() {
@@ -1302,8 +1327,15 @@ function updateHud() {
     $('charge-bar').style.transform='scaleX('+p.charge+')';
     $('reticle').style.setProperty('--charge',p.charge);
     const drivenCar=p.car ?? (p.inCar?battle.vehicles?.cars?.find(c=>c.driver===p):null);
-    const carTip=drivenCar?(drivenCar.stain>=.7?'⚠ 敵インク汚染 '+Math.round(drivenCar.stain*100)+'% · 爆発危険！ [E] 脱出':
-      '運転中 · WASDで操作 / Spaceでドリフト / [E] 降りる'+(drivenCar.stain>.02?' · 敵インク '+Math.round(drivenCar.stain*100)+'%':'')):null;
+    const carTip=(()=>{
+      if (!drivenCar) return null;
+      const kmh=Math.round(Math.abs(drivenCar.speed)*5.4);
+      const gear=drivenCar.gear===0 && drivenCar.speed<-.2?'R':(drivenCar.gear||1)+'速';
+      const tag=drivenCar.boostFlame>.05?' · TURBO!!':drivenCar.drifting?' · DRIFT':'';
+      const stain=Math.round(drivenCar.stain*100);
+      if (drivenCar.stain>=.7) return '⚠ 敵インク汚染 '+stain+'% · 爆発危険！ '+kmh+'km/h ('+gear+') · [R] 脱出';
+      return kmh+' km/h · '+gear+tag+' · Spaceドリフト / [R] 降りる'+(stain>2?' · 敵インク '+stain+'%':'');
+    })();
     setText('meter-tip',carTip ?? (p.climbing?'インク壁を登っています':p.swimming?(p.inkSwimming?'自インク · 高速回復':'イカ状態 · ゆっくり回復'):
       p.inkPenalty?'敵インク · 移動と回復低下':p.charge>.03?(p.charge>=1?'最大チャージ · 離して発射':'チャージ中'):
       readout.empty?'インク不足':p.rolling?'ローラーで塗装中':p.weapon.roller?'短押しで振る · 長押し＋前進で転がす':own?'自インクで高速回復':'未塗装の床でも潜水できます'));
@@ -1393,8 +1425,8 @@ function cameraFor(dt) {
     watchYaw+=change*(1-Math.exp(-dt*4.1));
     watchPitch+=(clamp(actor.pitch-.075,-.49,.24)-watchPitch)*(1-Math.exp(-dt*5));
   } else if (actor.car && Math.abs(actor.car.speed)>1.2) {
-    const targetYaw=actor.car.yaw;
-    yaw+=Math.atan2(Math.sin(targetYaw-yaw),Math.cos(targetYaw-yaw))*(1-Math.exp(-dt*2.8));
+    const targetYaw=actor.car.yaw+(actor.car.driftAngle ?? 0)*.45;
+    yaw+=Math.atan2(Math.sin(targetYaw-yaw),Math.cos(targetYaw-yaw))*(1-Math.exp(-dt*(actor.car.drifting?3.9:3.0)));
   }
   viewHeight=mix(viewHeight,actor.y,1-Math.exp(-dt*14));
   const pose=crewView(battle,actor,{
@@ -1406,6 +1438,16 @@ function cameraFor(dt) {
     x:viewX,z:viewZ
   });
   cameraReach=pose.reach ?? 1;
+  if (dt>0 && cameraShake>0) cameraShake=Math.max(0,cameraShake-dt*3.4);
+  if (battle.player) {
+    const shake=Math.min(1,cameraShake+(actor.car?.impactShake ?? 0)*.45);
+    if (shake>.004) {
+      const amp=shake*shake*.18, t=activeClock*52;
+      const sx=Math.sin(t*1.17)*amp, sy=Math.cos(t*1.63)*amp*.75, sz=Math.sin(t*.89+1.3)*amp;
+      pose.eye=[pose.eye[0]+sx,pose.eye[1]+sy,pose.eye[2]+sz];
+      pose.target=[pose.target[0]+sx*.55,pose.target[1]+sy*.55,pose.target[2]+sz*.55];
+    }
+  }
   return pose;
 }
 

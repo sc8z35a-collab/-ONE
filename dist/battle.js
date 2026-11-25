@@ -68,50 +68,84 @@ function drawInkImpact(renderer,{p,team,at,normal:surface,kind=0},eye,time) {
   const toward=sub(eye,p), range=Math.hypot(...toward);
   if (age>=1 || range<1.05) return;
   const normal=surface??scale(toward,1/range), [right,up]=decalBasis(normal,0);
-  // A body hit reads from across the street: it is drawn far larger than a
-  // surface splash and keeps a minimum on-screen size at long range.
-  const body=!surface, other=kind===3, boost=body?(kind===2?3.4:other?1.45:2.6):1;
-  const center=add(p,scale(normal,.10)), size=(surface?.69:1)*clamp(range/8,.72,body?(other?1.7:2.9):1.48)*boost;
-  const fade=1-age, radius=(.37+.71*(1-fade*fade))*size;
+  // A body hit reads unmistakably from across the street: layered shockwaves,
+  // incandescent flash bloom, spinning starburst crosses, and radial liquid spikes.
+  const body=!surface, other=kind===3, finish=kind===2;
+  const boost=body?(finish?3.75:other?1.55:2.85):1.15;
+  const center=add(p,scale(normal,.10)), size=(surface?.74:1)*clamp(range/7.6,.78,body?(other?1.85:3.15):1.62)*boost;
+  const fade=1-age, ease=1-fade*fade, radius=(.38+.82*ease)*size;
   const tint=TEAM_INK[team] ?? RAIDER_INK;
-  const plane=[right,normal,scale(up,-1)], sheen=add(center,scale(normal,.014));
-  renderer.add('ripple',...center,radius*2,.03,radius*2,tint,12,{dynamic:true,basis:plane,label:age});
-  renderer.add('ripple',...sheen,radius*1.36,.03,radius*1.36,0xfff7d9,12,{dynamic:true,basis:plane,label:Math.min(1,age*1.4)});
+  const accent=finish?0xffd066:0xfff7dc;
+  const plane=[right,normal,scale(up,-1)], sheen=add(center,scale(normal,.016));
+  const lite=!!renderer.lite || !!renderer.ultra;
+
+  // Primary expanding liquid shockwave + hot inner pressure ring
+  renderer.add('ripple',...center,radius*2.05,.03,radius*2.05,tint,12,{dynamic:true,basis:plane,label:age});
+  renderer.add('ripple',...sheen,radius*1.44,.03,radius*1.44,accent,12,{dynamic:true,basis:plane,label:Math.min(1,age*1.38)});
+
   if (body) {
-    // Second shock ring, a hot core and a cross of light for the hit itself.
-    const late=clamp(age*1.5-.12,0,1);
-    renderer.add('ripple',...sheen,radius*2.75*late,.03,radius*2.75*late,kind===2?0xfff2c2:tint,12,{dynamic:true,basis:plane,label:Math.min(1,.18+late*.85)});
-    // A halo the size of the body around the hit, so it reads even when the
-    // splash itself is hidden behind the target.
-    const halo=(.95+1.25*(1-fade*fade))*(other?.75:1)*clamp(range/12,1,2.4);
-    renderer.add('ripple',...center,halo*2,.03,halo*2,0xffffff,12,{dynamic:true,basis:plane,label:Math.min(1,.32+age*.8)});
-    if (age<.34) {
-      const core=(.52+.3*fade)*size*(1-age*2.9);
+    // Delayed outer concussion wave & KO supernova ring
+    const late=clamp(age*1.55-.10,0,1);
+    renderer.add('ripple',...sheen,radius*2.95*late,.03,radius*2.95*late,finish?0xffe885:tint,12,{dynamic:true,basis:plane,label:Math.min(1,.14+late*.86)});
+    if (finish && !lite) {
+      const nova=clamp(age*1.35-.16,0,1);
+      renderer.add('ripple',...center,radius*3.85*nova,.03,radius*3.85*nova,0xff5240,12,{dynamic:true,basis:plane,label:Math.min(1,.12+nova*.88)});
+    }
+    // Wide high-contrast body-silhouette halo so hits pop even behind cover
+    const halo=(1.02+1.40*ease)*(other?.78:finish?1.25:1)*clamp(range/11,1,2.6);
+    renderer.add('ripple',...center,halo*2,.03,halo*2,finish?0xfff2c2:0xffffff,12,{dynamic:true,basis:plane,label:Math.min(1,.28+age*.82)});
+
+    // Incandescent flash core + glossy liquid shock-sphere
+    if (age<.38) {
+      const tCore=1-age/.38, core=(.56+.36*fade)*size*tCore;
       renderer.add('orb',...sheen,core,core,core,0xffffff,3,{dynamic:true});
-      renderer.add('orb',...sheen,core*1.7,core*1.7,core*1.7,tint,9,{dynamic:true});
+      renderer.add('orb',...sheen,core*1.85,core*1.85,core*1.85,tint,9,{dynamic:true});
+      if (finish) {
+        renderer.add('orb',...sheen,core*2.45,core*2.45,core*2.45,0xffdf7a,3,{dynamic:true});
+      }
     }
-    const reach=(.55+1.25*(1-fade*fade))*size, width=.11*size*fade;
-    for (const [axis,other] of [[right,up],[up,right]]) {
+
+    // Crisp spinning dual starburst flare (primary + diagonal X-flare on KO/direct hits!)
+    const spin=age*(finish?2.4:1.15);
+    const cs=Math.cos(spin), sn=Math.sin(spin);
+    const rA=add(scale(right,cs),scale(up,sn)), uA=add(scale(right,-sn),scale(up,cs));
+    const reach=(.64+1.42*ease)*size*(finish?1.24:1), width=.125*size*fade;
+    for (const [axis,perp] of [[rA,uA],[uA,rA]]) {
       const tip=scale(axis,reach);
-      renderer.add('tri',...add(center,scale(axis,-reach)),1,1,1,0xfff4cf,3,{dynamic:true,basis:[scale(tip,2),scale(other,width),normal]});
-      renderer.add('tri',...add(center,scale(axis,reach)),1,1,1,0xfff4cf,3,{dynamic:true,basis:[scale(tip,-2),scale(other,-width),normal]});
+      renderer.add('tri',...add(center,scale(axis,-reach)),1,1,1,accent,3,{dynamic:true,basis:[scale(tip,2),scale(perp,width),normal]});
+      renderer.add('tri',...add(center,scale(axis,reach)),1,1,1,accent,3,{dynamic:true,basis:[scale(tip,-2),scale(perp,-width),normal]});
     }
+    if (!lite) {
+      const dReach=reach*(finish?.86:.62), dWidth=width*.78;
+      const d1=scale(add(rA,uA),Math.SQRT1_2), d2=scale(sub(uA,rA),Math.SQRT1_2);
+      for (const [axis,perp] of [[d1,d2],[d2,d1]]) {
+        const tip=scale(axis,dReach);
+        renderer.add('tri',...add(center,scale(axis,-dReach)),1,1,1,finish?0xff6e4a:tint,3,{dynamic:true,basis:[scale(tip,2),scale(perp,dWidth),normal]});
+        renderer.add('tri',...add(center,scale(axis,dReach)),1,1,1,finish?0xff6e4a:tint,3,{dynamic:true,basis:[scale(tip,-2),scale(perp,-dWidth),normal]});
+      }
+    }
+  } else if (age<.42) {
+    // Crisp surface-splat flash & bouncing crown droplet
+    const spark=(.30+.24*fade)*size*(1-age/.42);
+    renderer.add('orb',...sheen,spark,spark,spark,0xfff6d8,3,{dynamic:true});
+    renderer.add('orb',...add(center,scale(normal,(.16+.45*ease)*size)),spark*.8,spark*1.2,spark*.8,tint,9,{dynamic:true});
   }
-  if (age<.40) {
-    const spark=(.26+.21*fade)*size*(1-age*2.5);
-    renderer.add('orb',...sheen,spark,spark,spark,0xfff4ce,3,{dynamic:true});
-  }
-  const spikes=body?(kind===2?12:8):4;
+
+  // Radial directional liquid lance-spikes + glowing flying ink beads
+  const spikes=lite?(body?8:5):body?(finish?16:10):6;
   for (let i=0;i<spikes;i++) {
-    const angle=(i+.5)*TAU/spikes;
+    const angle=(i+.5)*TAU/spikes+age*(body?.35:.15);
     const direction=add(scale(right,Math.cos(angle)),scale(up,Math.sin(angle)));
-    const side=scale(cross(direction,normal),.13*size*fade);
-    const tip=add(scale(direction,(.17+.37*fade)*size*(body && i%2?1.5:1)),scale(side,.5));
-    const base=add(add(center,scale(direction,radius)),scale(side,-.5));
-    renderer.add('tri',...base,1,1,1,body && i%2?tint:0xfff4cf,3,{dynamic:true,basis:[side,tip,normal]});
-    if (!renderer.lite || body) {
-      const spark=add(base,scale(normal,.28*fade));
-      renderer.add('orb',...spark,.10*fade*size,.15*fade*size,.10*fade*size,tint,3,{dynamic:true});
+    const side=scale(cross(direction,normal),.14*size*fade);
+    const lenMul=body?(i%2?1.65:1.18):1.08;
+    const tip=add(scale(direction,(.20+.42*fade)*size*lenMul),scale(side,.5));
+    const base=add(add(center,scale(direction,radius*(i%2?1.04:.86))),scale(side,-.5));
+    renderer.add('tri',...base,1,1,1,i%2?tint:accent,3,{dynamic:true,basis:[side,tip,normal]});
+    if (!lite || body) {
+      const lift=(.24+.36*ease)*fade;
+      const bead=add(add(base,scale(direction,.24*size*ease)),scale(normal,lift));
+      const bs=(.105+(i%2?.045:0))*fade*size;
+      renderer.add('orb',...bead,bs,bs*1.55,bs,i%3===0?accent:tint,i%3===0?3:9,{dynamic:true});
     }
   }
 }
@@ -1428,6 +1462,12 @@ export class Battle {
       const prior=this.inkImpacts.find(hit=>hit.at===this.clock && hit.target===target && hit.team===team);
       if (prior) prior.kind=prior.kind===3 || kind===3?Math.min(prior.kind,kind):Math.max(prior.kind??1,kind);
       else this.addInkImpact({p:point,team,target,kind});
+      if (finished) {
+        this.burst(point,team,18,5.6,.016);
+        this.abilities.rings.push({x:point[0],y:(target.y??point[1])+.08,z:point[2],r:3.4,team:Math.max(0,team),until:this.clock+.52});
+      } else if (mine) {
+        this.burst(point,team,5,3.2,.010);
+      }
     }
     return lost;
   }
@@ -1742,7 +1782,7 @@ export class Battle {
     this.boss.draw(renderer,viewX);
     this.raiders.draw(renderer,viewX);
     this.hazards?.draw(renderer,viewX,viewZ);
-    const shots=this.shots;
+    const shots=this.shots, liteShot=!!renderer.lite || !!renderer.ultra;
     for (let i=0;i<shots.length;i++) {
       const shot=shots[i], sp=shot.pos;
       if (!sameLevel(sp[0],viewX)) continue;
@@ -1751,20 +1791,71 @@ export class Battle {
       const yx=sv[0]*invS, yy=sv[1]*invS, yz=sv[2]*invS;
       const xInv=1/Math.max(.00001,Math.hypot(yz,yx));
       const xx=-yz*xInv, xz=yx*xInv;
+      const zx=-xz*yy, zy=xz*yx-xx*yz, zz=xx*yy;
       _sbX[0]=xx; _sbX[1]=0; _sbX[2]=xz;
       _sbY[0]=yx; _sbY[1]=yy; _sbY[2]=yz;
-      _sbZ[0]=-xz*yy; _sbZ[1]=xz*yx-xx*yz; _sbZ[2]=xx*yy;
+      _sbZ[0]=zx; _sbZ[1]=zy; _sbZ[2]=zz;
       _dynBasis.basis=_shotBasis;
-      const px=sp[0]-yx*.11, py=sp[1]-yy*.11, pz=sp[2]-yz*.11;
-      const size=shot.weapon.size, ink=TEAM_INK[shot.actor.team] ?? RAIDER_INK, isLob=shot.weapon.id==='lob';
-      renderer.add('orb',px,py,pz,size,size*(isLob?1.42:2.84),size,ink,9,_dynBasis);
-      if (renderer.fidelity) {
-        // A liquid streak that stretches with speed behind the leading drop.
-        const tail=clamp(speed*.022,.22,.95)*(isLob?.55:1), ht=-tail*.5, h35=size*.35;
-        renderer.add('limb',px+yx*ht,py+yy*ht,pz+yz*ht,size*.78,tail,size*.78,ink,9,_dynBasis);
-        renderer.add('orb',px+yx*h35,py+yy*h35,pz+yz*h35,size*.42,size*.9,size*.42,0xf6fffc,3,_dynBasis);
-      } else if (!renderer.lite) {
-        renderer.add('orb',px-yx*.28,py-yy*.28,pz-yz*.28,size*.48,size*1.22,size*.48,ink,9,_dynBasis);
+      const px=sp[0]-yx*.10, py=sp[1]-yy*.10, pz=sp[2]-yz*.10;
+      const w=shot.weapon, wid=w.id, size=w.size;
+      const isCheaterShot=wid==='autoeima2s';
+      const isGoatShot=wid==='goat_orb';
+      const isTrainShot=wid==='train_boss';
+      const ink=isCheaterShot?0xff267a:isGoatShot?0xff3355:isTrainShot?0xff3848:(TEAM_INK[shot.actor.team] ?? RAIDER_INK);
+      const coreTint=isCheaterShot?0xffb8e0:isGoatShot?0xffd966:isTrainShot?0xffe090:0xf6fffc;
+      const isLob=wid==='lob', isHeavy=isLob || wid==='blast' || wid==='rd2' || isGoatShot;
+      const isLance=wid==='charge' || wid==='prism' || wid==='sniper';
+      const isHoming=!!shot.homing || wid==='autoeima' || isCheaterShot || wid==='swout' || wid==='swout2';
+      const isSwirl=wid==='coil' || wid==='surge';
+
+      // Primary sculpted liquid-energy projectile body
+      const stretch=isLob?1.48:isLance?4.4:isHeavy?1.95:2.95;
+      renderer.add(isLance?'taper':'orb',px,py,pz,size*(isLance?.86:1.05),size*stretch,size*(isLance?.86:1.05),ink,9,_dynBasis);
+
+      // Luminous plasma core inside nose for crisp readability against any background
+      const nose=size*(isLance?.95:.38);
+      renderer.add('orb',px+yx*nose,py+yy*nose,pz+yz*nose,size*.46,size*(isLance?1.5:.96),size*.46,coreTint,3,_dynBasis);
+
+      if (!liteShot) {
+        // Streamlined liquid wake tail + trailing slipstream droplet
+        const tail=clamp(speed*(isLance?.032:.024),.26,isLance?1.65:1.15)*(isLob?.62:1);
+        const ht=-tail*.52;
+        renderer.add('limb',px+yx*ht,py+yy*ht,pz+yz*ht,size*.74,tail,size*.74,ink,9,_dynBasis);
+        const dropBack=-tail*1.08;
+        renderer.add('orb',px+yx*dropBack,py+yy*dropBack,pz+yz*dropBack,size*.36,size*.85,size*.36,ink,9,_dynBasis);
+
+        // Weapon-class signature 3D energy flair!
+        const spin=visualClock*14+(shot.id??i)*1.3;
+        if (isHoming) {
+          // Rotating seeker lock-on halo ring + twin helical trailing wisps
+          const ringR=size*(isCheaterShot?2.45:isGoatShot?2.2:1.95);
+          renderer.add('ring',px-yx*.05,py-yy*.05,pz-yz*.05,ringR,size*.24,ringR,coreTint,3,_dynBasis);
+          const ca=Math.cos(spin), sa=Math.sin(spin), orbR=size*1.05;
+          for (let k=0;k<2;k++) {
+            const sgn=k===0?1:-1;
+            const ox=(xx*ca+zx*sa)*orbR*sgn, oy=zy*sa*orbR*sgn, oz=(xz*ca+zz*sa)*orbR*sgn;
+            renderer.add('orb',px-yx*.32+ox,py-yy*.32+oy,pz-yz*.32+oz,size*.28,size*.52,size*.28,k===0?coreTint:ink,3,_dynBasis);
+          }
+        } else if (isLance) {
+          // Precision / Charger / Prism: concentric Mach shock-rings along velocity wake!
+          for (let k=0;k<2;k++) {
+            const off=-tail*(.35+k*.42), rr=size*(1.75+k*.55);
+            renderer.add('ring',px+yx*off,py+yy*off,pz+yz*off,rr,size*.18,rr,k===0?coreTint:ink,3,_dynBasis);
+          }
+        } else if (isHeavy) {
+          // Lob / Blaster / RD II QUATRO+: pressurized glowing equatorial ring + orbiting ink satellites!
+          const rr=size*1.62;
+          renderer.add('ring',px,py,pz,rr,size*.26,rr,coreTint,3,_dynBasis);
+          const ca=Math.cos(spin*.85), sa=Math.sin(spin*.85), orbR=size*.95;
+          const ox=(xx*ca+zx*sa)*orbR, oy=zy*sa*orbR, oz=(xz*ca+zz*sa)*orbR;
+          renderer.add('orb',px+ox,py+oy,pz+oz,size*.34,size*.34,size*.34,ink,9,_dyn);
+          renderer.add('orb',px-ox,py-oy,pz-oz,size*.26,size*.26,size*.26,coreTint,3,_dyn);
+        } else if (isSwirl) {
+          // Spiral / Wave: oscillating helical energy ribbons
+          const ca=Math.cos(spin*1.3), sa=Math.sin(spin*1.3), orbR=size*1.15;
+          const ox=(xx*ca+zx*sa)*orbR, oy=zy*sa*orbR, oz=(xz*ca+zz*sa)*orbR;
+          renderer.add('orb',px-yx*.26+ox,py-yy*.26+oy,pz-yz*.26+oz,size*.32,size*.72,size*.32,coreTint,3,_dynBasis);
+        }
       }
     }
     const dropStep=renderer.ultra?3:renderer.lite?2:1, dropLim=reach===Infinity?Infinity:(reach*.7)*(reach*.7);
@@ -2170,20 +2261,58 @@ export function drawCrew(r,a,time,showEffects=true) {
   }
 }
 
-// The crew as drawn on screen: about twenty plain parts instead of a hundred.
+// Upgraded high-craft on-screen crew & bespoke weapon renderer (keeps hitboxes untouched).
 function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor,hit,tint,bright,yaw,aimYaw,showEffects}) {
   const {cy,sy,loc,pace,fore,lateral,airborne,rising,crouch,swing,transfer,rise,sway,lean}=pose;
   const ax=a.x, ay=a.y, az=a.z;
-  const visor=a.isCheater?0xff267a:a.team===0?0x4c8c99:0x825650;
+  const lite=!!r.lite || !!r.ultra;
+  const cheater=!!a.isCheater;
+  const accent=cheater?0xff267a:[0xe0c88f,0xb5d7cb,0x9eb8d0,0xe2a47d][(a.index??0)%4];
+  const visor=cheater?0xff267a:a.team===0?0x4c9aa8:0x965f52;
+
+  // Sculpted armored torso, chest harness plate, utility belt + buckle, collar
   part(soft,0,1.07,0,.64,.72,.44,tint,20,.10);
+  part(soft,0,1.15,.22,.40,.22,.08,hit,30,.10);
   part(soft,0,.80,.02,.57,.17,.41,GRAPHITE,21);
-  part('orb',0,1.72,-.01,.66,.6,.62,a.isCheater?0x221528:armor,20,.10);
-  part(soft,0,1.715,.27,.54,.2,.13,visor,a.isCheater?3:8,.068);
+  part('bevel',0,.81,.24,.17,.085,.055,accent,4);
   part(soft,0,1.43,.02,.36,.18,.32,GRAPHITE,21);
+  if (!lite) {
+    part('box',0,1.16,.27,.03,.18,.02,bright,3,.10);
+    for (const sign of [-1,1]) part('box',sign*.18,1.12,.23,.06,.24,.04,armor,21,.10);
+  }
+
+  // Sculpted tactical helmet: dual-tone crown, recessed reflective visor, brow ridge, glowing HUD bar, crest fin & ear comms
+  part('orb',0,1.72,-.01,.66,.60,.62,cheater?0x221528:armor,20,.10);
+  part('orb',0,1.89,-.03,.58,.20,.53,tint,20,.15);
+  part('bevel',0,1.718,.265,.58,.23,.18,0x17262e,4,.06);
+  part(soft,0,1.715,.31,.52,.175,.11,visor,cheater?3:8,.068);
+  part('bevel',0,1.815,.295,.51,.042,.14,accent,20);
+  part(soft,0,1.985,-.08,.11,.045,.32,accent,20);
+  if (!lite) {
+    part('box',0,1.668,.37,.44,.014,.016,bright,3,.068);
+    for (const sign of [-1,1]) {
+      part('cylinder',sign*.33,1.69,.01,.20,.09,.20,tint,20);
+      part('box',sign*.34,1.71,.14,.06,.055,.035,bright,3);
+    }
+  }
+
+  // Pressurized translucent ink tank with metallic end-caps & live sloshing ink column!
   const capacity=a.tankMax ?? BASE_TANK, tankHeight=capacity>BASE_TANK?1.11:.79;
-  const fill=tankHeight*.70*clamp(a.tank/capacity,0,1);
-  part('bevel',0,1.13,-.40,.46,tankHeight,.29,0x5d6f73,4);
-  if (fill>.003) part('box',0,1.13+(fill-tankHeight*.70)*.5,-.553,.32,fill,.03,bright,3);
+  const tankLevel=clamp((a.tank??capacity)/capacity,0,1);
+  const fill=tankHeight*.72*tankLevel;
+  part('bevel',0,1.13,-.39,.46,tankHeight,.29,0x3a4a4e,4);
+  for (const sign of [-1,1]) {
+    part(soft,0,1.13+sign*(tankHeight*.50-.045),-.40,.49,.11,.31,armor,20);
+    if (!lite) part('bevel',sign*.20,1.13,-.48,.065,tankHeight*.76,.11,accent,4);
+  }
+  if (fill>.003) {
+    const slosh=Math.sin(time*5.5+(a.index??0))*.04*(pace+.2);
+    part('box',0,1.13-tankHeight*.36+fill*.5,-.505,.32,fill,.09,bright,9,slosh*.2);
+    part('box',0,1.13-tankHeight*.36+fill*.5,-.556,.055,fill,.025,bright,3);
+  }
+  if (!lite) part('glass',0,1.13,-.542,.36,tankHeight*.76,1,0xd8f2ec,17);
+
+  // Articulated legs (with knee armor & accented tactical boots) and arms (with shoulder pauldrons & wrist cuffs)
   _dynBeam.shape=limbShape;
   const planted=!!(a.feet && !airborne && !a.isPlayer);
   for (let sIdx=0;sIdx<2;sIdx++) {
@@ -2207,14 +2336,21 @@ function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor
       ankle=[ax+lx*cy+lzA*sy,ay+ly+.112,az-lx*sy+lzA*cy];
       bootPitch=airborne?(rising?-.32:.16):transfer*sign*pace*.14;
     }
-    const knee=limbJoint(hip,ankle,.383,.370,[Math.sin(bootYaw),.09,Math.cos(bootYaw)]);
+    const bfx=Math.sin(bootYaw), bfz=Math.cos(bootYaw);
+    const knee=limbJoint(hip,ankle,.383,.370,[bfx,.09,bfz]);
     r.beam(hip,knee,.26,.27,GRAPHITE,31,_dynBeam);
     r.beam(knee,ankle,.22,.23,hit,30,_dynBeam);
     _dynYP.yaw=bootYaw; _dynYP.pitch=bootPitch;
     r.add(soft,fxFoot,fyFoot,fzFoot,.30,.19,.47,BOOT,21,_dynYP);
+    if (!lite) {
+      r.add(soft,knee[0]+bfx*.11,knee[1],knee[2]+bfz*.11,.15,.13,.06,tint,20,_dynYP);
+      r.add(soft,fxFoot+bfx*.16,fyFoot+.01,fzFoot+bfz*.16,.27,.10,.14,tint,20,_dynYP);
+      r.add('box',fxFoot,fyFoot-.065,fzFoot,.31,.05,.48,0x1d272c,21,_dynYP);
+    }
     const armSwing=sign>0?-step*.14:0, armLift=airborne?.07:armSwing*.28-crouch*.035;
     const shoulder=torso(sign*.331,1.241,.023);
     part(soft,sign*.34,1.245,.02,.28,.26,.31,tint,20);
+    if (!lite) part('box',sign*.39,1.265,.14,.12,.045,.03,accent,4);
     const hand=weapon.roller?loc(sign*.25,1.13,.40):sign<0?gun.at(-.416,1.22,.44):gun.at(-.285,1.18,.66);
     const elbow=planted || a.brace>0?limbJoint(shoulder,hand,.371,.415,[sign*cy,-.58,-sign*sy]):
       loc(sign*.386,1.06+armLift,.22+armSwing);
@@ -2223,17 +2359,47 @@ function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor
     _dynYaw.yaw=yaw;
     r.add('orb',hand[0],hand[1],hand[2],.20,.19,.22,BOOT,21,_dynYaw);
   }
+
+  // Bespoke high-craft weapon model (all 16 weapons!)
+  drawWeaponModel(r,a,time,{pose,loc,part,weapon,gun,tint,bright,armor,accent,aimYaw,showEffects,lite});
+}
+
+function drawWeaponModel(r,a,time,{pose,loc,part,weapon,gun,tint,bright,armor,accent,aimYaw,showEffects,lite}) {
+  const {cy,sy}=pose;
+  const ax=a.x, ay=a.y, az=a.z;
+  const capacity=a.tankMax ?? BASE_TANK;
+  const inkRatio=clamp((a.tank??capacity)/capacity,0,1);
+
   if (weapon.roller) {
+    // Detailed Street Roller: glossy spinning foam roller with spiral paint bands, metallic fork yoke, splash guard & dual grip bar
     const {y:headY,z:headZ}=rollerPosition(a);
-    _sbX[0]=0; _sbX[1]=1; _sbX[2]=0;
-    _sbY[0]=cy; _sbY[1]=0; _sbY[2]=-sy;
-    _sbZ[0]=-sy; _sbZ[1]=0; _sbZ[2]=-cy;
-    _dynBasis.basis=_shotBasis;
-    r.add('cylinder',ax+headZ*sy,ay+headY,az+headZ*cy,.62,1.76,.62,bright,9,_dynBasis);
-    r.beam(loc(0,headY+.2,headZ-.1),loc(0,1.13,.40),.075,.075,GRAPHITE,4,_dyn);
+    const axis=[cy,0,-sy], up=[0,1,0], facing=[sy,0,cy], axes=[up,axis,cross(up,axis)];
+    const position=loc(0,headY,headZ);
+    r.add('cylinder',...position,.64,1.78,.64,bright,9,{dynamic:true,basis:axes});
+    const spin=a.rolling?a.steps*.88:time*.5;
+    for (let i=0;i<(lite?2:4);i++) {
+      const ang=spin+i*TAU/(lite?2:4);
+      const radial=add(scale(up,Math.cos(ang)),scale(facing,Math.sin(ang)));
+      const seam=add(position,scale(radial,.322));
+      r.add('box',...seam,1.68,.018,.045,i%2?tint:0xf6fffc,i%2?9:3,{dynamic:true,basis:[axis,radial,cross(axis,radial)]});
+    }
+    for (const sign of [-1,1]) {
+      r.add('cylinder',...loc(sign*.90,headY,headZ),.66,.095,.66,GRAPHITE,4,{dynamic:true,basis:axes});
+      r.add('cylinder',...loc(sign*.95,headY,headZ),.32,.05,.32,accent,4,{dynamic:true,basis:axes});
+      r.beam(loc(sign*.90,headY,headZ),loc(sign*.90,headY+.34,headZ-.16),.058,.058,TRIM,4,{dynamic:true});
+    }
+    r.beam(loc(-.90,headY+.34,headZ-.16),loc(.90,headY+.34,headZ-.16),.07,.07,TRIM,4,{dynamic:true});
+    r.beam(loc(0,headY+.34,headZ-.16),loc(0,1.13,.40),.078,.078,GRAPHITE,4,{dynamic:true});
+    if (!lite) {
+      // Splash cowl & pressure gauge collar on handle
+      r.add('bevel',...loc(0,headY+.36,headZ-.18),1.72,.055,.16,tint,20,{dynamic:true,yaw:Math.PI-a.yaw});
+      part('cylinder',0,1.13,.40,.14,.14,.14,bright,3);
+    }
+    part('box',0,1.13,.40,.58,.12,.14,BOOT,21);
     return;
   }
-  const wid=weapon.id, big=wid==='lob' || wid==='rd2' || wid==='td', wide=wid==='fan' || wid==='autoeima' || wid==='autoeima2s', barrel=gun.barrel, width=big?.34:wide?.30:.235;
+
+  const wid=weapon.id, barrel=gun.barrel;
   const gp=gun.pose, gcy=gp.cy, gsy=gp.sy, gc=gun.c, gs=gun.s, grec=gun.recoil;
   const gsway=gp.sway*.87, grise=1.25+gp.rise*.87, glean=.437+gp.lean*.87;
   _dynYP.yaw=aimYaw;
@@ -2243,14 +2409,190 @@ function drawPlainCrew(r,a,time,{pose,part,soft,limbShape,weapon,gun,torso,armor
     _dynYP.pitch=pitch+gun.pitch;
     r.add(type,ax+lx*gcy+lz*gsy,ay+ly,az-lx*gsy+lz*gcy,w,h,d,color,mat,_dynYP);
   };
-  gunPart('bevel',-.415,1.30,.474,wid==='dual'?.35:width,big?.29:.222,.565,GRAPHITE);
-  gunPart('box',-.415,1.343,.49,width+.02,.12,.41,tint,20);
-  gunPart('cylinder',-.415,1.30,.69+barrel*.30,big?.25:.14,barrel,big?.25:.14,TRIM,4,Math.PI/2);
-  gunPart('box',-.415,1.205,.359,.125,.207,.17,BOOT,21,-.20);
-  if (wid==='autoeima' || wid==='autoeima2s') gunPart('orb',-.415,1.47,.54,.12,.09,.12,wid==='autoeima2s'?0xff267a:bright,3);
-  if (showEffects && (a.recoil>.65 && !a.muzzleBlocked || a.charge>.12)) {
-    const flash=a.charge>.12?.071+.095*a.charge:wid==='td'?.46:wid==='rd2'?.27:.14;
-    gunPart('orb',-.415,1.30,.785+barrel*.85,flash,flash,flash*1.7,bright,3);
+
+  const isPistol=wid==='swout' || wid==='swout2';
+  const isCheaterGun=wid==='autoeima2s';
+  const isAutoEima=wid==='autoeima' || isCheaterGun;
+  const isQuad=wid==='rd2', isCannon=wid==='td', isDual=wid==='dual';
+  const isLong=wid==='charge', isHeavy=wid==='lob', isBlast=wid==='blast';
+  const isWide=wid==='fan' || isAutoEima;
+  const chrome=0xcfd6d2, darkMetal=0x212c32;
+  const shellTint=isCheaterGun?0x22102c:tint;
+  const glowTint=isCheaterGun?0xff267a:wid==='swout2' && a.coMode?0xffe066:bright;
+  const width=isPistol?.18:isCannon?.38:isQuad?.35:isHeavy?.33:isDual?.35:isWide?.31:.235;
+  const height=isPistol?.16:isHeavy || isQuad || isCannon?.29:.222;
+  const bodyLen=isPistol?.40:.57;
+  const slideBack=(a.recoil??0)*.085;
+
+  // ---- Shared Tactical Base: Receiver, Shroud, Grip, Top Rail, Reflex Sight & Live Side Ink Gauge ----
+  gunPart('bevel',-.415,1.30,.47,width,height,bodyLen,isCheaterGun?0x1b1024:GRAPHITE,4);
+  gunPart('bevel',-.415,1.345,.48-slideBack*.5,width+.024,height*.58,bodyLen*.74,shellTint,20);
+  gunPart('box',-.415,1.20,.355,.115,.20,.155,BOOT,21,-.22);
+  // Top rail + glowing reflex holo-sight
+  if (!isLong && !isHeavy && !isAutoEima) {
+    gunPart('box',-.415,1.30+height*.5+.024,.47,.06,.028,bodyLen*.58,darkMetal,4);
+    if (!lite) {
+      gunPart('bevel',-.415,1.30+height*.5+.062,.39,.078,.062,.085,darkMetal,4);
+      gunPart('box',-.415,1.30+height*.5+.062,.395,.052,.042,.015,glowTint,3);
+    }
+  }
+  // Live side glass ink pressure gauge!
+  if (!lite && inkRatio>.02) {
+    const gx=-.415-width*.5-.016;
+    gunPart('box',gx,1.30,.48,.024,.062,.28,darkMetal,4);
+    gunPart('box',gx-.006,1.30,.48-(1-inkRatio)*.12,.014,.042,.24*inkRatio,glowTint,3);
+  }
+
+  // ---- Weapon-Specific Signature 3D Silhouettes ----
+  if (isAutoEima) {
+    // オート英馬 & チーター違法改造 オート英馬 II Super:
+    // Circular 7-barrel rotary cluster + spinning radar seeker dish + wide heat shroud + side ink drum!
+    const ringR=.095;
+    for (let k=0;k<7;k++) {
+      const ang=k===0?0:(k-1)*TAU/6+(isCheaterGun?time*5.5:time*1.6);
+      const bx=k===0?0:Math.cos(ang)*ringR, by=k===0?0:Math.sin(ang)*ringR;
+      gunPart('cylinder',-.415+bx,1.30+by,.69+barrel*.32,.058,barrel,.058,k===0?glowTint:chrome,k===0?3:4,Math.PI/2);
+      if (!lite) gunPart('cylinder',-.415+bx,1.30+by,.70+barrel*.84,.044,.025,.044,glowTint,9,Math.PI/2);
+    }
+    // Reinforced rotary muzzle clamp + heat-shield vents
+    gunPart('cylinder',-.415,1.30,.68+barrel*.62,.275,.075,.275,darkMetal,4,Math.PI/2);
+    gunPart('ring',-.415,1.30,.70+barrel*.82,.30,.032,.30,glowTint,3,Math.PI/2);
+    // Under-barrel high-capacity pressurized ink drum
+    gunPart('cylinder',-.415,1.14,.55,.22,.22,.22,glowTint,9,Math.PI/2);
+    gunPart('cylinder',-.415,1.14,.55,.235,.06,.235,darkMetal,4,Math.PI/2);
+    // Top rotating seeker-radar dish + glowing target acquisition orb
+    const dishSpin=time*(isCheaterGun?9.5:4.2);
+    gunPart('cylinder',-.415,1.455,.53,.19,.042,.19,darkMetal,4);
+    gunPart('box',-.415,1.485,.53,.21,.028,.045,chrome,4,Math.sin(dishSpin)*.18);
+    gunPart('orb',-.415,1.515,.53,.115,.095,.115,glowTint,3);
+    if (isCheaterGun && !lite) {
+      // Overclocked illegal crimson-gold energy coils & hovering breach halo!
+      for (let i=0;i<3;i++) gunPart('ring',-.415,1.30,.58+i*.12,.33,.026,.33,i%2?0xffd066:0xff267a,3,Math.PI/2);
+      gunPart('ring',-.415,1.535,.53,.26,.024,.26,0xff267a,3);
+    }
+  } else if (isQuad) {
+    // RD II QUATRO+: 5 heavy pressurized barrels (4 outer + glowing core), machined clamps, mega drum & overdrive sight
+    for (const [bx,by] of [[-.09,.08],[.09,.08],[-.09,-.08],[.09,-.08],[0,0]]) {
+      gunPart('cylinder',-.415+bx,1.30+by,.69+barrel*.32,.088,barrel,.088,bx===0 && by===0?glowTint:chrome,bx===0 && by===0?3:4,Math.PI/2);
+      gunPart('cylinder',-.415+bx,1.30+by,.70+barrel*.86,.062,.034,.062,glowTint,9,Math.PI/2);
+    }
+    gunPart('bevel',-.415,1.30,.66+barrel*.56,.32,.29,.12,darkMetal,4);
+    gunPart('bevel',-.415,1.30,.60,.35,.32,.11,GRAPHITE,4);
+    gunPart('box',-.415,1.48,.50,.085,.075,.38,tint,20);
+    gunPart('orb',-.415,1.11,.54,.24,.20,.34,bright,9);
+    if (!lite) gunPart('ring',-.415,1.30,.69+barrel*.78,.36,.03,.36,glowTint,3,Math.PI/2);
+  } else if (isCannon) {
+    // TD Shock Cannon: wide acoustic blast horn, glowing inner capacitor ring, side armored fins & top pressure dome
+    gunPart('cylinder',-.415,1.30,.68+barrel*.28,.31,barrel,.31,chrome,4,Math.PI/2);
+    gunPart('cone',-.415,1.30,.62+barrel*.96,.54,.29,.54,darkMetal,4,-Math.PI/2);
+    gunPart('ring',-.415,1.30,.69+barrel*.92,.44,.045,.44,glowTint,3,Math.PI/2);
+    gunPart('cylinder',-.415,1.30,.70+barrel*.84,.34,.05,.34,bright,9,Math.PI/2);
+    for (const side of [-1,1]) {
+      gunPart('bevel',-.415+side*.22,1.30,.56,.06,.22,.36,tint,20);
+      if (!lite) gunPart('box',-.415+side*.255,1.30,.58,.02,.08,.26,glowTint,3);
+    }
+    gunPart('orb',-.415,1.50,.47,.24,.18,.30,bright,9);
+  } else if (isPistol) {
+    // SW OUT & SW OUT II: sleek dual-round tactical auto-pistol with reciprocating slide, twin stacked barrels & laser module!
+    const isTwo=wid==='swout2';
+    const bLen=isTwo?.36:.26;
+    gunPart('bevel',-.415,1.335,.49-slideBack,.185,.105,.44,isTwo?chrome:tint,isTwo?4:20);
+    for (const by of [-.035,.038]) {
+      gunPart('cylinder',-.415,1.305+by,.66+bLen*.3,.058,bLen,.058,darkMetal,4,Math.PI/2);
+      gunPart('cylinder',-.415,1.305+by,.67+bLen*.8,.040,.025,.040,glowTint,3,Math.PI/2);
+    }
+    // Under-barrel laser targeter module
+    gunPart('bevel',-.415,1.215,.57,.09,.07,.20,darkMetal,4);
+    gunPart('orb',-.415,1.215,.685,.045,.045,.045,glowTint,3);
+    if (isTwo) {
+      // Extended precision compensator + CO-mode glowing stabilizer fins!
+      gunPart('bevel',-.415,1.305,.68+bLen*.55,.16,.14,.16,darkMetal,4);
+      for (const side of [-1,1]) gunPart('box',-.415+side*.105,1.33,.66,.024,.065,.22,glowTint,3);
+      if (a.coMode && showEffects) {
+        gunPart('ring',-.415,1.305,.68+bLen*.85,.24,.025,.24,0xffe066,3,Math.PI/2);
+      }
+    }
+  } else if (isDual) {
+    // Dual Shooter: synchronized parallel twin anodized barrels with twin muzzle brakes & linked ink pods
+    for (const sign of [-1,1]) {
+      gunPart('cylinder',-.415+sign*.13,1.30,.79,.098,.36,.098,chrome,4,Math.PI/2);
+      gunPart('cylinder',-.415+sign*.13,1.30,.99,.148,.055,.148,darkMetal,4,Math.PI/2);
+      gunPart('cylinder',-.415+sign*.13,1.30,1.02,.085,.025,.085,bright,9,Math.PI/2);
+      if (!lite) gunPart('orb',-.415+sign*.15,1.42,.47,.085,.085,.22,bright,9);
+    }
+    gunPart('box',-.415,1.30,.85,.26,.045,.07,darkMetal,4);
+  } else if (isLong) {
+    // Charger Rail Sniper: extended fluted rail barrel, 4 magnetic accelerator coils, scope with lens & live charge glow!
+    gunPart('cylinder',-.415,1.30,.69+barrel*.32,.125,barrel,.125,chrome,4,Math.PI/2);
+    gunPart('cylinder',-.415,1.30,.67+barrel*.88,.21,.10,.21,darkMetal,4,Math.PI/2);
+    gunPart('cylinder',-.415,1.30,.73+barrel*.88,.12,.04,.12,bright,9,Math.PI/2);
+    // Scope tube + reflective lens + mount rings
+    gunPart('box',-.415,1.44,.52,.09,.07,.24,darkMetal,4);
+    gunPart('cylinder',-.415,1.50,.53,.112,.36,.112,GRAPHITE,4,Math.PI/2);
+    gunPart('cylinder',-.415,1.50,.715,.088,.025,.088,0x9ee6df,8,Math.PI/2);
+    // 4 magnetic rail coils along extended barrel (light up progressively with a.charge!)
+    const ch=a.charge??0;
+    for (let i=0;i<4;i++) {
+      const lit=ch>(i+.2)/4;
+      gunPart('box',-.415,1.375,.73+i*.092,.145,.032,.028,lit?0xfff4cf:darkMetal,lit?3:4);
+    }
+  } else if (isHeavy) {
+    // Lob Cannon: heavy wide-bore mortar barrel, reinforced lip, giant translucent top ink hopper!
+    gunPart('cylinder',-.415,1.30,.69+barrel*.30,.26,barrel,.26,chrome,4,Math.PI/2);
+    gunPart('cylinder',-.415,1.30,.67+barrel*.85,.34,.11,.34,darkMetal,4,Math.PI/2);
+    gunPart('cylinder',-.415,1.30,.73+barrel*.85,.25,.04,.25,bright,9,Math.PI/2);
+    gunPart('orb',-.415,1.53,.45,.28,.25,.33,bright,9);
+    gunPart('ring',-.415,1.42,.45,.24,.045,.24,darkMetal,4);
+  } else {
+    // Jet / Fan / Blast / Surge / Coil / Prism: precision machined barrels + distinct signature assemblies!
+    gunPart('cylinder',-.415,1.30,.69+barrel*.30,isBlast?.21:.14,barrel,isBlast?.21:.14,chrome,4,Math.PI/2);
+    gunPart('cylinder',-.415,1.30,.67+barrel*.85,isWide?.26:isBlast?.29:.21,.095,isWide?.26:isBlast?.29:.21,darkMetal,4,Math.PI/2);
+    gunPart('cylinder',-.415,1.30,.725+barrel*.85,isBlast?.21:.125,.038,isBlast?.21:.125,bright,9,Math.PI/2);
+    if (wid==='fan') {
+      for (const side of [-1,1]) {
+        gunPart('cylinder',-.415+side*.145,1.296,.79,.092,.28,.092,chrome,4,Math.PI/2);
+        gunPart('cylinder',-.415+side*.145,1.296,.93,.065,.025,.065,bright,9,Math.PI/2);
+      }
+      gunPart('box',-.415,1.20,.62,.16,.11,.24,BOOT,21); // pump forend
+    } else if (isBlast) {
+      gunPart('cone',-.415,1.30,.74+barrel*.86,.34,.18,.34,darkMetal,4,-Math.PI/2);
+      gunPart('ring',-.415,1.30,.72+barrel*.82,.30,.035,.30,bright,3,Math.PI/2);
+      for (const side of [-1,1]) gunPart('bevel',-.415+side*.18,1.30,.58,.045,.17,.30,tint,20);
+    } else if (wid==='coil') {
+      for (let i=0;i<5;i++) {
+        const rr=.27-i*.020, lit=Math.floor(time*8)%5===i;
+        gunPart('ring',-.415,1.30,.59+i*.076,rr,.032,rr,lit?bright:chrome,lit?3:4,Math.PI/2);
+      }
+    } else if (wid==='surge') {
+      for (const sign of [-1,0,1]) {
+        gunPart('cylinder',-.415+sign*.105,1.46,.42,.084,.27,.084,bright,9);
+        gunPart('cylinder',-.415+sign*.105,1.59,.42,.092,.03,.092,darkMetal,4);
+      }
+      gunPart('bevel',-.415,1.30,.72+barrel*.85,.36,.12,.10,darkMetal,4);
+    } else if (wid==='prism') {
+      gunPart('bevel',-.415,1.40,.50,.21,.18,.36,0xbdf2e8,8);
+      for (const sign of [-1,1]) gunPart('box',-.415+sign*.13,1.36,.55,.046,.19,.42,chrome,4);
+      gunPart('ring',-.415,1.30,.71+barrel*.82,.22,.028,.22,bright,3,Math.PI/2);
+    } else {
+      // Jet Shooter: twin pressurized ink tubes & perforated shroud collar
+      for (const side of [-1,1]) gunPart('cylinder',-.415+side*.12,1.35,.52,.048,.34,.048,bright,9,Math.PI/2);
+      gunPart('ring',-.415,1.30,.66+barrel*.52,.20,.035,.20,accent,4,Math.PI/2);
+    }
+  }
+
+  // ---- Multi-Layered Starburst Muzzle Flash & Charge Energy Bloom ----
+  if (showEffects && ((a.recoil??0)>.56 && !a.muzzleBlocked || (a.charge??0)>.10)) {
+    const charging=(a.charge??0)>.10;
+    const flash=charging?.085+.125*a.charge:isCannon?.52:isQuad?.32:isAutoEima?.24:.18;
+    const mz=isDual?1.06:isPistol?.69+(wid==='swout2'?.36:.26)*.88:.77+barrel*.86;
+    for (const side of isDual?[-1,1]:[0]) {
+      const mx=-.415+side*.13;
+      gunPart('orb',mx,1.30,mz,flash*.72,flash*.72,flash*1.55,0xffffff,3);
+      gunPart('orb',mx,1.30,mz+.04,flash*1.25,flash*1.25,flash*2.1,glowTint,3);
+      if (!lite) {
+        gunPart('ring',mx,1.30,mz+.02,flash*2.4,flash*.22,flash*2.4,glowTint,3,Math.PI/2);
+      }
+    }
   }
 }
 
