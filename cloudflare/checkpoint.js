@@ -1,4 +1,4 @@
-import {INK_HIT_DURATION} from '../dist/battle.js';
+import {INK_HIT_DURATION,PLAYER_BASE_HP} from '../dist/battle.js';
 import {BASE_TANK,CABIN_X,INK_REGIONS,PAINT_LAYERS,RAIL_CABIN_X,UNDER_X,inkOrigin,inkRegion} from '../dist/layout.js';
 import {STAIRS} from '../dist/stairs.js';
 import {RAIDER_WEAPON} from '../dist/raiders.js';
@@ -203,7 +203,7 @@ export function restoreCheckpoint(b,stored) {
   for (let i=0;i<b.actors.length;i++) {
     const a=b.actors[i];
     const {weaponId,casterIndex,...saved}=data.actors[i];
-    Object.assign(a,{isCheater:false,baseHp:100,agility:1,jumpFactor:1,regenFactor:1},saved,
+    Object.assign(a,{isCheater:false,baseHp:a.isPlayer?PLAYER_BASE_HP:100,pShield:0,pShieldUntil:0,pShieldReady:0,agility:1,jumpFactor:1,regenFactor:1},saved,
       {drone:null,beaming:false,route:[],travelLine:null,travelGoal:null,enemy:null,goal:null});
     if (weaponId) a.weapon=shotWeaponById(weaponId);
     a.rollHold=0;

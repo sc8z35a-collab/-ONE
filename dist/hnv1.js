@@ -424,7 +424,7 @@ export class HNV1 {
     const w=actor.weapon, m=this.mind(actor);
     if (!w) return 9;
     if (actor.giant) return 2.2;
-    const base=w.roller?2.7:w.charge?17.5:w.id==='autoeima' || w.id==='autoeima2s'?10.5:
+    const base=w.roller?2.7:w.charge?17.5:w.id==='autoeima' || w.id==='autoeima2s' || w.id==='autoeima2super'?10.5:
       w.id==='fan'?6.2:w.blast?5.6:w.id==='lob'?12.8:w.id==='rd2'?11.5:w.id==='prism'?14.5:9.6;
     const moraleShift=(m.morale>.35?-1.1:m.morale<-.25?1.5:0);
     return clamp(base*m.traits.preferredScale+moraleShift,2.2,Math.max(4,(w.range??18)*.86));

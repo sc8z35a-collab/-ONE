@@ -12,7 +12,8 @@ export const HELI_FIRST=92, HELI_INTERVAL=120, HELI_STAY=42, HELI_SALVO_COUNT=6;
 export const TSUNAMI_FIRST=112, TSUNAMI_INTERVAL=115, TSUNAMI_WARN=5, TSUNAMI_SPEED=12.5, TSUNAMI_HEIGHT=3.6, TSUNAMI_WIDTH=9.5;
 export const UNDER_FLOOD_MAX=2.65, UNDER_FLOOD_HOLD=16;
 export const TRAIN_BOSS_FIRST=145, TRAIN_BOSS_INTERVAL=130, TRAIN_BOSS_DURATION=42;
-export const GOAT_FIRST=185, GOAT_INTERVAL=165, GOAT_DURATION=65, GOAT_ARMS=16, GOAT_HOVER_Y=4.6, GOAT_REACH=50;
+export const GOAT_FIRST=95, GOAT_INTERVAL=165, GOAT_DURATION=Infinity, GOAT_ARMS=16, GOAT_HOVER_Y=5.2, GOAT_REACH=50;
+export const GOAT_ATTACK_KINDS=['smash','whirl','barrage','beam','meteor','gravity','lightning','nova'];
 
 function discoverApartmentPerches(world) {
   const north=[], south=[];
@@ -94,10 +95,11 @@ export class Hazards {
     this.trainHits=new Map();
     this.nextGoat=GOAT_FIRST;
     this.goat={
-      active:false,name:'破壊神ゴート',hp:0,maxHp:battle.teamSize===8?18000:12000,phase:1,
-      x:0,y:GOAT_HOVER_Y,z:0,yaw:Math.PI,vx:0,vz:0,until:0,nextAttack:0,volley:0,cast:null,
-      radius:1.55,height:3.6,team:-1,isGoat:true,isBoss:true,arms:GOAT_ARMS,weapon:GOAT_WEAPON
+      active:false,name:'破壊神ゴート',hp:0,maxHp:battle.teamSize===8?30000:20000,phase:1,
+      x:0,y:GOAT_HOVER_Y,z:0,yaw:Math.PI,vx:0,vz:0,until:Infinity,nextAttack:0,volley:0,cast:null,
+      radius:1.75,height:4.1,team:-1,isGoat:true,isBoss:true,supreme:true,arms:GOAT_ARMS,weapon:GOAT_WEAPON
     };
+    this._goatNovaHits=new Set();
     this.alert='';
     this.alertUntil=0;
   }
@@ -817,19 +819,20 @@ export class Hazards {
     }
   }
 
-  // ---- God of Destruction Goat (破壊神ゴート: 圧倒的体力・浮遊・16本の極太触手・50m全域射程・高度戦術AI) ----
-  spawnGoat(duration=GOAT_DURATION) {
+  // ---- God of Destruction Goat (上位存在・破壊神ゴート: 4段階超越・8種神罰攻撃・死ぬまで降臨継続) ----
+  spawnGoat() {
     const b=this.battle, g=this.goat;
-    const maxHp=b.teamSize===8?18000:12000;
+    const maxHp=b.teamSize===8?30000:20000;
     Object.assign(g,{
       active:true,hp:maxHp,maxHp,phase:1,
       x:0,y:GOAT_HOVER_Y+2.4,z:-4,yaw:Math.PI,vx:0,vz:0,
-      until:b.elapsed+duration,nextAttack:b.clock+1.5,volley:0,lastCastKind:null,cast:null,arms:GOAT_ARMS
+      until:Infinity,nextAttack:b.clock+1.35,volley:0,lastCastKind:null,cast:null,arms:GOAT_ARMS,supreme:true
     });
-    this.nextGoat=b.elapsed+GOAT_INTERVAL;
-    b.burst([g.x,g.y,g.z],-1,44,7.5);
-    this.announce('⚠ 破壊神ゴート降臨！16本の極太触手が50m全域を賢く狩り尽くす！',5.5,'boss');
-    b.events.unshift({label:'⚠ 破壊神ゴート降臨（HP '+maxHp+' · 16本触手/50m）',team:-1,until:b.clock+5.0});
+    this._goatNovaHits.clear();
+    b.burst([g.x,g.y,g.z],-1,56,9.0);
+    b.abilities.rings.push({x:g.x,y:b.world.floor(g.x,g.z).y+.08,z:g.z,r:16,team:1,until:b.clock+.9});
+    this.announce('⚠ 上位存在【破壊神ゴート】降臨！討伐するまで戦場に君臨し続ける！',5.8,'boss');
+    b.events.unshift({label:'⚠ 上位存在・破壊神ゴート降臨（HP '+maxHp+' · 8種神罰/50m）',team:-1,until:b.clock+5.2});
     b.events.length=Math.min(b.events.length,4);
     return g;
   }
@@ -837,33 +840,49 @@ export class Hazards {
   hurtGoat(amount,source=null) {
     const g=this.goat;
     if (!g.active || !(amount>0)) return 0;
-    const lost=Math.min(g.hp,amount);
+    // Phase 4 (神域超越) grants 20% divine damage resistance.
+    const effective=g.phase>=4?amount*.8:amount;
+    const lost=Math.min(g.hp,effective);
     g.hp-=lost;
-    const ratio=g.hp/g.maxHp, nextPhase=ratio<.33?3:ratio<.66?2:1;
+    const ratio=g.hp/g.maxHp, nextPhase=ratio<.25?4:ratio<.50?3:ratio<.75?2:1;
     const b=this.battle;
     if (g.hp<=0) {
       g.active=false;
       g.cast=null;
-      b.burst([g.x,g.y+1.2,g.z],source?.team ?? -1,56,9.0);
-      this.announce('✦ 破壊神ゴートを討伐した！',5.5,'bossDown');
-      b.events.unshift({label:(source?.name ?? '討伐')+'  ▸  破壊神ゴート',team:source?.team ?? -1,until:b.clock+5.0});
+      this._goatNovaHits.clear();
+      this.nextGoat=b.elapsed+GOAT_INTERVAL;
+      b.burst([g.x,g.y+1.4,g.z],source?.team ?? -1,72,11.0);
+      b.abilities.rings.push({x:g.x,y:b.world.floor(g.x,g.z).y+.08,z:g.z,r:22,team:Math.max(0,source?.team??0),until:b.clock+.95});
+      this.announce('✦ 上位存在・破壊神ゴートを討伐した！',5.8,'bossDown');
+      b.events.unshift({label:(source?.name ?? '討伐')+'  ▸  破壊神ゴート【上位存在】',team:source?.team ?? -1,until:b.clock+5.2});
       b.events.length=Math.min(b.events.length,4);
       if (source && source.team>=0) source.kills++;
     } else if (nextPhase!==g.phase) {
       g.phase=nextPhase;
-      this.announce(nextPhase===3?'⚠ 破壊神ゴート【破滅形態】！16本の触手が50m全域で極限暴走！':'⚠ 破壊神ゴートが激昂した！',4.0,'boss');
+      const fy=b.world.floor(g.x,g.z).y;
+      b.burst([g.x,g.y+1.2,g.z],-1,44,8.5);
+      b.abilities.rings.push({x:g.x,y:fy+.08,z:g.z,r:14+nextPhase*4,team:1,until:b.clock+.75});
+      for (const a of [...b.actors,...b.raiders.live()]) {
+        if (a.down>0 || a.ride || a.lift || zoneOf(a.x)!==0) continue;
+        const dx=a.x-g.x, dz=a.z-g.z, d=Math.hypot(dx,dz);
+        if (d<14 && d>.1) b.stepActor(a,(dx/d)*2.8,(dz/d)*2.8);
+      }
+      const msg=nextPhase===4?'⚠ 破壊神ゴート【神域超越】覚醒！全神罰が極限へ到達！':
+        nextPhase===3?'⚠ 破壊神ゴート【破滅形態】！虚空と雷撃が50m全域を焼き払う！':
+        '⚠ 上位存在・破壊神ゴートが激昂した！';
+      this.announce(msg,4.6,'boss');
     }
     return lost;
   }
 
-  planGoatAttack(targets) {
+  planGoatAttack(targets,forcedKind=null) {
     const b=this.battle, g=this.goat, phase=g.phase, clock=b.clock;
     const turn=g.volley++;
     const mind=b.hnv1?b.hnv1.mind(g):null;
     const ranked=targets.filter(a=>Math.hypot(a.x-g.x,a.z-g.z)<=GOAT_REACH)
       .sort((a,c)=>b.hnv1?b.hnv1.scoreTarget(g,a,mind?.lastTarget)-b.hnv1.scoreTarget(g,c,mind?.lastTarget):
         Math.hypot(a.x-g.x,a.z-g.z)-Math.hypot(c.x-g.x,c.z-g.z));
-    const whirlR=Math.min(GOAT_REACH,22+phase*9);
+    const whirlR=Math.min(GOAT_REACH,24+phase*7);
     let closeCount=0, airborneCount=0, fastCount=0;
     for (const a of ranked) {
       const d=Math.hypot(a.x-g.x,a.z-g.z);
@@ -872,18 +891,34 @@ export class Hazards {
       if (Math.hypot(a.vx??0,a.vz??0)>5.2) fastCount++;
     }
 
-    // Smart tactical selection: match attack shape to target geometry & dodge history
-    let pick='smash';
-    if (ranked.length===0) pick='barrage';
-    else if (closeCount>=2 && g.lastCastKind!=='whirl') pick='whirl';
-    else if ((fastCount+airborneCount>=Math.ceil(ranked.length*.55) && g.lastCastKind!=='barrage') || (turn%4===2)) pick='barrage';
-    else if (g.lastCastKind==='smash' && (closeCount>=2 || (closeCount===ranked.length && closeCount>=1))) pick='whirl';
+    // Smart Supreme Tactical Selection across all 8 attack kinds!
+    let pick=forcedKind && GOAT_ATTACK_KINDS.includes(forcedKind)?forcedKind:null;
+    if (!pick) {
+      if (ranked.length===0) {
+        pick=['barrage','meteor','nova'][turn%3];
+      } else if (closeCount>=2 && !g.lastCastKind) {
+        pick='whirl';
+      } else if (closeCount>=2) {
+        const closePool=['whirl','gravity','nova','beam'];
+        pick=closePool[turn%closePool.length];
+        if (pick===g.lastCastKind) pick=closePool[(turn+1)%closePool.length];
+      } else if (fastCount+airborneCount>=Math.ceil(ranked.length*.55)) {
+        const fastPool=['barrage','lightning','beam','meteor'];
+        pick=fastPool[turn%fastPool.length];
+        if (pick===g.lastCastKind) pick=fastPool[(turn+1)%fastPool.length];
+      } else {
+        const spreadPool=['smash','meteor','beam','lightning','gravity','nova','barrage'];
+        pick=spreadPool[turn%spreadPool.length];
+        if (pick===g.lastCastKind) pick=spreadPool[(turn+1)%spreadPool.length];
+      }
+    }
     g.lastCastKind=pick;
+    this._goatNovaHits.clear();
+    const leadAnchor=ranked[0] ?? targets[0];
 
     if (pick==='smash') {
-      // 16-Tentacle Tactical Pinpoint + Flank Trap Smash up to 50m reach!
+      // 1. 16-Tentacle Tactical Pinpoint + Flank Trap Smash up to 50m reach
       const points=[];
-      const leadAnchor=ranked[0] ?? targets[0];
       for (let i=0;i<GOAT_ARMS;i++) {
         let px, pz;
         if (i<ranked.length) {
@@ -892,7 +927,6 @@ export class Hazards {
           px=clamp(pred?pred[0]:t.x+(t.vx??0)*.34,-52,52);
           pz=clamp(pred?pred[2]:t.z+(t.vz??0)*.34,-34,34);
         } else if (leadAnchor) {
-          // Spare tentacles surround & cut off escape vectors around priority targets!
           const t=ranked[i%Math.max(1,ranked.length)] ?? leadAnchor;
           const ringSlot=Math.floor(i/Math.max(1,ranked.length));
           const escAng=Math.atan2(t.vz??0,t.vx??0)+(ringSlot-1.5)*0.95+i*0.4;
@@ -907,44 +941,111 @@ export class Hazards {
         const py=b.world.floor(px,pz).y;
         points.push([px,py,pz]);
       }
-      g.cast={kind:'smash',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.52,end:clock+1.12,done:false,points};
+      g.cast={kind:'smash',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.48,end:clock+1.08,done:false,points};
     } else if (pick==='whirl') {
-      // 360-degree 16-Tentacle Colossal Void Whirlwind Sweep!
-      g.cast={kind:'whirl',x:g.x,z:g.z,start:clock,at:clock+.46,end:clock+1.18,done:false,radius:whirlR,yaw:g.yaw};
+      // 2. 360-degree 16-Tentacle Colossal Void Whirlwind Sweep
+      g.cast={kind:'whirl',x:g.x,z:g.z,start:clock,at:clock+.44,end:clock+1.14,done:false,radius:whirlR,yaw:g.yaw};
+    } else if (pick==='barrage') {
+      // 3. 16-20 Smart Homing Ruin Barrage covering full 50m range
+      g.cast={kind:'barrage',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.38,end:clock+.92,done:false,yaw:g.yaw};
+    } else if (pick==='beam') {
+      // 4. [NEW] 虚空破滅光線 — Tri-Beam Void Annihilation Sweep across 50m!
+      const baseYaw=leadAnchor?Math.atan2(leadAnchor.x-g.x,-(leadAnchor.z-g.z)):g.yaw;
+      const sweepDir=turn%2===0?1:-1;
+      g.cast={kind:'beam',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.46,end:clock+1.52,done:false,
+        yaw0:baseYaw-sweepDir*.72,sweep:sweepDir*1.44,tick:0};
+    } else if (pick==='meteor') {
+      // 5. [NEW] 終末流星群 — Staggered Apocalypse Void Meteor Shower across 50m!
+      const count=8+phase;
+      const meteors=[];
+      for (let i=0;i<count;i++) {
+        let mx, mz;
+        if (ranked.length) {
+          const t=ranked[i%ranked.length];
+          const spread=i<ranked.length?1.2:4.6+(i%3)*2.2;
+          const ang=i*2.39996+g.yaw;
+          mx=clamp(t.x+(t.vx??0)*.48+Math.cos(ang)*spread,-50,50);
+          mz=clamp(t.z+(t.vz??0)*.48+Math.sin(ang)*spread,-32,32);
+        } else {
+          const ang=i*TAU/count+g.yaw, rad=10+(i%4)*9;
+          mx=clamp(g.x+Math.cos(ang)*rad,-50,50);
+          mz=clamp(g.z+Math.sin(ang)*rad,-32,32);
+        }
+        const my=b.world.floor(mx,mz).y;
+        meteors.push({x:Math.round(mx*10)/10,y:Math.round(my*10)/10,z:Math.round(mz*10)/10,impactAt:clock+.52+i*.095,hit:false,r:4.5});
+      }
+      g.cast={kind:'meteor',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.52,end:clock+.52+count*.095+.35,done:false,meteors};
+    } else if (pick==='gravity') {
+      // 6. [NEW] 特異点崩壊 — Abyssal Singularity Gravity Well & Implosion!
+      let wx=g.x, wz=g.z;
+      if (ranked.length) {
+        const subset=ranked.slice(0,Math.min(4,ranked.length));
+        wx=clamp(subset.reduce((s,a)=>s+a.x,0)/subset.length,-42,42);
+        wz=clamp(subset.reduce((s,a)=>s+a.z,0)/subset.length,-25,25);
+      }
+      const wy=b.world.floor(wx,wz).y;
+      g.cast={kind:'gravity',x:g.x,z:g.z,wx:Math.round(wx*10)/10,wy:Math.round(wy*10)/10,wz:Math.round(wz*10)/10,
+        radius:Math.min(GOAT_REACH,22+phase*5),start:clock,at:clock+.42,end:clock+1.68,done:false,imploded:false};
+    } else if (pick==='lightning') {
+      // 7. [NEW] 神罰雷撃 — Vertical Sky-to-Ground Divine Judgment Lightning Pillars!
+      const count=7+phase;
+      const bolts=[];
+      for (let i=0;i<count;i++) {
+        let bx, bz;
+        if (i<ranked.length) {
+          const t=ranked[i];
+          bx=clamp(t.x+(t.vx??0)*.38,-50,50);
+          bz=clamp(t.z+(t.vz??0)*.38,-32,32);
+        } else if (leadAnchor) {
+          const t=ranked[i%Math.max(1,ranked.length)] ?? leadAnchor;
+          const ang=i*2.1+g.yaw, rad=3.5+(i%3)*2.8;
+          bx=clamp(t.x+Math.cos(ang)*rad,-50,50);
+          bz=clamp(t.z+Math.sin(ang)*rad,-32,32);
+        } else {
+          const ang=i*TAU/count, rad=14+(i%3)*10;
+          bx=clamp(g.x+Math.cos(ang)*rad,-50,50);
+          bz=clamp(g.z+Math.sin(ang)*rad,-32,32);
+        }
+        const by=b.world.floor(bx,bz).y;
+        bolts.push([Math.round(bx*10)/10,Math.round(by*10)/10,Math.round(bz*10)/10]);
+      }
+      g.cast={kind:'lightning',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.46,end:clock+1.22,done:false,bolts};
     } else {
-      // 16-Tentacle Smart Homing Ruin Barrage covering full 50m range!
-      g.cast={kind:'barrage',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.40,end:clock+.94,done:false,yaw:g.yaw};
+      // 8. [NEW] 次元震ノヴァ — 3 Expanding Dimensional Shockwave Rings + Spatial Cross-Slash!
+      g.cast={kind:'nova',x:g.x,z:g.z,radius:GOAT_REACH,start:clock,at:clock+.44,end:clock+1.84,done:false,
+        waves:[0,.36,.72],speed:36,yaw:g.yaw};
     }
-    g.nextAttack=clock+(phase===3?1.25:phase===2?1.68:2.12);
+    g.nextAttack=clock+(phase>=4?.96:phase===3?1.20:phase===2?1.52:1.86);
   }
 
   resolveGoatCast(targets) {
     const b=this.battle, g=this.goat, cast=g.cast;
     cast.done=true;
     if (cast.kind==='smash') {
-      const dmg=125+g.phase*15;
+      const dmg=140+g.phase*18;
       for (const [px,py,pz] of cast.points) {
-        b.burst([px,py+.35,pz],-1,12,4.4);
-        b.abilities.rings.push({x:px,y:py+.06,z:pz,r:3.8,team:1,until:b.clock+.55});
-        b.stage.damageArea(b,g,px,py,pz,3.6,dmg*.85);
+        b.burst([px,py+.35,pz],-1,12,4.6);
+        b.abilities.rings.push({x:px,y:py+.06,z:pz,r:4.0,team:1,until:b.clock+.55});
+        b.stage.damageArea(b,g,px,py,pz,3.8,dmg*.9);
+        b.vehicles?.damageArea(px,py,pz,3.8,dmg*.65,g);
         for (const a of targets) {
           const d=Math.hypot(a.x-px,a.z-pz);
-          if (d>3.75 || Math.abs(a.y-py)>3.1) continue;
+          if (d>3.9 || Math.abs(a.y-py)>3.2) continue;
           const nx=(a.x-g.x)/Math.max(.3,Math.hypot(a.x-g.x,a.z-g.z));
           const nz=(a.z-g.z)/Math.max(.3,Math.hypot(a.x-g.x,a.z-g.z));
-          b.stepActor(a,nx*2.6,nz*2.6);
+          b.stepActor(a,nx*2.8,nz*2.8);
           b.damage(a,dmg,g,[a.x,a.y+.9,a.z],'goat');
         }
       }
     } else if (cast.kind==='whirl') {
-      const rad=cast.radius, dmg=115+g.phase*16;
+      const rad=cast.radius, dmg=130+g.phase*18;
       b.abilities.rings.push({x:g.x,y:b.world.floor(g.x,g.z).y+.08,z:g.z,r:rad,team:1,until:b.clock+.65});
-      b.stage.damageArea(b,g,g.x,b.world.floor(g.x,g.z).y,g.z,Math.min(18,rad*.45),dmg*.7);
+      b.stage.damageArea(b,g,g.x,b.world.floor(g.x,g.z).y,g.z,Math.min(20,rad*.48),dmg*.75);
       for (const a of targets) {
         const dx=a.x-g.x, dz=a.z-g.z, d=Math.hypot(dx,dz);
         if (d>rad) continue;
         const inv=1/Math.max(.3,d);
-        b.stepActor(a,dx*inv*3.4,dz*inv*3.4);
+        b.stepActor(a,dx*inv*3.6,dz*inv*3.6);
         b.damage(a,dmg,g,[a.x,a.y+.9,a.z],'goat');
       }
     } else if (cast.kind==='barrage') {
@@ -952,17 +1053,153 @@ export class Hazards {
       const sorted=targets.slice().sort((a,c)=>b.hnv1
         ?b.hnv1.scoreTarget(g,a,mind?.lastTarget)-b.hnv1.scoreTarget(g,c,mind?.lastTarget)
         :Math.hypot(a.x-g.x,a.z-g.z)-Math.hypot(c.x-g.x,c.z-g.z));
-      for (let i=0;i<GOAT_ARMS;i++) {
-        const ang=g.yaw+i*TAU/GOAT_ARMS;
-        const from=[g.x+Math.cos(ang)*2.7,g.y+1.4+(i%3)*.48,g.z+Math.sin(ang)*2.7];
+      const shotsCount=g.phase>=3?20:GOAT_ARMS;
+      for (let i=0;i<shotsCount;i++) {
+        const ang=g.yaw+i*TAU/shotsCount;
+        const from=[g.x+Math.cos(ang)*2.8,g.y+1.4+(i%3)*.48,g.z+Math.sin(ang)*2.8];
         const tgt=sorted.length?sorted[i%sorted.length]:null;
         const to=tgt?(b.hnv1?b.hnv1.predictAim(g,tgt,GOAT_WEAPON):[tgt.x,tgt.y+.9,tgt.z])
-          :[g.x+Math.cos(ang)*38,b.world.floor(g.x,g.z).y+.6,g.z+Math.sin(ang)*38];
+          :[g.x+Math.cos(ang)*42,b.world.floor(g.x,g.z).y+.6,g.z+Math.sin(ang)*42];
         const dir=unit(sub(to,from));
         b.shots.push({pos:from,vel:scale(dir,GOAT_WEAPON.speed),actor:g,weapon:GOAT_WEAPON,power:1,age:0,
-          bend:null,homing:{...GOAT_WEAPON.homing},life:2.15,id:++b.shotSequence});
+          bend:null,homing:{...GOAT_WEAPON.homing},life:2.25,id:++b.shotSequence});
       }
-      b.burst([g.x,g.y+1.5,g.z],-1,28,6.2);
+      b.burst([g.x,g.y+1.5,g.z],-1,32,6.8);
+    } else if (cast.kind==='lightning') {
+      // Divine Judgment Lightning: full vertical column strike hitting ground & elevated rooftops!
+      const dmg=138+g.phase*18;
+      for (const [bx,by,bz] of cast.bolts) {
+        b.burst([bx,by+1.2,bz],-1,16,5.4);
+        b.abilities.rings.push({x:bx,y:by+.07,z:bz,r:4.4,team:1,until:b.clock+.65});
+        b.stage.damageArea(b,g,bx,by,bz,4.0,dmg*.95);
+        b.vehicles?.damageArea(bx,by,bz,4.0,dmg*.8,g);
+        for (const a of targets) {
+          const d=Math.hypot(a.x-bx,a.z-bz);
+          if (d>4.1) continue;
+          a.vy=Math.max(a.vy??0,6.8);
+          const inv=1/Math.max(.3,d);
+          b.stepActor(a,(a.x-bx)*inv*2.2,(a.z-bz)*inv*2.2);
+          b.damage(a,dmg,g,[a.x,a.y+1.0,a.z],'goat');
+        }
+      }
+    } else if (cast.kind==='nova') {
+      // Immediate cross-shaped spatial rift detonation around Goat!
+      const fy=b.world.floor(g.x,g.z).y, dmg=110+g.phase*16;
+      b.burst([g.x,g.y+1.2,g.z],-1,36,8.0);
+      b.abilities.rings.push({x:g.x,y:fy+.08,z:g.z,r:14,team:1,until:b.clock+.6});
+      for (const a of targets) {
+        const dx=a.x-g.x, dz=a.z-g.z, d=Math.hypot(dx,dz);
+        if (d<11.5) {
+          const inv=1/Math.max(.3,d);
+          b.stepActor(a,dx*inv*3.2,dz*inv*3.2);
+          b.damage(a,dmg,g,[a.x,a.y+.9,a.z],'goat');
+        }
+      }
+    }
+  }
+
+  stepGoatCast(targets,dt) {
+    const b=this.battle, g=this.goat, cast=g.cast, now=b.clock;
+    if (!cast || now<cast.at) return;
+    if (!cast.done) this.resolveGoatCast(targets);
+
+    if (cast.kind==='beam') {
+      // Tri-Beam Void Annihilation Sweep (ticks every 0.11s while sweeping across 50m!)
+      const span=Math.max(.05,cast.end-cast.at);
+      const frac=clamp((now-cast.at)/span,0,1);
+      const baseYaw=cast.yaw0+cast.sweep*frac;
+      cast.tick=(cast.tick??0)+dt;
+      if (cast.tick>=.11) {
+        cast.tick=0;
+        const beamDmg=42+g.phase*8;
+        for (const offset of [-.42,0,.42]) {
+          const yw=baseYaw+offset;
+          const fx=Math.sin(yw), fz=-Math.cos(yw);
+          const endX=clamp(g.x+fx*GOAT_REACH,-54,54), endZ=clamp(g.z+fz*GOAT_REACH,-36,36);
+          const midX=g.x+fx*18, midZ=g.z+fz*18;
+          b.stage.damageArea(b,g,midX,b.world.floor(midX,midZ).y,midZ,4.2,beamDmg*1.2);
+          b.abilities.rings.push({x:endX,y:b.world.floor(endX,endZ).y+.08,z:endZ,r:3.2,team:1,until:now+.28});
+          for (const a of targets) {
+            const ax=a.x-g.x, az=a.z-g.z;
+            const proj=ax*fx+az*fz;
+            if (proj<1.5 || proj>GOAT_REACH) continue;
+            const perp=Math.abs(ax*fz-az*fx);
+            if (perp>2.35) continue;
+            b.stepActor(a,fx*1.4,fz*1.4);
+            b.damage(a,beamDmg,g,[a.x,a.y+.95,a.z],'goat');
+          }
+        }
+      }
+    } else if (cast.kind==='meteor') {
+      // Staggered Apocalypse Meteor impacts!
+      const dmg=136+g.phase*18;
+      for (const m of cast.meteors) {
+        if (m.hit || now<m.impactAt) continue;
+        m.hit=true;
+        b.burst([m.x,m.y+.6,m.z],-1,24,6.4);
+        b.abilities.rings.push({x:m.x,y:m.y+.07,z:m.z,r:m.r+1.1,team:1,until:now+.68});
+        b.stage.damageArea(b,g,m.x,m.y,m.z,m.r,dmg*.95);
+        b.vehicles?.damageArea(m.x,m.y,m.z,m.r,dmg*.8,g);
+        for (const a of targets) {
+          const d=Math.hypot(a.x-m.x,a.z-m.z);
+          if (d>m.r+.35 || Math.abs(a.y-m.y)>4.0) continue;
+          const falloff=clamp(1-.45*(d/(m.r+.35)),.52,1);
+          const inv=1/Math.max(.3,d);
+          a.vy=Math.max(a.vy??0,6.4);
+          b.stepActor(a,(a.x-m.x)*inv*2.4,(a.z-m.z)*inv*2.4);
+          b.damage(a,dmg*falloff,g,[a.x,a.y+.9,a.z],'goat');
+        }
+      }
+    } else if (cast.kind==='gravity') {
+      // Abyssal Singularity Pull -> Catastrophic Implosion!
+      const implodeAt=cast.end-.22;
+      if (!cast.imploded && now<implodeAt) {
+        const pullSpeed=10.5+g.phase*1.8;
+        for (const a of targets) {
+          const dx=cast.wx-a.x, dz=cast.wz-a.z, d=Math.hypot(dx,dz);
+          if (d>cast.radius || d<.4) continue;
+          const strength=clamp(1.25-d/cast.radius,.35,1.15);
+          b.stepActor(a,(dx/d)*pullSpeed*strength*dt,(dz/d)*pullSpeed*strength*dt);
+          if (d<7.5) b.damage(a,(36+g.phase*8)*dt,g,[a.x,a.y+.9,a.z],'goat');
+        }
+      } else if (!cast.imploded && now>=implodeAt) {
+        cast.imploded=true;
+        const dmg=150+g.phase*20, blastR=Math.min(18,cast.radius*.58);
+        b.burst([cast.wx,cast.wy+1.6,cast.wz],-1,44,8.8);
+        b.abilities.rings.push({x:cast.wx,y:cast.wy+.08,z:cast.wz,r:blastR,team:1,until:now+.75});
+        b.stage.damageArea(b,g,cast.wx,cast.wy,cast.wz,blastR*.65,dmg*.9);
+        b.vehicles?.damageArea(cast.wx,cast.wy,cast.wz,blastR*.65,dmg*.8,g);
+        for (const a of targets) {
+          const dx=a.x-cast.wx, dz=a.z-cast.wz, d=Math.hypot(dx,dz);
+          if (d>blastR) continue;
+          const inv=1/Math.max(.3,d);
+          a.vy=Math.max(a.vy??0,8.6);
+          b.stepActor(a,dx*inv*3.6,dz*inv*3.6);
+          b.damage(a,dmg*clamp(1-.45*(d/blastR),.55,1),g,[a.x,a.y+.9,a.z],'goat');
+        }
+      }
+    } else if (cast.kind==='nova') {
+      // 3 Expanding Dimensional Shockwave Rings across 50m!
+      const dmg=108+g.phase*16, spd=cast.speed??36;
+      for (let wi=0;wi<cast.waves.length;wi++) {
+        const age=now-(cast.at+cast.waves[wi]);
+        if (age<0) continue;
+        const r=2+age*spd;
+        if (r>GOAT_REACH+2) continue;
+        for (const a of targets) {
+          const key=wi+':'+a.team+':'+a.index+':'+(a.isRaider?'r':'a');
+          if (this._goatNovaHits.has(key)) continue;
+          const dx=a.x-cast.x, dz=a.z-cast.z, d=Math.hypot(dx,dz);
+          const fl=b.world.floor(a.x,a.z).y;
+          if (Math.abs(d-r)<2.8 && a.y<fl+2.5) {
+            this._goatNovaHits.add(key);
+            const inv=1/Math.max(.3,d);
+            b.stepActor(a,dx*inv*2.8,dz*inv*2.8);
+            a.vy=Math.max(a.vy??0,5.2);
+            b.damage(a,dmg,g,[a.x,a.y+.9,a.z],'goat');
+          }
+        }
+      }
     }
   }
 
@@ -970,12 +1207,7 @@ export class Hazards {
     const b=this.battle, g=this.goat;
     if (!g.active && b.elapsed>=this.nextGoat-1e-6) this.spawnGoat();
     if (!g.active) return;
-    if (b.elapsed>=g.until) {
-      g.active=false;
-      g.cast=null;
-      this.announce('破壊神ゴートは虚空へ帰還した…',4.2);
-      return;
-    }
+    // Supreme Entity Goat NEVER despawns on a timer — remains on the battlefield until defeated (hp <= 0)!
     const targets=[...b.actors,...b.raiders.live()].filter(a=>a.down<=0 && !a.ride && !a.lift && zoneOf(a.x)===0);
     // Smart Apex Intelligence: target densest threat cluster & weave around incoming specials/trains!
     let focus=b.hnv1?b.hnv1.pickApexTarget(g,targets,dt):null;
@@ -991,22 +1223,21 @@ export class Hazards {
     for (const a of targets) {
       if (a.beaming || a.charge>.45) {
         const dx=g.x-a.x, dz=g.z-a.z, d=Math.hypot(dx,dz);
-        if (d<24 && d>.2) {evadeX+=-dz/d*4.2; evadeZ+=dx/d*4.2;}
+        if (d<24 && d>.2) {evadeX+=-dz/d*4.6; evadeZ+=dx/d*4.6;}
       }
     }
     if (this.tsunami?.phase==='wave') {
       const td=Math.abs(g.x-this.tsunami.x);
       if (td<this.tsunami.width) evadeZ+=(g.z>=0?1:-1)*5.5;
     }
-    const speed=g.phase===3?9.4:g.phase===2?7.9:6.4;
+    const speed=g.phase>=4?11.4:g.phase===3?10.0:g.phase===2?8.4:7.0;
     if (focus) {
-      // Aim smoothly toward predicted target intercept while circling centroid at optimal standoff (~11m)
       const leadX=focus.x+(focus.vx??0)*.35, leadZ=focus.z+(focus.vz??0)*.35;
       const dx=leadX-g.x, dz=leadZ-g.z, d=Math.max(.01,Math.hypot(dx,dz));
       const targetYaw=Math.atan2(dx,-dz);
       let dYaw=targetYaw-g.yaw;
       while (dYaw>Math.PI) dYaw-=TAU; while (dYaw<-Math.PI) dYaw+=TAU;
-      g.yaw+=dYaw*clamp(dt*6.5,0,1);
+      g.yaw+=dYaw*clamp(dt*6.8,0,1);
       if (d>11.5) {
         g.vx=dx/d*speed+evadeX;
         g.vz=dz/d*speed+evadeZ;
@@ -1023,10 +1254,19 @@ export class Hazards {
     g.x=clamp(g.x+g.vx*dt,-48,48);
     g.z=clamp(g.z+g.vz*dt,-29,29);
     const floor=b.world.floor(g.x,g.z).y;
-    const hoverTarget=floor+GOAT_HOVER_Y+(focus?.airborne?1.1:0)+Math.sin(b.clock*2.6)*.55;
-    g.y=g.y+(hoverTarget-g.y)*clamp(dt*4.5,0,1);
+    const hoverBoost=g.cast?.kind==='meteor' || g.cast?.kind==='beam'?1.6:0;
+    const hoverTarget=floor+GOAT_HOVER_Y+hoverBoost+(focus?.airborne?1.1:0)+Math.sin(b.clock*2.8)*.62;
+    g.y=g.y+(hoverTarget-g.y)*clamp(dt*4.8,0,1);
+    // Transcendent core pressure aura repels close fighters beneath/inside Goat's void silhouette.
+    for (const a of targets) {
+      const dx=a.x-g.x, dz=a.z-g.z, d=Math.hypot(dx,dz);
+      if (d<3.2 && d>.05) {
+        b.stepActor(a,(dx/d)*4.5*dt,(dz/d)*4.5*dt);
+        b.damage(a,(22+g.phase*5)*dt,g,[a.x,a.y+.9,a.z],'goat');
+      }
+    }
     if (g.cast) {
-      if (!g.cast.done && b.clock>=g.cast.at) this.resolveGoatCast(targets);
+      this.stepGoatCast(targets,dt);
       if (b.clock>=g.cast.end) g.cast=null;
     } else if (b.clock>=g.nextAttack && targets.length) {
       this.planGoatAttack(targets);
@@ -1180,29 +1420,54 @@ export class Hazards {
       }
     }
 
-    // Horned Goat Deity Skull-Helm, Articulated Jaw, Sweeping Twin Horns & Blazing Crimson Eyes
-    put('orb',0,3.15,.10,1.18,1.18,1.38,0xefe7d6,4,bodyTilt*.6);
-    put('bevel',0,2.85,.68,.60,.48,.68,0xdcd2bd,4,bodyTilt*.6);
-    if (!lite) put('bevel',0,3.72,.28,.16,.44,.52,gold,4,-.15); // forehead crown crest
+    // Supreme Entity Deity Skull-Helm, Blazing Third-Eye Crown, Articulated Jaw & Sweeping Twin Horns
+    put('orb',0,3.15,.10,1.24,1.24,1.44,0xefe7d6,4,bodyTilt*.6);
+    put('bevel',0,2.85,.68,.62,.48,.68,0xdcd2bd,4,bodyTilt*.6);
+    put('orb',0,3.62,.58,.24,.32,.18,g.phase>=3 || cast?hotGold:crimson,3,bodyTilt*.5); // blazing third eye
+    if (!lite) {
+      put('bevel',0,3.88,.24,.18,.56,.58,gold,4,-.15);
+      // Floating transcendent crown diadem ring above skull
+      _hzDynYP.yaw=yaw+now*2.2; _hzDynYP.pitch=.18;
+      setAt(_hzA,0,4.35,.05);
+      r.add('ring',_hzA[0],_hzA[1],_hzA[2],1.45,.065,1.45,g.phase>=4?hotGold:gold,3,_hzDynYP);
+    }
     for (let s=-1;s<=1;s+=2) {
-      put('orb',s*.34,3.26,.65,.30,.18,.20,cast?hotGold:crimson,3,bodyTilt*.6);
-      setAt(_hzA,s*.38,3.62,.05); setAt(_hzB,s*.95,4.28,-.35); setAt(_hzC,s*1.28,4.05,-1.15);
-      r.beam(_hzA,_hzB,.26,.20,gold,4,_hzDyn);
-      r.beam(_hzB,_hzC,.19,.10,0x452b18,4,_hzDyn);
-      if (!lite) r.add('orb',_hzC[0],_hzC[1],_hzC[2],.18,.18,.18,crimson,3,_hzDyn);
+      put('orb',s*.34,3.26,.65,.32,.18,.20,cast?hotGold:crimson,3,bodyTilt*.6);
+      setAt(_hzA,s*.38,3.62,.05); setAt(_hzB,s*1.04,4.42,-.38); setAt(_hzC,s*1.42,4.15,-1.28);
+      r.beam(_hzA,_hzB,.28,.21,gold,4,_hzDyn);
+      r.beam(_hzB,_hzC,.20,.10,0x452b18,4,_hzDyn);
+      if (!lite) r.add('orb',_hzC[0],_hzC[1],_hzC[2],.22,.22,.22,crimson,3,_hzDyn);
     }
 
-    // Counter-rotating fractured obsidian-gold halo ring & hovering deity sigil orbs behind back!
-    for (let i=0;i<8;i++) {
-      const a=now*1.85+i*TAU/8;
-      const hx=Math.cos(a)*2.65, hy=2.15+Math.sin(a)*2.65;
-      setAt(_hzA,hx,hy,-.88);
-      r.add('orb',_hzA[0],_hzA[1],_hzA[2],.34,.34,.34,i%2?gold:crimson,3,_hzDyn);
+    // 6 Radiant Seraphic Void Wing-Blades + Triple Counter-Rotating Celestial-Void Halos!
+    if (!lite) {
+      for (let w=0;w<3;w++) for (const side of [-1,1]) {
+        const flap=Math.sin(now*3.6+w*.9)*.22;
+        const wx=side*(2.6+w*.95), wy=3.4-w*.78+flap*.7, wz=-1.25-w*.25;
+        setAt(_hzA,side*1.2,2.4-w*.45,-.75);
+        setAt(_hzB,wx,wy,wz);
+        r.beam(_hzA,_hzB,.22,.08,w===1?gold:crimson,3,_hzDyn);
+        _hzDynYP.yaw=yaw+side*(.35+w*.14); _hzDynYP.pitch=flap;
+        r.add('bevel',_hzB[0],_hzB[1],_hzB[2],1.45-w*.18,.26,.09,w===0?hotGold:armor,w===0?3:4,_hzDynYP);
+      }
+      if ((g.phase??1)>=3 || cast) {
+        // Skyward supreme presence pillar
+        _hzA[0]=gx; _hzA[1]=floor+.1; _hzA[2]=gz;
+        _hzB[0]=gx; _hzB[1]=gy+22; _hzB[2]=gz;
+        r.beam(_hzA,_hzB,.32,.12,g.phase>=4?hotGold:crimson,3,_hzDyn);
+      }
+    }
+    const haloN=lite?8:10;
+    for (let i=0;i<haloN;i++) {
+      const a=now*1.95+i*TAU/haloN;
+      const hx=Math.cos(a)*2.95, hy=2.25+Math.sin(a)*2.95;
+      setAt(_hzA,hx,hy,-.95);
+      r.add('orb',_hzA[0],_hzA[1],_hzA[2],.36,.36,.36,i%2?gold:crimson,3,_hzDyn);
       if (!lite && i%2===0) {
-        const a2=-now*2.4+i*TAU/8;
-        setAt(_hzB,Math.cos(a2)*3.35,2.15+Math.sin(a2)*3.35,-1.05);
+        const a2=-now*2.55+i*TAU/haloN;
+        setAt(_hzB,Math.cos(a2)*3.85,2.25+Math.sin(a2)*3.85,-1.18);
         _hzDynYP.yaw=yaw+a2; _hzDynYP.pitch=a2*.5;
-        r.add('bevel',_hzB[0],_hzB[1],_hzB[2],.24,.52,.12,dark,4,_hzDynYP);
+        r.add('bevel',_hzB[0],_hzB[1],_hzB[2],.28,.64,.14,dark,4,_hzDynYP);
       }
     }
 
@@ -1219,7 +1484,6 @@ export class Hazards {
       if (cast?.kind==='smash' && cast.points?.[i]) {
         const pt=cast.points[i];
         const prog=clamp((now-cast.start)/Math.max(.05,cast.at-cast.start),0,1);
-        // Dramatic skyward wind-up coil, then lightning-fast downward slam across up to 50m!
         const strike=now>=cast.at?1:prog*prog*.42;
         const coilLift=now<cast.at?Math.sin(prog*Math.PI)*3.8:0;
         tx=sx0+(pt[0]-sx0)*strike;
@@ -1227,16 +1491,27 @@ export class Hazards {
         tz=sz0+(pt[2]-sz0)*strike;
         if (!cast.done) {
           _hzDynLabel.label=prog;
-          r.add('hazard',pt[0],pt[1]+.05,pt[2],7.4,1,7.4,crimson,24,_hzDynLabel);
+          r.add('hazard',pt[0],pt[1]+.05,pt[2],7.8,1,7.8,crimson,24,_hzDynLabel);
         }
       } else if (cast?.kind==='whirl') {
-        const spin=now*11.5+i*TAU/GOAT_ARMS, reach=Math.min(26,18+(g.phase??1)*3.5);
+        const spin=now*11.5+i*TAU/GOAT_ARMS, reach=Math.min(28,18+(g.phase??1)*3.5);
         tx=gx+Math.cos(spin)*reach; ty=gy+.55+Math.sin(spin*2)*.6; tz=gz+Math.sin(spin)*reach;
       } else if (cast?.kind==='barrage') {
         const prog=clamp((now-cast.start)/Math.max(.05,cast.at-cast.start),0,1);
         const ang=i*TAU/GOAT_ARMS, rad=4.2-prog*.9+(layerIdx*.8);
         setAt(_hzA,Math.cos(ang)*rad,2.2+Math.sin(ang)*1.7,2.1+prog*1.2);
         tx=_hzA[0]; ty=_hzA[1]; tz=_hzA[2];
+      } else if (cast?.kind==='meteor' || cast?.kind==='lightning') {
+        // All 16 tentacles raised skyward invoking celestial judgment!
+        const ang=i*TAU/GOAT_ARMS+now*1.4, rad=3.2+layerIdx*1.1;
+        tx=gx+Math.cos(ang)*rad; ty=gy+5.4+Math.sin(now*8+i)*.55; tz=gz+Math.sin(ang)*rad;
+      } else if (cast?.kind==='gravity' && cast.wx!==undefined) {
+        // All 16 tentacles channel void filaments into the singularity core!
+        const ang=i*TAU/GOAT_ARMS+now*3.8;
+        tx=cast.wx+Math.cos(ang)*2.4; ty=(cast.wy??0)+2.2+Math.sin(ang*2)*.9; tz=cast.wz+Math.sin(ang)*2.4;
+      } else if (cast?.kind==='beam' || cast?.kind==='nova') {
+        const ang=i*TAU/GOAT_ARMS+now*2.6, rad=4.8+Math.sin(now*10+i)*.5;
+        tx=gx+Math.cos(ang)*rad; ty=gy+2.4+Math.cos(ang*2)*.8; tz=gz+Math.sin(ang)*rad;
       } else {
         const wave=now*3.4+i*.68;
         const spread=(1.4+row*.36+layerIdx*.28)*Math.PI/8;
@@ -1252,7 +1527,6 @@ export class Hazards {
       }
       pts[links][0]=tx; pts[links][1]=ty; pts[links][2]=tz;
       drawTentacle(r,pts,.62,dark,gold,lite?0:crimson);
-      // Glowing palm sigil + golden wrist bracer ring + 3 thick articulated claw fingers!
       const palmS=cast?.kind==='barrage'?.92:.76;
       r.add('orb',tx,ty,tz,palmS,palmS,palmS,cast?crimson:gold,3,_hzDyn);
       if (!lite) {
@@ -1268,6 +1542,95 @@ export class Hazards {
           _hzB[0]=cx; _hzB[1]=cy2; _hzB[2]=cz;
           r.beam(_hzA,_hzB,.16,.11,gold,4,_hzDyn);
         }
+      }
+    }
+
+    // ---- 3D Visuals for the 5 New Supreme Entity Attacks ----
+    if (cast?.kind==='beam') {
+      const firing=now>=cast.at;
+      const frac=firing?clamp((now-cast.at)/Math.max(.05,cast.end-cast.at),0,1):0;
+      const baseYaw=cast.yaw0+cast.sweep*frac;
+      for (const offset of [-.42,0,.42]) {
+        const yw=baseYaw+offset;
+        const fx=Math.sin(yw), fz=-Math.cos(yw);
+        const ex=clamp(gx+fx*GOAT_REACH,-54,54), ez=clamp(gz+fz*GOAT_REACH,-36,36);
+        const ey=this.battle.world.floor(ex,ez).y+.6;
+        _hzA[0]=gx; _hzA[1]=gy+2.8; _hzA[2]=gz;
+        _hzB[0]=ex; _hzB[1]=ey; _hzB[2]=ez;
+        if (firing) {
+          r.beam(_hzA,_hzB,.68,.82,crimson,3,_hzDyn);
+          if (!lite) r.beam(_hzA,_hzB,.28,.34,hotGold,3,_hzDyn);
+          r.add('orb',ex,ey,ez,1.9,1.9,1.9,hotGold,3,_hzDyn);
+        } else {
+          r.beam(_hzA,_hzB,.08,.08,gold,3,_hzDyn);
+        }
+      }
+    } else if (cast?.kind==='meteor' && cast.meteors) {
+      for (let i=0;i<cast.meteors.length;i++) {
+        const m=cast.meteors[i];
+        if (now>m.impactAt+.18) continue;
+        const fallDur=.52;
+        const prog=clamp(1-(m.impactAt-now)/fallDur,0,1);
+        _hzDynLabel.label=prog;
+        r.add('hazard',m.x,m.y+.06,m.z,m.r*2,1,m.r*2,crimson,24,_hzDynLabel);
+        if (now>=m.impactAt-fallDur && now<=m.impactAt+.06) {
+          const my=m.y+34*(1-prog)+.8;
+          const mx=m.x+5.5*(1-prog), mz=m.z-4.0*(1-prog);
+          r.add('orb',mx,my,mz,2.1,2.1,2.1,dark,4,_hzDyn);
+          r.add('orb',mx,my,mz,1.55,1.55,1.55,crimson,3,_hzDyn);
+          _hzA[0]=mx; _hzA[1]=my; _hzA[2]=mz;
+          _hzB[0]=mx+3.6; _hzB[1]=my+6.5; _hzB[2]=mz-2.6;
+          r.beam(_hzA,_hzB,.85,.18,hotGold,3,_hzDyn);
+        }
+      }
+    } else if (cast?.kind==='gravity' && cast.wx!==undefined) {
+      const wx=cast.wx, wy=(cast.wy??0)+2.2, wz=cast.wz;
+      const prog=clamp((now-cast.start)/Math.max(.05,cast.end-cast.start),0,1);
+      const scaleW=cast.imploded?2.8:1.1+prog*1.35;
+      r.add('orb',wx,wy,wz,scaleW*1.6,scaleW*1.6,scaleW*1.6,0x090410,4,_hzDyn);
+      _hzDynYP.yaw=now*6.5; _hzDynYP.pitch=.38;
+      r.add('ring',wx,wy,wz,scaleW*3.2,.18,scaleW*3.2,crimson,3,_hzDynYP);
+      if (!lite) {
+        _hzDynYP.yaw=-now*8.2; _hzDynYP.pitch=-.52;
+        r.add('ring',wx,wy,wz,scaleW*4.4,.12,scaleW*4.4,0xa838ff,3,_hzDynYP);
+      }
+      _hzDynLabel.label=(1-(now*2.2)%1);
+      r.add('ripple',wx,(cast.wy??0)+.07,wz,cast.radius*.85,.05,cast.radius*.85,0x9a30ff,12,_hzDynLabel);
+    } else if (cast?.kind==='lightning' && cast.bolts) {
+      const struck=now>=cast.at;
+      const prog=clamp((now-cast.start)/Math.max(.05,cast.at-cast.start),0,1);
+      for (let i=0;i<cast.bolts.length;i++) {
+        const [bx,by,bz]=cast.bolts[i];
+        if (!struck) {
+          _hzDynLabel.label=prog;
+          r.add('hazard',bx,by+.06,bz,8.2,1,8.2,gold,24,_hzDynLabel);
+        } else {
+          const fade=clamp(1-(now-cast.at)/Math.max(.05,cast.end-cast.at),0,1);
+          const jit=Math.sin(now*60+i*2.7)*.55;
+          _hzA[0]=bx; _hzA[1]=by; _hzA[2]=bz;
+          _hzB[0]=bx+jit; _hzB[1]=by+14; _hzB[2]=bz-jit*.7;
+          _hzC[0]=bx-jit*.5; _hzC[1]=by+28; _hzC[2]=bz+jit;
+          r.beam(_hzA,_hzB,.72*fade,.55*fade,hotGold,3,_hzDyn);
+          r.beam(_hzB,_hzC,.55*fade,.35*fade,crimson,3,_hzDyn);
+          r.add('orb',bx,by+.8,bz,2.4*fade,2.4*fade,2.4*fade,hotGold,3,_hzDyn);
+        }
+      }
+    } else if (cast?.kind==='nova' && cast.waves) {
+      const fy=this.battle.world.floor(cast.x,cast.z).y;
+      if (now>=cast.at) {
+        const spd=cast.speed??36;
+        for (let wi=0;wi<cast.waves.length;wi++) {
+          const age=now-(cast.at+cast.waves[wi]);
+          if (age<0) continue;
+          const rad=2+age*spd;
+          if (rad>GOAT_REACH+2) continue;
+          _hzDynLabel.label=clamp(rad/GOAT_REACH,0,1);
+          r.add('ripple',cast.x,fy+.12+wi*.08,cast.z,rad*2,.16,rad*2,wi%2?gold:crimson,12,_hzDynLabel);
+        }
+      } else {
+        const prog=clamp((now-cast.start)/Math.max(.05,cast.at-cast.start),0,1);
+        _hzDynLabel.label=prog;
+        r.add('hazard',cast.x,fy+.06,cast.z,24,1,24,crimson,24,_hzDynLabel);
       }
     }
   }

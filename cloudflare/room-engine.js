@@ -16,7 +16,7 @@ export const HZ=24;
 const STEP=1/HZ, FRAME_MS=1000/HZ-6, INK_MS=80, CHECKPOINT_PERIOD=18;
 const INPUT_LEASE_MS=450, IDLE_ROOM_MS=8000;
 const LIVE_WORLD_INK=ZONES[0].inkMask | ZONES[1].inkMask;
-const taps=['jump','press','super','drone','use','cycle','sub','co'];
+const taps=['jump','press','super','drone','use','cycle','sub','co','pshield'];
 let world, paintLayout;
 
 function createField() {

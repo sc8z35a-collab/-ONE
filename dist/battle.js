@@ -2,7 +2,7 @@ import {TAU,add,clamp,cross,dot,forward,mix,scale,splatRadius,sub,unit} from './
 import {SPAWN_X,TEAM,TEAM_INK,randomGenerator} from './world.js';
 import {BASE_TANK,GIGA_TANK,METRO,RAIL,CITY_RADIUS,UNDER_Y,ZONES,cityExit,floorBounds,giantScale,isCabin,isUnder,localX,sameLevel,zoneOf} from './layout.js';
 import {Transit} from './transit.js';
-import {Abilities,drawSquid} from './abilities.js';
+import {Abilities,PLAYER_SHIELD_HP,drawSquid} from './abilities.js';
 import {Boss} from './boss.js';
 import {drawBossModel} from './boss-model.js';
 import {RAIDER_INK,Raiders,drawRaider} from './raiders.js';
@@ -25,6 +25,7 @@ import {FluidEngine,wallRunoff} from './ink-fluid.js';
 
 export const DURATION=420;
 export const DAMAGE_SCALE=1/3;
+export const PLAYER_BASE_HP=200;
 // Seconds out of play after a splat; the boss keeps its victims out longer.
 export const RESPAWN_SECONDS=12;
 export const BOSS_RESPAWN_SECONDS=15;
@@ -422,10 +423,11 @@ class Navigation {
 
 function actorAt(team,index,isPlayer,weapon) {
   const tankMax=BASE_TANK*(weapon?.tankScale ?? 1);
+  const baseHp=isPlayer?PLAYER_BASE_HP:100;
   const actor={
     team,index,isPlayer,weapon,name:isPlayer?'YOU':(team===0?'C-':'A-')+String(index+1).padStart(2,'0'), kills:0, downs:0, painted:0,
     dealt:0,supers:0,subs:0,revealUntil:0,revealTeam:-1,downBy:null,
-    hp:100,maxHp:100,tank:tankMax,tankMax,down:0,superCharge:0,countedPaint:0,drone:null,droneReady:0,liftsUsed:0, shield:0, fire:0, heat:0, damageAge:99, lastDamageAt:-99, recoil:0, swimFX:0,
+    baseHp,hp:baseHp,maxHp:baseHp,tank:tankMax,tankMax,down:0,superCharge:0,countedPaint:0,drone:null,droneReady:0,liftsUsed:0, shield:0, pShield:0, pShieldUntil:0, pShieldReady:0, fire:0, heat:0, damageAge:99, lastDamageAt:-99, recoil:0, swimFX:0,
     subId:index===6?'see':SUBWEAPONS[(team*3+index)%5].id,subReady:0,rolling:false,rollHold:0,
     swimming:false, inkSwimming:false, climbing:false, inkExposure:0, inkPenalty:0, x:0,y:0,z:0,yaw:0,pitch:0,vx:0,vy:0,vz:0,steps:0,
     route:[],goal:null,think:.12*index,roam:0,stuck:0,side:index%2?1:-1
@@ -444,6 +446,9 @@ function respawn(a) {
   a.superUntil=0;
   a.activeSpecial=null;
   a.guard=0;
+  a.pShield=0;
+  a.pShieldUntil=0;
+  a.pShieldReady=0;
   a.rangeFactor=1;
   a.giant=a.beaming=false;
   a.slam=a.ride=a.lift=a.car=null;
@@ -1555,6 +1560,8 @@ export class Battle {
     actor.downBy=drown?'drown':goat?'goat':heli?'heli':trainBoss?'trainBoss':carBomb?'carBomb':carRam?'car':boss?'boss':source?.isRaider?'raid':(source?.isSniper || source?.isRogueDrone)?'hazard':'crew';
     actor.swimming=actor.inkSwimming=actor.climbing=false;
     actor.downs++;
+    actor.pShield=0;
+    actor.pShieldUntil=0;
     this.abilities.clearSuper(actor);
     if (actor.cloneOf) actor.maxHp=actor.baseHp??actor.maxHp;
     if (source && source.team>=0) {
@@ -1840,6 +1847,7 @@ export class Battle {
         if (!actor.car) {
           if (input.super) this.abilities.activate(actor);
           if (input.drone) this.abilities.summon(actor);
+          if (input.pshield) this.abilities.deployShield(actor);
         }
       }
       if (actor.revealUntil>this.clock && actor.revealTeam>=0) {
@@ -1951,13 +1959,14 @@ export class Battle {
       _dynBasis.basis=_shotBasis;
       const px=sp[0]-yx*.10, py=sp[1]-yy*.10, pz=sp[2]-yz*.10;
       const isCheaterShot=wid==='autoeima2s';
+      const isSuperEima=wid==='autoeima2super';
       const isGoatShot=wid==='goat_orb';
       const isTrainShot=wid==='train_boss';
       const ink=isCheaterShot?0xff267a:isGoatShot?0xff3355:isTrainShot?0xff3848:(TEAM_INK[shot.actor.team] ?? RAIDER_INK);
-      const coreTint=isCheaterShot?0xffb8e0:isGoatShot?0xffd966:isTrainShot?0xffe090:0xf6fffc;
+      const coreTint=isCheaterShot?0xffb8e0:isSuperEima?0xffe878:isGoatShot?0xffd966:isTrainShot?0xffe090:0xf6fffc;
       const isLob=wid==='lob', isHeavy=isLob || wid==='blast' || wid==='rd2' || isGoatShot;
       const isLance=wid==='charge' || wid==='prism' || wid==='sniper';
-      const isHoming=!!shot.homing || wid==='autoeima' || isCheaterShot || wid==='swout' || wid==='swout2';
+      const isHoming=!!shot.homing || wid==='autoeima' || isCheaterShot || isSuperEima || wid==='swout' || wid==='swout2';
       const isSwirl=wid==='coil' || wid==='surge';
       const spin=visualClock*15+(shot.id??i)*1.37;
       const wob=1+.095*Math.sin(spin*1.35);
@@ -2109,7 +2118,7 @@ function gunPose(a,pose,weapon=a.weapon??WEAPONS[0]) {
     const dy=y-1.25,dz=z-.437-recoil;
     return pose.loc(x+pose.sway*.87,1.25+pose.rise*.87+dy*c-dz*s,.437+pose.lean*.87+dy*s+dz*c);
   };
-  const barrel=weapon.id==='charge'?.56:weapon.id==='lob' || weapon.id==='autoeima' || weapon.id==='autoeima2s'?.34:weapon.id==='rd2'?.44:weapon.id==='td'?.30:.315;
+  const barrel=weapon.id==='charge'?.56:weapon.id==='lob' || weapon.id==='autoeima' || weapon.id==='autoeima2s' || weapon.id==='autoeima2super'?.34:weapon.id==='rd2'?.44:weapon.id==='td'?.30:.315;
   return {at,pitch,barrel,c,s,recoil,pose};
 }
 
@@ -2160,6 +2169,25 @@ export function drawCrew(r,a,time,showEffects=true) {
       const angle=i*TAU/4;
       r.add('curtain',a.x+Math.sin(angle)*.69,a.y+.99,a.z-Math.cos(angle)*.69,1.31,1.84,1,bright,16,
         {dynamic:true,yaw:-angle,label:1-a.guard/95});
+    }
+  }
+  if (showEffects && a.pShield>0) {
+    const wear=clamp(1-a.pShield/PLAYER_SHIELD_HP,0,1);
+    const pulse=.12*Math.sin(time*9.5), spin=time*1.65;
+    _dynLabel.label=.10;
+    r.add('ripple',a.x,a.y+.07,a.z,2.45+pulse,.035,2.45+pulse,0x58f7ff,12,_dynLabel);
+    _dynLabel.label=.28;
+    r.add('ripple',a.x,a.y+1.96,a.z,1.88+pulse*.5,.03,1.88+pulse*.5,0xffe484,12,_dynLabel);
+    const sides=r.lite?4:6;
+    const rad=.88, panelW=sides===6?.94:1.48;
+    for (let i=0;i<sides;i++) {
+      const angle=spin+i*TAU/sides;
+      r.add('curtain',a.x+Math.sin(angle)*rad,a.y+1.02,a.z-Math.cos(angle)*rad,panelW,1.98,1,i%2?0x48f0ff:0x96fff2,16,
+        {dynamic:true,yaw:-angle,label:wear*.75});
+    }
+    if (!r.lite) {
+      _dynYP.yaw=-spin*1.8; _dynYP.pitch=.14;
+      r.add('ring',a.x,a.y+1.02,a.z,1.92,.042,1.92,0xffe484,3,_dynYP);
     }
   }
   const pose=crewPose(a,time,yaw);
@@ -2406,7 +2434,7 @@ export function drawCrew(r,a,time,showEffects=true) {
     part('box',0,1.13,.40,.57,.12,.14,BOOT,4);
     return;
   }
-  const long=weapon.id==='charge', wide=weapon.id==='fan' || weapon.id==='autoeima' || weapon.id==='autoeima2s', heavy=weapon.id==='lob', dual=weapon.id==='dual';
+  const long=weapon.id==='charge', wide=weapon.id==='fan' || weapon.id==='autoeima' || weapon.id==='autoeima2s' || weapon.id==='autoeima2super', heavy=weapon.id==='lob', dual=weapon.id==='dual';
   const quad=weapon.id==='rd2', cannon=weapon.id==='td';
   const barrel=gun.barrel;
   const width=cannon?.37:quad?.34:heavy?.33:wide?.30:.235;
@@ -2468,9 +2496,9 @@ export function drawCrew(r,a,time,showEffects=true) {
     gunPart('bevel',-.415,1.39,.48,.20,.17,.33,0xbad7ca,8);
     for (const sign of [-1,1]) gunPart('box',-.415+sign*.124,1.36,.52,.045,.19,.38,TRIM);
   }
-  if (weapon.id==='autoeima' || weapon.id==='autoeima2s') {
+  if (weapon.id==='autoeima' || weapon.id==='autoeima2s' || weapon.id==='autoeima2super') {
     gunPart('cylinder',-.415,1.46,.54,.17,.055,.17,GRAPHITE,4);
-    gunPart('orb',-.415,1.495,.54,.11,.085,.11,weapon.id==='autoeima2s'?0xff267a:bright,3);
+    gunPart('orb',-.415,1.495,.54,.11,.085,.11,weapon.id==='autoeima2s'?0xff267a:weapon.id==='autoeima2super'?0xffe468:bright,3);
   }
   if (showEffects && (a.recoil>.65 && !a.muzzleBlocked || a.charge>.12)) {
     const flash=a.charge>.12?.071+.095*a.charge:cannon?.46:quad?.27:.14;
@@ -2761,21 +2789,22 @@ function drawWeaponModel(r,a,time,{pose,loc,part,weapon,gun,tint,bright,armor,ac
   };
 
   const isPistol=wid==='swout' || wid==='swout2';
-  const isCheaterGun=wid==='autoeima2s';
+  const isSuperEimaGun=wid==='autoeima2super';
+  const isCheaterGun=wid==='autoeima2s' || isSuperEimaGun;
   const isAutoEima=wid==='autoeima' || isCheaterGun;
   const isQuad=wid==='rd2', isCannon=wid==='td', isDual=wid==='dual';
   const isLong=wid==='charge', isHeavy=wid==='lob', isBlast=wid==='blast';
   const isWide=wid==='fan' || isAutoEima;
   const chrome=0xcfd6d2, darkMetal=0x212c32;
-  const shellTint=isCheaterGun?0x22102c:tint;
-  const glowTint=isCheaterGun?0xff267a:wid==='swout2' && a.coMode?0xffe066:bright;
+  const shellTint=wid==='autoeima2s'?0x22102c:isSuperEimaGun?0x142c38:tint;
+  const glowTint=wid==='autoeima2s'?0xff267a:isSuperEimaGun?0x3df8ff:wid==='swout2' && a.coMode?0xffe066:bright;
   const width=isPistol?.18:isCannon?.38:isQuad?.35:isHeavy?.33:isDual?.35:isWide?.31:.235;
   const height=isPistol?.16:isHeavy || isQuad || isCannon?.29:.222;
   const bodyLen=isPistol?.40:.57;
   const slideBack=recoil*.095;
 
   // ---- Shared Tactical Base: Receiver, Shroud, Grip, Top Rail, Reflex Holo-Sight & Live Ink Gauge ----
-  gunPart('bevel',-.415,1.30,.47,width,height,bodyLen,isCheaterGun?0x1b1024:GRAPHITE,4);
+  gunPart('bevel',-.415,1.30,.47,width,height,bodyLen,wid==='autoeima2s'?0x1b1024:isSuperEimaGun?0x112430:GRAPHITE,4);
   gunPart('bevel',-.415,1.345,.48-slideBack*.5,width+.024,height*.58,bodyLen*.74,shellTint,20);
   gunPart('box',-.415,1.20,.355,.115,.20,.155,BOOT,21,-.22);
   if (!isLong && !isHeavy && !isAutoEima) {
@@ -2793,9 +2822,9 @@ function drawWeaponModel(r,a,time,{pose,loc,part,weapon,gun,tint,bright,armor,ac
     gunPart('box',gx-.006,1.30,.48-(1-inkRatio)*.12,.014,.042,.24*inkRatio,glowTint,3);
   }
 
-  // ---- Mechanically Animated Weapon-Specific 3D Silhouettes (All 16 Weapons!) ----
+  // ---- Mechanically Animated Weapon-Specific 3D Silhouettes (All 17 Weapons!) ----
   if (isAutoEima) {
-    // オート英馬 (7-barrel) & チーター違法改造 オート英馬 II Super (9-barrel):
+    // オート英馬 (7-barrel) & オート英馬 II SUPER (9-barrel):
     // Heat-accelerated rotary barrel cluster + sweeping target-lock radar dish + swirling ink drum!
     const ringCount=isCheaterGun?9:7, ringR=isCheaterGun?.105:.095, spinRate=(isCheaterGun?9.5:3.0)+heat*(isCheaterGun?14:9.5);
     const spinBase=time*spinRate;
@@ -2818,12 +2847,13 @@ function drawWeaponModel(r,a,time,{pose,loc,part,weapon,gun,tint,bright,armor,ac
     gunPart('orb',-.415,1.522,.53,.115+heat*.03,.098+heat*.02,.115+heat*.03,glowTint,3);
     if (!lite) gunPart('ring',-.415,1.528,.53,.21+.03*dishSweep,.02,.21+.03*dishSweep,isCheaterGun?0xffd066:glowTint,3);
     if (isCheaterGun && !lite) {
-      // 3 counter-rotating overclocked crimson-gold breach energy coils + pulsing aura!
+      // 3 counter-rotating overclocked energy coils + pulsing aura!
+      const coilAccent=isSuperEimaGun?0x3df8ff:0xff267a;
       for (let i=0;i<3;i++) {
         const pulseR=.33+.025*Math.sin(time*16+i*2.1);
-        gunPart('ring',-.415,1.30,.56+i*.125,pulseR,.028,pulseR,i%2?0xffd066:0xff267a,3,Math.PI/2);
+        gunPart('ring',-.415,1.30,.56+i*.125,pulseR,.028,pulseR,i%2?0xffd066:coilAccent,3,Math.PI/2);
       }
-      gunPart('ring',-.415,1.545,.53,.28,.026,.28,0xff267a,3);
+      gunPart('ring',-.415,1.545,.53,.28,.026,.28,coilAccent,3);
     }
   } else if (isQuad) {
     // RD II QUATRO+: 5 heavy barrels with staggered recoil, spinning breech overdrive ring & glowing vents!

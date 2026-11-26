@@ -522,32 +522,34 @@ test('perimeter apartments enclose all four sides of the arena while railway tun
 test('破壊神ゴート: overwhelming HP, hovers midair with 16 arms & 50m reach, attacks both teams indiscriminately, escalates phases, and checkpoints',()=>{
   const engine=new RoomEngine({...options,cheater:false}), b=engine.battle;
   const engine8=new RoomEngine({mode:'play',weapon:'jet',teamSize:8,cheater:false});
-  assert.equal(engine.battle.hazards.goat.maxHp,12000);
-  assert.equal(engine8.battle.hazards.goat.maxHp,18000);
+  assert.equal(engine.battle.hazards.goat.maxHp,20000);
+  assert.equal(engine8.battle.hazards.goat.maxHp,30000);
   const cyan=b.player, amber=b.actors.find(a=>a.team===1);
   b.countdown=0;
   alone(b,cyan,amber);
   const g=b.hazards.spawnGoat(60);
-  assert(g.active && g.hp===12000 && g.arms===GOAT_ARMS && g.arms===16);
+  assert(g.active && g.hp===20000 && g.arms===GOAT_ARMS && g.arms===16 && g.until===Infinity);
   assert(g.y>=4,'Goat hovers in midair: y='+g.y);
-  // Position Cyan and Amber across range & speeds -> smart Goat selects smash, whirl, & barrage!
+  // Position Cyan and Amber across range & speeds -> Supreme Goat adapts across its 8-attack arsenal!
   Object.assign(cyan,{x:4,y:0,z:-4,hp:100,shield:0,down:0,vx:0,vz:0});
   Object.assign(amber,{x:-4,y:0,z:-4,hp:100,shield:0,down:0,vx:0,vz:0});
   g.nextAttack=b.clock;
-  let sawSmash=false, sawWhirl=false, sawBarrage=false, cyanHit=false, amberHit=false;
-  for (let i=0;i<180;i++) {
-    // Keep targets alive across tests so smart Goat demonstrates close whirl, spread smash, and fast barrage!
-    if (i===55) Object.assign(cyan,{x:26,y:0,z:4,hp:100,shield:0,down:0,vx:7,vz:0}), Object.assign(amber,{x:-28,y:0,z:-8,hp:100,shield:0,down:0,vx:-7,vz:0});
-    if (i===110) Object.assign(cyan,{x:18,y:0,z:0,hp:100,shield:0,down:0,vx:0,vz:0}), Object.assign(amber,{x:-18,y:0,z:-2,hp:100,shield:0,down:0,vx:0,vz:0});
+  const sawKinds=new Set();
+  let cyanHit=false, amberHit=false;
+  for (let i=0;i<260;i++) {
+    if (i===65) Object.assign(cyan,{x:26,y:0,z:4,hp:100,shield:0,down:0,vx:7,vz:0}), Object.assign(amber,{x:-28,y:0,z:-8,hp:100,shield:0,down:0,vx:-7,vz:0});
+    if (i===145) Object.assign(cyan,{x:18,y:0,z:0,hp:100,shield:0,down:0,vx:0,vz:0}), Object.assign(amber,{x:-18,y:0,z:-2,hp:100,shield:0,down:0,vx:0,vz:0});
     b.clock+=.06; b.elapsed+=.06;
     b.hazards.updateGoat(.06);
     if (cyan.down>0 || cyan.hp<100) cyanHit=true;
     if (amber.down>0 || amber.hp<100) amberHit=true;
-    if (g.cast?.kind==='smash') sawSmash=true;
-    if (g.cast?.kind==='whirl') sawWhirl=true;
-    if (g.cast?.kind==='barrage') sawBarrage=true;
+    if (g.cast?.kind) sawKinds.add(g.cast.kind);
   }
-  assert(sawSmash && sawWhirl && sawBarrage,'Goat uses 16-tentacle smash, whirl, and barrage');
+  assert(sawKinds.has('whirl') && sawKinds.size>=4,'Supreme Goat rotates through multiple tactical attacks: '+[...sawKinds].join(','));
+  // Trigger homing barrage explicitly to verify Goat orbs remain homing at 50m
+  b.hazards.planGoatAttack([cyan,amber],'barrage');
+  b.clock=g.cast.at+.02;
+  b.hazards.updateGoat(.04);
   assert(b.shots.some(s=>s.weapon===GOAT_WEAPON && s.homing),'barrage fires homing Goat orbs');
   assert(cyanHit,'Cyan attacked by Goat');
   assert(amberHit,'Amber attacked by Goat');
@@ -561,16 +563,18 @@ test('破壊神ゴート: overwhelming HP, hovers midair with 16 arms & 50m reac
   // Checkpoint preserves Goat state cleanly.
   const restored=new RoomEngine({...options,cheater:false},new Map(Object.entries(engine.checkpoint()))).battle;
   assert(restored.hazards.goat.active && restored.hazards.goat.hp===g.hp && restored.hazards.goat.arms===16);
-  // Phase escalation & defeat via player fire.
-  cyan.down=0; cyan.hp=100;
+  // 4-Phase escalation (with Phase 4 divine resistance) & defeat via player fire.
+  cyan.down=0; cyan.hp=cyan.maxHp;
   const hit=b.findActor([g.x,g.y+1.8,g.z-6],[g.x,g.y+1.8,g.z+6],cyan.team);
   assert(hit && hit.actor===g);
-  b.hazards.hurtGoat(5000,cyan);
+  b.hazards.hurtGoat(5500,cyan);
   assert.equal(g.phase,2);
-  b.hazards.hurtGoat(4000,cyan);
-  assert.equal(g.phase,3);
-  const killsBefore=cyan.kills;
   b.hazards.hurtGoat(5000,cyan);
+  assert.equal(g.phase,3);
+  b.hazards.hurtGoat(5000,cyan);
+  assert.equal(g.phase,4);
+  const killsBefore=cyan.kills;
+  b.hazards.hurtGoat(6000,cyan);
   assert(!g.active && g.hp===0 && cyan.kills===killsBefore+1);
 });
 
@@ -760,9 +764,9 @@ test('upgraded vehicle dynamics engine, hit VFX, projectiles, and all 16 bespoke
     };
   };
 
-  // 3. Draw every single weapon (all 15 player weapons + Cheater Auto-Eima II Super) idle, firing, charged, and CO mode!
+  // 3. Draw every single weapon (all 16 player weapons + Cheater Auto-Eima II Super) idle, firing, charged, and CO mode!
   const allWeapons=[...WEAPONS,CHEATER_WEAPON];
-  assert.equal(allWeapons.length,16);
+  assert.equal(allWeapons.length,17);
   Object.assign(p,{x:0,y:0,z:-16,yaw:0,pitch:0,down:0,swimming:false,tank:140,tankMax:140});
   for (const w of allWeapons) {
     p.weapon=w;

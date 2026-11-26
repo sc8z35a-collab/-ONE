@@ -14,7 +14,7 @@ import {Transit} from './transit.js';
 import {shotWeaponById,weaponById} from './weapons.js';
 import {Subweapons} from './subweapons.js';
 
-const PATH='/api/inkshift', BUTTONS=['press','jump','super','drone','use','cycle','sub','co'];
+const PATH='/api/inkshift', BUTTONS=['press','jump','super','drone','use','cycle','sub','co','pshield'];
 const MOVEMENT=['x','y','z','steps','yaw','pitch','bodyYaw','poseBank','brace','peek','readyPose','flare'];
 const FEET=['0','1','2','3','4','5','6','7'];
 const POSITION=['0','1','2'];
