@@ -1281,7 +1281,6 @@ uniform float uTrainShift;
 uniform float uDrawFar;
 uniform float uRaytrace;
 uniform float uWetLevel;
-uniform float uRainLevel;
 out vec4 frag;
 
 ${SURFACE_HIGH}

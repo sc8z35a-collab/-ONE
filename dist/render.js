@@ -879,6 +879,8 @@ export class Renderer {
     }
     gl.bindFramebuffer(gl.FRAMEBUFFER,this.envBuffer);
     gl.useProgram(this.envProgram);
+    gl.activeTexture(gl.TEXTURE0+UNIT.detail);
+    gl.bindTexture(gl.TEXTURE_2D,this.detail);
     gl.uniform2f(gl.getUniformLocation(this.envProgram,'uSize'),width,height);
     gl.uniform3fv(gl.getUniformLocation(this.envProgram,'uSun'),SUN);
     gl.uniform1f(gl.getUniformLocation(this.envProgram,'uClock'),clock);

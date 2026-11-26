@@ -1824,9 +1824,19 @@ function fault(details) {
   title.hidden=true;
   hud.hidden=true;
   rotate.hidden=true;
+  const content=document.createDocumentFragment();
   const p=document.createElement('p');
-  p.textContent='この環境で3D描画を開始できませんでした。WebGL 2対応のブラウザで開いてください。';
-  showDialog('error','3D描画エラー',p,[button('再読み込み','primary',()=>location.reload())]);
+  const unavailable=details?.name==='WebGLUnavailable';
+  p.textContent=unavailable?'この環境で3D描画を開始できませんでした。WebGL 2対応のブラウザで開いてください。':'3D描画の初期化に失敗しました。再読み込みしても改善しない場合は、ブラウザのハードウェアアクセラレーション設定や更新を確認してください。';
+  content.append(p);
+  const message=details?.message || (typeof details==='string'?details:'');
+  if (message && !unavailable) {
+    const note=document.createElement('p');
+    note.style.cssText='opacity:.75;font-size:12px;word-break:break-word;margin-top:8px';
+    note.textContent='詳細: '+message;
+    content.append(note);
+  }
+  showDialog('error','3D描画エラー',content,[button('再読み込み','primary',()=>location.reload())]);
 }
 
 $('start').addEventListener('click',()=>start('play'));
