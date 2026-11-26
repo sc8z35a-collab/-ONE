@@ -8,8 +8,8 @@ const railKeys=['x','stop','direction','phase','wait','speed','doorOpen','wetnes
   'risk','spray','inkColor','viewDirection','routePitch','destination','berserk'];
 // Meters never round up into a false "ready", and timers never round down
 // into a false "finished": both are cut to a millisecond on the safe side.
-const meters=new Set(['tank','charge','superCharge','hp']);
-const timers=new Set(['down','shield','superUntil','droneReady','subReady','doorReady','revealUntil']);
+const meters=new Set(['tank','charge','superCharge','hp','pShield']);
+const timers=new Set(['down','shield','pShieldUntil','pShieldReady','superUntil','droneReady','subReady','doorReady','revealUntil']);
 const cut=(value,round)=>Number.isFinite(value)?round(value*1000)/1000:value;
 const actorView=(a,close=true)=>{
   const special={isPlayer:!!a.isPlayer,isCheater:!!a.isCheater,inCar:!!a.car,weapon:a.weapon?.id,drone:!!a.drone,ride:!!a.ride,lift:a.lift?{left:q(a.lift.left)}:null,

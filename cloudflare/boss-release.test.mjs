@@ -93,10 +93,10 @@ test('a sweep hits the sector only as its arm passes and does not hit the same p
   const a=boss.attack(8,-16,4,.92,120,{kind:'sweep',yaw:Math.PI/2,halfAngle:1.05});
   b.clock=a.at+BOSS_ATTACK_TIMING.sweep.active*.16;
   boss.updateAttacks(1/24,[p,foe]);
-  assert.equal(p.hp,100);
+  assert.equal(p.hp,p.maxHp);
   b.clock=a.at+BOSS_ATTACK_TIMING.sweep.active*.52;
   boss.updateAttacks(1/24,[p,foe]);
-  assert(p.hp<100);
+  assert(p.hp<p.maxHp);
   assert.equal(foe.hp,100);
   const r=engine(saved(e)).battle;
   const hp=r.player.hp;

@@ -59,7 +59,12 @@ export const WEAPONS = [
   // shot after INK_COST_FACTOR) and +20% (1.2x) ink tank capacity while held.
   {id:'autoeima',name:'オート英馬',role:'7連自動追尾散弾・プレイヤー専用',detail:'プレイヤー専用の自動追尾散弾銃。1回で7発（1発あたり0.25インク消費）を速い連射で広範囲に発射し、所持するだけでインクタンク容量が1.2倍になる。一定範囲内の敵へ弾が自動追従し、塗り力は抜群。',special:'vortex',playerOnly:true,
     speed:23.5,gravity:5.5,range:30,damage:6.5,cost:3.5,delay:.165,radius:1.55,depth:.056,pellets:7,spread:.34,arc:0,size:.21,
-    tankScale:1.2,homing:{turn:4.8,cone:2.1,reach:16}}
+    tankScale:1.2,homing:{turn:4.8,cone:2.1,reach:16}},
+  // Player-only unlocked オート英馬 II SUPER: 9-pellet super-homing rapid shotgun
+  // with half ink cost (0.875/shot after INK_COST_FACTOR), 1.2x fire rate & 1.2x tank.
+  {id:'autoeima2super',name:'オート英馬 II SUPER',role:'9連超追尾散弾・プレイヤー専用',detail:'プレイヤー専用に開放されたオート英馬 II SUPER。9連超追尾散弾を1.2倍速で連射し、インク消費半減（1発0.875）＆インクタンク容量1.2倍。広角・長距離の自動追尾で戦場を制圧する。',special:'vortex',playerOnly:true,
+    speed:34,gravity:3.5,range:44,damage:10.5,cost:1.75,delay:.115/1.2,radius:1.75,depth:.062,pellets:9,spread:.52,arc:0,size:.22,
+    tankScale:1.2,homing:{turn:11.5,cone:2.75,reach:32}}
 ].map(weapon=>({...weapon,cost:weapon.cost*INK_COST_FACTOR,radius:weapon.radius*PAINT_RADIUS_FACTOR}));
 
 export const weaponTankMax=(weapon,base=150)=>base*(weapon?.tankScale ?? 1);
@@ -88,8 +93,8 @@ export const ROGUE_DRONE_WEAPON={id:'rogue_drone',name:'暴走ドローン',spee
   radius:.55,depth:0,pellets:1,spread:0,arc:0,size:.18,homing:{turn:5.2,cone:1.5,reach:22}};
 export const TRAIN_BOSS_WEAPON={id:'train_boss',name:'暴走列車',speed:38,gravity:1.8,range:52,damage:36,cost:0,delay:.68,
   radius:1.05,depth:0,pellets:1,spread:0,arc:0,size:.30,homing:{turn:4.2,cone:1.5,reach:42}};
-export const GOAT_WEAPON={id:'goat_orb',name:'破壊神ゴート',speed:42,gravity:1.0,range:55,damage:42,cost:0,delay:.6,
-  radius:1.25,depth:.025,pellets:1,spread:0,arc:0,size:.38,homing:{turn:5.6,cone:2.2,reach:50}};
+export const GOAT_WEAPON={id:'goat_orb',name:'破壊神ゴート',speed:48,gravity:.8,range:58,damage:52,cost:0,delay:.52,
+  radius:1.5,depth:.028,pellets:1,spread:0,arc:0,size:.42,homing:{turn:6.8,cone:2.5,reach:50}};
 export const HELI_MISSILE_WEAPON={id:'heli_missile',name:'マルチミサイルヘリ',speed:30,gravity:4.8,range:72,damage:56,cost:0,delay:2.6,
   radius:2.1,depth:.02,pellets:1,spread:0,arc:0,size:.34,homing:{turn:6.4,cone:2.6,reach:68}};
 const SPECIAL_SHOT_WEAPONS={[DRONE_WEAPON.id]:DRONE_WEAPON,[CHEATER_WEAPON.id]:CHEATER_WEAPON,

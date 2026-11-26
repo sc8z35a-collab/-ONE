@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="apple-touch-icon" href="mark-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <link rel="stylesheet" href="game.css?v=23">
+  <link rel="stylesheet" href="game.css?v=24">
 </head>
 <body>
   <main id="game" aria-label="INK//SHIFT">
@@ -93,9 +93,12 @@
       </div>
       <div id="boss-alert" hidden role="status"></div>
       <div class="hud-left-stack">
-        <div id="combat-tools" aria-label="サブ・スーパー・ドローン">
+        <div id="combat-tools" aria-label="サブ・スーパー・シールド・ドローン">
           <button id="super-action" class="skill-action" type="button" aria-label="スーパーチャージを発動">
             <span aria-hidden="true">✦</span><b id="super-name">シールド</b><small id="super-state">0%</small><kbd>Q</kbd><i id="super-bar"></i>
+          </button>
+          <button id="shield-action" class="skill-action" type="button" aria-label="プレイヤー専用シールドを展開">
+            <span aria-hidden="true">⬡</span><b>シールド</b><small id="shield-state">準備OK</small><kbd>V</kbd><i id="shield-bar"></i>
           </button>
           <button id="sub-action" class="skill-action" type="button" aria-label="選択したサブウェポンを使う">
             <span aria-hidden="true">◈</span><b id="sub-name">投げボム</b><small id="sub-state">準備OK</small><kbd>G</kbd>
@@ -155,7 +158,7 @@
         <div id="player-meter">
           <div id="ink-tank" aria-hidden="true"><div id="ink-bar"></div><i id="ink-next-shot"></i></div>
           <div class="meter-readout">
-            <div class="meter-label"><b id="hud-weapon">シューター</b></div>
+            <div class="meter-label"><b id="hud-weapon">シューター</b><span id="hp-readout">HP 200</span></div>
             <div class="hp-track" aria-label="体力"><div id="hp-bar"></div></div>
             <div id="charge-track" class="meter-track" hidden><div id="charge-bar"></div></div>
             <div id="meter-tip">自チームのインクで高速回復</div>
@@ -199,6 +202,6 @@
     <div id="loading" role="status"><span class="live-dot"></span><span id="loading-caption">第07高架街区を読み込み中</span></div>
     <noscript>プレイするにはJavaScriptを有効にしてください。</noscript>
   </main>
-  <script type="module" src="main.js?v=29"></script>
+  <script type="module" src="main.js?v=30"></script>
 </body>
 </html>

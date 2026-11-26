@@ -76,7 +76,7 @@ test('server owns time, movement, pause, and an unthrottled final timed snapshot
   b.countdown=0;
   const x=b.player.x;
   for(let i=0;i<36;i++) submit(engine,i+1,1000+i*50,{z:9,time:9000,health:9999});
-  assert(b.player.x>x+3 && b.player.x<x+15 && b.player.hp<=100);
+  assert(b.player.x>x+3 && b.player.x<x+15 && b.player.hp<=b.player.maxHp);
   assert(b.elapsed>=1.6 && b.elapsed<=1.76);
   const elapsed=b.elapsed;
   const paused=submit(engine,37,2800,{paused:true});
@@ -403,7 +403,7 @@ test('ink swimming is faster than swimming over dry ground and produces no wake 
 
 test('main weapons fire four shots with their original cost of one shot',()=>{
   const b=new RoomEngine(options).battle, p=b.player;
-  const former={jet:4.9,fan:9,charge:14,lob:18,blast:12,dual:6.3,surge:8.7,coil:7.5,prism:9,roller:5.39,rd2:1.2,td:30,swout:5.8,swout2:3.48,autoeima:7};
+  const former={jet:4.9,fan:9,charge:14,lob:18,blast:12,dual:6.3,surge:8.7,coil:7.5,prism:9,roller:5.39,rd2:1.2,td:30,swout:5.8,swout2:3.48,autoeima:7,autoeima2super:3.5};
   const target=[p.x+5,p.y+1,p.z];
   for (const weapon of WEAPONS) {
     Object.assign(p,{weapon,tank:former[weapon.id],fire:0});
@@ -954,11 +954,11 @@ test('raider tentacles stop at the thin railing and still hit in a clear lane',(
   Object.assign(a,{x:-11.5925,y:-.01,z:-2.65});
   Object.assign(target,{x:-9.7075,y:.33,z:-2.65,shield:0});
   b.raiders.resolve(a,attack);
-  assert.equal(target.hp,100);
+  assert.equal(target.hp,target.maxHp);
   Object.assign(a,{x:10,y:0,z:-16});
   Object.assign(target,{x:15,y:0,z:-16});
   b.raiders.resolve(a,attack);
-  assert(target.hp<100);
+  assert(target.hp<target.maxHp);
 });
 
 test('train ETA accounts for acceleration and braking from the first departure frame',()=>{
@@ -1186,12 +1186,12 @@ test('boss strikes respect thin cover between the warning area and a player',()=
   boss.attack(-14.2,-4.2,4.1,1,105);
   b.clock=1.1;
   boss.update(1/24);
-  assert.equal(p.hp,100);
+  assert.equal(p.hp,p.maxHp);
   Object.assign(p,{x:15,y:0,z:-16});
   boss.attack(12,-16,4.1,1,105);
   b.clock=2.2;
   boss.update(1/24);
-  assert(p.hp<100);
+  assert(p.hp<p.maxHp);
 });
 
 test('manual focus disappears behind an enemy ink curtain and returns behind an allied one',()=>{

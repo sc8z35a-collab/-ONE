@@ -10,6 +10,10 @@ export const DRONE_COOLDOWN=60;
 const DRONE_LIFETIME=23;
 // The drone fires one tracking round a second at the nearest opponent it can see.
 export const DRONE_FIRE_INTERVAL=1;
+// Player-only deployable energy shield: absorbs 90% of incoming damage up to PLAYER_SHIELD_HP.
+export const PLAYER_SHIELD_HP=240;
+export const PLAYER_SHIELD_DURATION=9;
+export const PLAYER_SHIELD_COOLDOWN=12;
 
 const _sqDynYP={dynamic:true,yaw:0,pitch:0};
 const _sqPts6=[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]];
@@ -121,8 +125,9 @@ export class Abilities {
     }
     if (id==='range') actor.rangeFactor=1.75;
     if (id==='health') {
-      actor.maxHp=(actor.baseHp??100)+100;
-      actor.hp=Math.min(actor.maxHp,actor.hp+100);
+      const bonus=actor.baseHp??100;
+      actor.maxHp=bonus*2;
+      actor.hp=Math.min(actor.maxHp,actor.hp+bonus);
     }
     if (id==='slam') {
       actor.slam={age:0,...this.slamMotion(actor)};
@@ -138,7 +143,34 @@ export class Abilities {
     return true;
   }
 
+  canDeployShield(actor) {
+    return !!actor?.isPlayer && actor.down<=0 && !actor.lift && !actor.ride && !actor.cloneOf &&
+      !(actor.pShield>0 && (actor.pShieldUntil??0)>this.battle.clock) && (actor.pShieldReady??0)<=this.battle.clock;
+  }
+
+  deployShield(actor) {
+    const b=this.battle;
+    if (!this.canDeployShield(actor)) return false;
+    actor.pShield=PLAYER_SHIELD_HP;
+    actor.pShieldUntil=b.clock+PLAYER_SHIELD_DURATION;
+    actor.pShieldReady=b.clock+PLAYER_SHIELD_COOLDOWN;
+    b.burst([actor.x,actor.y+1.0,actor.z],actor.team,18,3.6);
+    this.rings.push({x:actor.x,y:actor.y+.06,z:actor.z,r:2.6,team:actor.team,until:b.clock+.55});
+    b.callbacks.sound?.('super');
+    b.callbacks.cue?.('shield',actor);
+    return true;
+  }
+
   reduce(actor,amount) {
+    if (actor.pShield>0 && (actor.pShieldUntil??0)>this.battle.clock) {
+      const stopped=Math.min(actor.pShield,amount*.90);
+      actor.pShield-=stopped;
+      amount-=stopped;
+      if (actor.pShield<=1e-3) {
+        actor.pShield=0;
+        actor.pShieldUntil=0;
+      }
+    }
     if (actor.guard>0) {
       const stopped=Math.min(actor.guard,amount*.84);
       actor.guard-=stopped;
@@ -267,6 +299,10 @@ export class Abilities {
       return true;
     }
     if (actor.superUntil && actor.superUntil<=b.clock) this.clearSuper(actor);
+    if (actor.pShieldUntil && actor.pShieldUntil<=b.clock) {
+      actor.pShield=0;
+      actor.pShieldUntil=0;
+    }
     if (actor.giant && actor.giantNext<=b.clock) {
       actor.giantNext=b.clock+.60;
       const hit=b.downwardSurface(actor.x,actor.y,actor.z);

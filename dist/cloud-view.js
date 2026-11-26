@@ -64,7 +64,7 @@ export function serverCamera(battle,actor,input) {
 }
 
 export const AVATAR_FIELDS=['team','index','name','isPlayer','weapon','drone','ride','lift','x','y','z','yaw','pitch','vx','vy','vz',
-  'steps','tank','tankMax','hp','maxHp','down','shield','recoil','damageAge','guard','giant','swimming','charge','superCharge',
+  'steps','tank','tankMax','hp','maxHp','down','shield','pShield','pShieldUntil','pShieldReady','recoil','damageAge','guard','giant','swimming','charge','superCharge',
   'superUntil','droneReady','rangeFactor','kills','downs','painted','cabinVisits','active','attack','inkSwimming','climbing','inkPenalty','intent','climbNormal','airborne','landing','rolling','subId','subReady','doorReady','muzzleBlocked',
   'slam','beaming','lastDamageAt','activeSpecial','bodyYaw','poseBank','feet','brace','peek','readyPose','flare',
   'dealt','supers','subs','revealUntil','revealTeam','downBy','clone','apartmentVisits','coMode','isCheater','inCar'];

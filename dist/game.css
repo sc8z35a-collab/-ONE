@@ -342,7 +342,7 @@ h1 i { color: var(--orange); font-style: normal; }
 .boss-track i { display:block; height:100%; background:#d297e9; transform-origin:left; }
 #boss-alert { position:absolute; top:133px; left:50%; transform:translateX(-50%); padding:6px 13px; color:#fff0f7;
   background:#59376eea; border:1px solid #d4a7e3; font-weight:800; letter-spacing:.05em; font-size:14px; white-space:nowrap; }
-#combat-tools { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); width:min(411px,45vw); gap:5px; }
+#combat-tools { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(0,1fr); width:min(520px,54vw); gap:5px; }
 #combat-tools .skill-action { display:grid; grid-template-columns:14px minmax(0,1fr) auto; gap:2px 4px;
   grid-template-areas:"icon label key" ". state key"; justify-content:stretch; min-width:0; min-height:43px; text-align:left; }
 #combat-tools .skill-action span { grid-area:icon; }
@@ -352,6 +352,12 @@ h1 i { color: var(--orange); font-style: normal; }
 .touch-active #combat-tools .skill-action { grid-template-columns:minmax(0,1fr); grid-template-areas:"label" "state"; text-align:center; }
 .touch-active #combat-tools .skill-action span { display:none; }
 #sub-action { border-color:#b8cbb2; }
+#shield-action { border-color:#6de6f8a8; }
+#shield-action span { color:#6de6f8; }
+#shield-action.active { border-color:#72f8ff; background:#1c5b6af2; box-shadow:0 0 12px #48f0ff55; }
+#shield-action.active i { background:#6ff6ff; }
+#hp-readout { font-size:10px; color:#d8f4ea; white-space:nowrap; margin-left:6px; }
+#hp-readout.shielded { color:#72f8ff; }
 .loadout-heading { margin:16px 0 8px; color:#e8f0df; font-size:12px; }
 .skill-action, .transit-action { position:relative; display:flex; gap:5px; align-items:center; justify-content:center; pointer-events:auto;
   border:1px solid #a6c5be91; color:#eaf4ea; background:#193333e6; min-height:36px; padding:3px 8px;
@@ -697,7 +703,7 @@ h1 i { color: var(--orange); font-style: normal; }
     bottom:max(8px,calc(env(safe-area-inset-bottom) + 4px));
     gap:4px;
   }
-  .touch-active #combat-tools { width:clamp(160px,35vw,244px); gap:4px; }
+  .touch-active #combat-tools { width:clamp(192px,42vw,292px); gap:4px; }
   .touch-active #combat-tools .skill-action { display:grid; align-content:center; gap:1px; min-width:0; min-height:41px; padding:2px 3px; }
   .touch-active #combat-tools .skill-action b { overflow:hidden; text-overflow:ellipsis; }
   .touch-active #transit-action, .touch-active #stairs-note { justify-self:start; max-width:100%; }

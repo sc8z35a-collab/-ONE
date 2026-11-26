@@ -5,8 +5,12 @@ import {Paint} from '../dist/ink.js';
 import {FluidEngine,FLUID_MEDIA,STORM_DRAINS} from '../dist/fluid-engine.js';
 import {DestructionPhysics} from '../dist/destruction.js';
 import {DynamicStage,DYNAMIC_STAGE_FIRST} from '../dist/dynamic-stage.js';
-import {GOAT_ARMS,GOAT_REACH,HELI_SALVO_COUNT} from '../dist/hazards.js';
-import {CHEATER_WEAPON,GOAT_WEAPON,WEAPONS,weaponById} from '../dist/weapons.js';
+import {GOAT_ARMS,GOAT_ATTACK_KINDS,GOAT_REACH,HELI_SALVO_COUNT} from '../dist/hazards.js';
+import {CHEATER_WEAPON,GOAT_WEAPON,NPC_WEAPONS,WEAPONS,weaponById} from '../dist/weapons.js';
+import {PLAYER_SHIELD_COOLDOWN,PLAYER_SHIELD_DURATION,PLAYER_SHIELD_HP} from '../dist/abilities.js';
+import {PLAYER_BASE_HP,drawCrew} from '../dist/battle.js';
+import {AVATAR_FIELDS} from '../dist/cloud-view.js';
+import {frameOf} from './frame.js';
 import {CX10_VERSION} from '../dist/cheater-engine.js';
 import {inkResult} from '../dist/ink-hud.js';
 import {BASE_TANK,GIGA_TANK,UNDER_X,UNDER_Y} from '../dist/layout.js';
@@ -387,4 +391,209 @@ test('stage runaway train rampages on stage, cars are easily rideable, heavy dow
   assert(heliShot && heliShot.actor===heli,'helicopter can be targeted & shot down');
   b.hazards.hurtHeli(heli.maxHp,p);
   assert(!heli.active,'helicopter explodes cleanly when defeated');
+});
+
+test('上位存在・破壊神ゴート: 5種の新規攻撃(計8種)・4段階進化・神域軽減・死ぬまで永続出現・全8種描画とチェックポイント',()=>{
+  const engine=new RoomEngine({...options,cheater:false}), b=engine.battle, p=b.player;
+  const foe=b.actors.find(a=>a.team===1);
+  b.countdown=0;
+  for (const a of b.actors) if (a!==p && a!==foe) a.down=99;
+  assert.equal(GOAT_ATTACK_KINDS.length,8);
+  for (const kind of ['smash','whirl','barrage','beam','meteor','gravity','lightning','nova']) {
+    assert(GOAT_ATTACK_KINDS.includes(kind),'includes attack kind: '+kind);
+  }
+
+  const g=b.hazards.spawnGoat();
+  assert.equal(g.maxHp,20000);
+  assert.equal(g.until,Infinity);
+  assert.equal(g.supreme,true);
+
+  // Never despawns due to elapsed time — stays active continuously until HP reaches 0!
+  for (let step=0;step<40;step++) {
+    b.clock+=25; b.elapsed+=25;
+    b.hazards.updateGoat(.05);
+  }
+  assert.equal(g.active,true,'Goat remains active even after +1000s without dying');
+
+  // Exercise every one of the 5 brand-new attacks (beam, meteor, gravity, lightning, nova) + rendering + checkpoint!
+  const packBuf=new Float32Array(STRIDE);
+  const makeTestRenderer=()=>{
+    let count=0;
+    return {
+      lite:false,
+      get count(){return count;},
+      add(shape,x,y,z,w,h,d,tint,kind=0,opts={}){
+        for (const v of [x,y,z,w,h,d]) assert(Number.isFinite(v),'finite '+shape);
+        packInstance(packBuf,0,x,y,z,w,h,d,tint,kind,opts,0,true);
+        count++;
+      },
+      beam(a,c,w,d,tint,kind=0,opts={}){Renderer.prototype.beam.call(this,a,c,w,d,tint,kind,opts);}
+    };
+  };
+
+  for (const kind of ['beam','meteor','gravity','lightning','nova']) {
+    Object.assign(p,{x:g.x+10,y:0,z:g.z,hp:p.maxHp,down:0,shield:0,pShield:0,vx:0,vz:0});
+    Object.assign(foe,{x:g.x+10,y:0,z:g.z+1,hp:100,down:0,shield:0,vx:0,vz:0});
+    b.hazards.planGoatAttack([p,foe],kind);
+    assert.equal(g.cast.kind,kind);
+    // Verify checkpoint round-trip during active cast
+    const snap=new RoomEngine({...options,cheater:false},new Map(Object.entries(engine.checkpoint()))).battle;
+    assert.equal(snap.hazards.goat.cast?.kind,kind,'checkpoint preserves '+kind+' cast');
+    // Render warning phase
+    const rWarn=makeTestRenderer();
+    b.hazards.drawGoat(rWarn,b.clock);
+    assert(rWarn.count>160,'warning drawGoat emits Supreme geometry for '+kind);
+    // Step through active window and confirm hits/effects + active rendering
+    const startHpP=p.hp, startHpF=foe.hp;
+    let damaged=false, maxActivePrims=0;
+    const steps=Math.ceil((g.cast.end-g.cast.start)/.05)+4;
+    for (let i=0;i<steps;i++) {
+      b.clock+=.05; b.elapsed+=.05;
+      b.hazards.updateGoat(.05);
+      if (g.cast && b.clock>=g.cast.at && b.clock<=g.cast.end) {
+        const rAct=makeTestRenderer();
+        b.hazards.drawGoat(rAct,b.clock);
+        maxActivePrims=Math.max(maxActivePrims,rAct.count);
+      }
+      if (p.hp<startHpP || foe.hp<startHpF || p.down>0 || foe.down>0) damaged=true;
+    }
+    assert(damaged,'Supreme Goat '+kind+' deals damage to targets');
+    assert(maxActivePrims>160,'active drawGoat renders '+kind+' VFX ('+maxActivePrims+' prims)');
+  }
+
+  // Phase 4 (神域超越) reduces incoming damage by 20% and triggers only below 25% HP.
+  b.hazards.hurtGoat(15500,p);
+  assert.equal(g.phase,4);
+  const hpBeforeP4=g.hp;
+  const lostP4=b.hazards.hurtGoat(1000,p);
+  assert.equal(lostP4,800,'Phase 4 grants 20% divine damage reduction');
+  assert.equal(g.hp,hpBeforeP4-800);
+  // Defeating Goat finally clears active state & schedules next arrival
+  b.hazards.hurtGoat(20000,p);
+  assert.equal(g.active,false);
+  assert.equal(g.hp,0);
+  assert(b.hazards.nextGoat>b.elapsed);
+});
+
+test('プレイヤー専用オート英馬 II SUPER: プレイヤーのみ選択・装備可能、NPCに絶対付与されず9発超追尾連射・1.2倍タンク',()=>{
+  const superGun=weaponById('autoeima2super'), ae=weaponById('autoeima');
+  assert(superGun && superGun.name==='オート英馬 II SUPER');
+  assert.equal(superGun.playerOnly,true);
+  assert(!NPC_WEAPONS.some(w=>w.id==='autoeima2super'),'excluded from NPC_WEAPONS');
+  assert.equal(superGun.pellets,9);
+  assert(Math.abs(superGun.cost-ae.cost*.5)<1e-9,'half ink cost of オート英馬 (0.875)');
+  assert(Math.abs(superGun.delay-.115/1.2)<1e-9,'1.2x fire rate');
+  assert(Math.abs(superGun.tankScale-1.2)<1e-9,'1.2x ink tank capacity');
+  assert(superGun.homing.turn>ae.homing.turn && superGun.homing.reach>ae.homing.reach);
+
+  // Never equipped by non-player actors in any mode
+  for (const mode of ['play','watch','timeless']) {
+    const {battle:mb}=new RoomEngine({mode,weapon:'autoeima2super',teamSize:8,cheater:false});
+    assert(mb.actors.filter(a=>!a.isPlayer).every(a=>!a.weapon.playerOnly && a.weapon.id!=='autoeima2super'),mode);
+  }
+
+  const engine=new RoomEngine({...options,weapon:'autoeima2super'}), b=engine.battle, p=b.player;
+  assert.equal(p.weapon.id,'autoeima2super');
+  assert(Math.abs(p.tankMax-BASE_TANK*1.2)<1e-9);
+  b.countdown=0;
+  Object.assign(p,{x:10,y:0,z:-16,yaw:Math.PI/2,tank:100,fire:0,shield:0});
+  assert(b.shoot(p,[p.x+12,p.y+1,p.z]));
+  const shots=b.shots.filter(s=>s.actor===p);
+  assert.equal(shots.length,9);
+  assert(Math.abs(100-p.tank-.875)<1e-9);
+  assert(shots.every(s=>s.homing && s.homing.reach===superGun.homing.reach));
+
+  // Checkpoint cold restore keeps player weapon, 1.2x tank, and homing shots
+  const restored=new RoomEngine({...options,weapon:'jet'},new Map(Object.entries(engine.checkpoint()))).battle;
+  assert.equal(restored.player.weapon.id,'autoeima2super');
+  assert(Math.abs(restored.player.tankMax-BASE_TANK*1.2)<1e-9);
+  assert.equal(restored.shots.length,9);
+});
+
+test('プレイヤー専用: 体力2倍(200HP)とシールド展開(耐久240・90%軽減・NPC不可・同期・3D描画)',()=>{
+  const engine=new RoomEngine({...options,cheater:false}), b=engine.battle, p=b.player;
+  const ally=b.actors.find(a=>a.team===p.team && !a.isPlayer);
+  const foe=b.actors.find(a=>a.team!==p.team);
+  b.countdown=0;
+
+  // 1. Player-only 2x HP (200), while normal NPCs remain 100 HP.
+  assert.equal(PLAYER_BASE_HP,200);
+  assert.equal(p.baseHp,200);
+  assert.equal(p.maxHp,200);
+  assert.equal(p.hp,200);
+  assert.equal(ally.maxHp,100);
+  assert.equal(foe.maxHp,100);
+
+  // Health super doubles player baseHp (200 -> 400) and reverts to 200 on clearSuper.
+  p.weapon=weaponById('dual'); // special: 'health'
+  p.superCharge=100;
+  assert(b.abilities.activate(p));
+  assert.equal(p.maxHp,400);
+  assert.equal(p.hp,400);
+  b.abilities.clearSuper(p);
+  assert.equal(p.maxHp,200);
+  assert.equal(p.hp,200);
+
+  // 2. Only the player can deploy personal shield; all NPCs are rejected.
+  assert.equal(b.abilities.canDeployShield(p),true);
+  assert.equal(b.abilities.canDeployShield(ally),false);
+  assert.equal(b.abilities.canDeployShield(foe),false);
+  assert.equal(b.abilities.deployShield(ally),false);
+  assert.equal(b.abilities.deployShield(foe),false);
+  assert.equal(ally.pShield,0);
+
+  // Deploy via player input (pshield) in Battle.update
+  b.update(1/30,{...still,pshield:true},view);
+  assert.equal(p.pShield,PLAYER_SHIELD_HP);
+  assert(p.pShieldUntil>b.clock && p.pShieldUntil<=b.clock+PLAYER_SHIELD_DURATION+.05);
+  assert(p.pShieldReady>b.clock && p.pShieldReady<=b.clock+PLAYER_SHIELD_COOLDOWN+.05);
+  assert.equal(b.abilities.canDeployShield(p),false,'cannot redeploy during cooldown');
+
+  // 3. Shield absorbs 90% of incoming damage (both direct reduce and Battle.damage).
+  p.shield=0; // clear spawn invulnerability
+  assert.equal(b.abilities.reduce({...p,pShield:PLAYER_SHIELD_HP,pShieldUntil:b.clock+9,guard:0,giant:false,slam:null},100),10);
+  const hpBefore=p.hp, shBefore=p.pShield;
+  b.damage(p,100,foe,[p.x,p.y+1,p.z]);
+  const shLost=shBefore-p.pShield, hpLost=hpBefore-p.hp;
+  assert(shLost>0 && hpLost>0,'damage splits across shield and HP');
+  assert(Math.abs(shLost/hpLost-9)<1e-6,'shield absorbs 90% while 10% leaks to HP (ratio='+shLost/hpLost+')');
+
+  // 4. Cloudflare frame sync & checkpoint preserve player 2x HP and personal shield state.
+  const f=frameOf(b,0,0,[]);
+  const idxOf=k=>AVATAR_FIELDS.indexOf(k);
+  const pRow=f.actors.find(row=>row[idxOf('isPlayer')]);
+  assert(pRow,'player row exists in Cloudflare frame');
+  assert.equal(pRow[idxOf('maxHp')],200);
+  assert(pRow[idxOf('pShield')]>0 && pRow[idxOf('pShieldUntil')]>b.clock);
+  const restored=new RoomEngine({...options,cheater:false},new Map(Object.entries(engine.checkpoint()))).battle;
+  assert.equal(restored.player.baseHp,200);
+  assert.equal(restored.player.maxHp,200);
+  assert(Math.abs(restored.player.pShield-p.pShield)<1e-6);
+
+  // 5. 3D drawCrew renders hexagonal personal shield dome cleanly.
+  const packBuf=new Float32Array(STRIDE);
+  let shieldPrims=0;
+  const r={
+    lite:false,
+    add(shape,x,y,z,w,h,d,tint,kind=0,opts={}){
+      packInstance(packBuf,0,x,y,z,w,h,d,tint,kind,opts,0,true);
+      if (shape==='curtain' && kind===16) shieldPrims++;
+    },
+    beam(a,c,w,d,tint,kind=0,opts={}){Renderer.prototype.beam.call(this,a,c,w,d,tint,kind,opts);}
+  };
+  drawCrew(r,p,b.clock);
+  assert(shieldPrims>=6,'active personal shield renders luminous 3D hexagonal barrier ('+shieldPrims+' panels)');
+
+  // 6. Shield expires after duration and becomes ready again after cooldown; respawn keeps 200 HP.
+  b.clock=p.pShieldUntil+.1;
+  b.abilities.updateActor(p,.05);
+  assert.equal(p.pShield,0);
+  b.clock=p.pShieldReady+.1;
+  assert.equal(b.abilities.canDeployShield(p),true);
+  p.down=.02;
+  p.hp=0;
+  b.update(.05,still,view);
+  assert.equal(p.down,0);
+  assert.equal(p.hp,200);
+  assert.equal(p.maxHp,200);
 });

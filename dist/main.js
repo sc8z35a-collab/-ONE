@@ -20,6 +20,7 @@ import {TRAIN_DOORS} from './train-model.js';
 import {BOSS_BODY_HEIGHT} from './boss-model.js';
 import {StageObjects} from './stage-objects.js';
 import {SURFACE_SIZES} from './surfaces.js';
+import {PLAYER_SHIELD_COOLDOWN,PLAYER_SHIELD_HP} from './abilities.js';
 
 const $ = id => document.getElementById(id);
 const setText=(id,text)=>{
@@ -50,7 +51,7 @@ let usingTouch=matchMedia('(pointer: coarse)').matches;
 let mute=true, audio, noise, jumpQueued=false, shotQueued=false, desktopFire=false, rotationGate=false, hadPointerLock=false;
 let viewActor=null, viewZone=-1, viewHeight=0, viewX=0, viewZ=0, watchPitch=0, cameraReach=1, watchAerial=true;
 let focus=null, fpsTime=0, film=null;
-let superQueued=false, droneQueued=false, useQueued=false, subQueued=false, coQueued=false, demoTrain;
+let superQueued=false, droneQueued=false, useQueued=false, subQueued=false, coQueued=false, shieldQueued=false, demoTrain;
 let remote=null, connecting=null, accessCode='', cloudCheck=null, cloud=null;
 let sceneData, graphicsLost=false, graphicsTimeout=0;
 let renderedWidth=0, renderedHeight=0;
@@ -276,7 +277,7 @@ function showHit(kill) {
 function clearControls() {
   keys.clear();
   desktopFire=false;
-  jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=false;
+  jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=coQueued=shieldQueued=false;
   touch.clear();
   battle?.clearPlayerInput();
 }
@@ -301,9 +302,9 @@ function aimMove(dx,dy,isTouch=false) {
 function getInput() {
   const x=touch.x+(keys.has('KeyD')||keys.has('ArrowRight')?1:0)-(keys.has('KeyA')||keys.has('ArrowLeft')?1:0);
   const z=touch.z+(keys.has('KeyW')||keys.has('ArrowUp')?1:0)-(keys.has('KeyS')||keys.has('ArrowDown')?1:0);
-  const jump=jumpQueued, press=shotQueued, superMove=superQueued, drone=droneQueued, use=useQueued, subMove=subQueued, co=coQueued;
-  jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=coQueued=false;
-  return {x,z,yaw,pitch,press,super:superMove,drone,use,sub:subMove,co,fire:touch.fire||desktopFire||keys.has('KeyF'),
+  const jump=jumpQueued, press=shotQueued, superMove=superQueued, drone=droneQueued, use=useQueued, subMove=subQueued, co=coQueued, pshield=shieldQueued;
+  jumpQueued=shotQueued=superQueued=droneQueued=useQueued=subQueued=coQueued=shieldQueued=false;
+  return {x,z,yaw,pitch,press,super:superMove,drone,use,sub:subMove,co,pshield,fire:touch.fire||desktopFire||keys.has('KeyF'),
     swim:touch.swim||keys.has('ShiftLeft')||keys.has('ShiftRight'),jump,overview:watchAerial,eye:battle?.player?camera?.eye:null};
 }
 
@@ -436,6 +437,8 @@ function guide() {
     <dt>ローラー・サブ</dt><dd>ローラーは短押しで振り、長押ししながら前進すると転がして塗れます。ジャンプ中に押すと空中でインクを振り飛ばします。メインとは別にサブを1つ選択。画面左上のサブボタンかGで使います。敵の時限ボムの輪からは離れましょう。</dd>
     <dt>外周街区・高架道路</dt><dd>街区は中心から半径500mです。中央通りから外周道路へ歩いて探索できます。高架道路の上り口は南側の ROUTE 07 標識が目印です。</dd>
     <dt>列車</dt><dd>高架線は街をぐるりと一周する環状線で、地上西駅→地上東駅→東のカーブ→南側の高架→西のカーブ→地上西駅の順に一方向へ走ります。B1の地下鉄は地下西駅と地下東駅を往復します。停車中に乗車ボタンかR、または開いた扉へ歩いて乗れます。車内では移動・射撃・塗りができ、停車駅で降車ボタンか扉へ歩いて降ります。乗降しても視点の向きは維持されます。広いB1へは街の4か所の階段からも歩いて降りられます。</dd>
+    <dt>プレイヤー専用強化・シールド展開</dt><dd>プレイヤーのみ基本体力が2倍（HP 200）になり、武器に関係なくいつでも専用シールドを展開できます（Vキーまたは画面左上のシールドボタン）。展開中は耐久240の光の障壁が被ダメージの90%を吸収します（持続9秒・クールダウン12秒）。またプレイヤー限定で最強武器「オート英馬 II SUPER」（9発超追尾連射・インク容量1.2倍・超低燃費）が開放されています。</dd>
+    <dt>上位存在・破壊神ゴート</dt><dd>試合開始95秒後から上位存在「破壊神ゴート」が降臨し、倒されるまで消滅せず出現し続けます。4段階の形態変化（降臨・激昂・破滅・神域超越）と全8種の破滅攻撃（虚空破滅光線・終末流星群・特異点崩壊・神罰雷撃・次元震ノヴァ・叩きつけ・回転嵐・追尾弾幕）を繰り出します。</dd>
     <dt>スーパー・ドローン</dt><dd>塗りと攻撃でスーパーがたまると、画面左上のボタンで発動できます。武器ごとに技が異なります。ドローンは1人1機で、塗りを広げながら、見えている敵へ1秒に1発の追従インク弾を撃ちます。召喚から60秒で再使用できます。</dd>
     <dt>新しい武器とスーパー</dt><dd>RD II QUATRO＋は5発の重弾を高速連射する武器で、圧倒的な火力と広い塗り範囲、高い機動力を備えます。TDは前方の扇形を一気に塗って敵を吹き飛ばす衝撃砲。OM Bombは弾が敵を追従する強化、OM BOMB IIはその2連発版（1発の攻撃は半分、塗りは2倍）、ebotは体力60・塗りと攻撃が半分の分身を2体呼びます。</dd>
     <dt>SW OUT / SW OUT II</dt><dd>1回で2発撃つ拳銃。照準が敵をロックしているときに撃つと、弾が敵をある程度追いかけます。SW OUTは追従が働く射撃だけインクを2倍使い、攻撃力は通常の半分。プレイヤー専用のSW OUT IIは追従中も消費が増えず、基本消費4割減・弾速1.3倍・追従力と範囲と射程1.5倍。COモード（CキーかCOボタン）では発射間隔が2倍になる代わりに追従力がさらに2倍になります。</dd>
@@ -447,7 +450,7 @@ function guide() {
     <dt>動的ステージ制御</dt><dd>対戦中に地形の昇降、高架道路の降下、ステージへ伸びる線路と特級列車の突入、地上とB1を繋ぐ大穴、移動するビル、競り上がる壁などダイナミックなギミックが発動します。</dd>
     <dt>タイムレスバトル</dt><dd>時間無制限の4対4。最初の襲撃は80秒後で、以降118秒ごとにオクトパスゼイアン4体が現れます。</dd>
     <dt>7分のナワバリ戦</dt><dd>開始3分でオオモノイカが乱入し、空が赤黒く染まり黒い雨と黒インクが降り注ぎ（地下B1へも浸透・蓄積）、倒されずに生き残るとボスの塗り面積も含めて勝敗が決まります。</dd>
-    <dt>PC</dt><dd>WASD、マウス、左クリックまたはFで射撃、Shiftで潜る、Spaceでジャンプ、Gでサブ、Qでスーパー、Eでドローン、CでSW OUT IIのCOモード。</dd>
+    <dt>PC</dt><dd>WASD、マウス、左クリックまたはFで射撃、Shiftで潜る、Spaceでジャンプ、Gでサブ、Qでスーパー、Eでドローン、Vでシールド展開、CでSW OUT IIのCOモード。</dd>
   </dl>`;
   content.append(settings());
   showDialog('guide','操作ガイド',content,[button('閉じる','primary',()=>{
@@ -1248,7 +1251,7 @@ function updateWeaponHud(weapon) {
   label.textContent=weapon.name;
   $('charge-track').hidden=!weapon.charge;
   $('fire-caption').textContent=weapon.roller?'振る・転がす':weapon.charge?'溜め撃ち':'撃つ';
-  $('reticle').classList.toggle('wide',weapon.id==='fan' || weapon.id==='autoeima');
+  $('reticle').classList.toggle('wide',weapon.id==='fan' || weapon.id==='autoeima' || weapon.id==='autoeima2super');
   $('reticle').classList.toggle('charged',!!weapon.charge);
 }
 
@@ -1274,6 +1277,18 @@ function updateAbilities(p) {
     p.swimming?'潜水解除で使用':p.airborne && !['throw','see'].includes(sub.id)?'着地して使う':'準備OK');
   subButton.disabled=!battle.subweapons.canUse(p);
   subButton.classList.toggle('ready',!subButton.disabled);
+  const shieldButton=$('shield-action');
+  if (shieldButton) {
+    const sActive=p.pShield>0 && (p.pShieldUntil??0)>battle.clock?Math.ceil(p.pShieldUntil-battle.clock):0;
+    const sWait=Math.max(0,Math.ceil((p.pShieldReady??0)-battle.clock));
+    const sReady=battle.abilities.canDeployShield(p);
+    setText('shield-state',sActive>0?'展開 '+sActive+'秒 · '+Math.ceil(p.pShield):sWait>0?sWait+'秒':'準備OK');
+    const sPct=sActive>0?clamp(p.pShield/PLAYER_SHIELD_HP*100,0,100):sWait>0?clamp((1-sWait/PLAYER_SHIELD_COOLDOWN)*100,0,100):100;
+    $('shield-bar').style.width=sPct+'%';
+    shieldButton.disabled=!sReady;
+    shieldButton.classList.toggle('ready',sReady);
+    shieldButton.classList.toggle('active',sActive>0);
+  }
   const coButton=$('co-action'), hasCo=!!p.weapon?.coMode;
   if (coButton.hidden===!!hasCo) coButton.hidden=!hasCo;
   if (hasCo) {
@@ -1348,7 +1363,7 @@ function updateHud() {
   }
   if (showGoat) {
     setText('boss-name',goat.name);
-    $('boss-phase').textContent=goat.phase===3?'破滅':goat.phase===2?'激昂':'降臨';
+    $('boss-phase').textContent=goat.phase===4?'上位存在 · 神域超越':goat.phase===3?'上位存在 · 破滅':goat.phase===2?'上位存在 · 激昂':'上位存在 · 降臨';
     const ratio=clamp(goat.hp/goat.maxHp,0,1);
     $('boss-pct').textContent=Math.ceil(ratio*100)+'%';
     $('boss-bar').style.transform='scaleX('+ratio+')';
@@ -1393,7 +1408,13 @@ function updateHud() {
     $('ink-next-shot').style.height=Math.min(ratio,readout.cost)*100+'%';
     $('player-meter').classList.toggle('giga',giga);
     $('ink-bar').style.transform='scaleY('+ratio+')';
-    $('hp-bar').style.transform='scaleX('+p.hp/p.maxHp+')';
+    $('hp-bar').style.transform='scaleX('+clamp(p.hp/Math.max(1,p.maxHp),0,1)+')';
+    const hpNode=$('hp-readout');
+    if (hpNode) {
+      const shieldActive=p.pShield>0 && (p.pShieldUntil??0)>battle.clock;
+      setText(hpNode,'HP '+Math.ceil(p.hp)+'/'+Math.round(p.maxHp)+(shieldActive?' + 🛡'+Math.ceil(p.pShield):''));
+      hpNode.classList.toggle('shielded',shieldActive);
+    }
     updateWeaponHud(p.weapon);
     updateAbilities(p);
     const floor=world.support(p.x,p.y,p.z);
@@ -1795,7 +1816,7 @@ function frame(now) {
     for (const actor of demoActors) drawCrew(renderer,actor,activeClock);
   }
   renderer.setMood?.({
-    bossActive:!!battle?.boss?.active && !battle?.timeless,
+    bossActive:(!!battle?.boss?.active && !battle?.timeless) || !!battle?.hazards?.goat?.active,
     raining:!!battle?.hazards?.rain?.active,
     dt
   });
@@ -1879,10 +1900,11 @@ for (const [id,action] of [
   ['super-action',()=>{superQueued=true;}],
   ['drone-action',()=>{droneQueued=true;}],
   ['sub-action',()=>{subQueued=true;}],
+  ['shield-action',()=>{shieldQueued=true;}],
   ['co-action',()=>{coQueued=true;}],
   ['transit-action',()=>{useQueued=true;}]
 ]) {
-  $(id).addEventListener('click',()=>{
+  $(id)?.addEventListener('click',()=>{
     if (canControl()) action();
   });
 }
@@ -1956,6 +1978,7 @@ document.addEventListener('keydown',event=>{
     if (event.code==='KeyQ') superQueued=true;
     if (event.code==='KeyE') droneQueued=true;
     if (event.code==='KeyG') subQueued=true;
+    if (event.code==='KeyV') shieldQueued=true;
     if (event.code==='KeyC') coQueued=true;
     if (event.code==='KeyR' || event.code==='Enter' || event.code==='NumpadEnter') useQueued=true;
     if (event.code==='KeyB') loadout(true);
