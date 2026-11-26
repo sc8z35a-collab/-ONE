@@ -127,10 +127,16 @@ test('ULTRA raytracing quality mode, SwRenderer compatibility & all 23 GLSL shad
     }
     assert.equal(b,0,name+' unclosed braces');
     assert.equal(p,0,name+' unclosed parens');
+    const uniforms=new Set();
     for (const line of src.split('\n')) {
       if (/^\s*#(if|ifdef|ifndef)\b/.test(line)) cond++;
       else if (/^\s*#endif\b/.test(line)) cond--;
       assert(cond>=0,name+' extra #endif');
+      const u=line.match(/^\s*uniform\s+(?:(?:highp|mediump|lowp)\s+)?\w+\s+(\w+)\s*;/);
+      if (u) {
+        assert(!uniforms.has(u[1]),name+' duplicate uniform '+u[1]);
+        uniforms.add(u[1]);
+      }
     }
     assert.equal(cond,0,name+' unclosed #if');
   }
