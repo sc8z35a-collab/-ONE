@@ -32,6 +32,26 @@ const UNDER_HALF_X=UNDER_BOUNDS[0], UNDER_HALF_Z=UNDER_BOUNDS[1];
 const H_MIN=1e-5;
 const clamp=(v,lo,hi)=>v<lo?lo:v>hi?hi:v;
 
+// Precomputed 2048-entry LUT for 1 / Math.pow(effH, 1.3333) over [0.015, 4.8]
+// (replaces expensive Math.pow per wet cell with <1e-5 relative error).
+const POW43_MIN=0.015, POW43_MAX=4.8, POW43_N=2048;
+const POW43_SCALE=(POW43_N-1)/(POW43_MAX-POW43_MIN);
+const INV_POW43_LUT=new Float32Array(POW43_N);
+for (let i=0;i<POW43_N;i++) {
+  const h=POW43_MIN+(i/(POW43_N-1))*(POW43_MAX-POW43_MIN);
+  INV_POW43_LUT[i]=1/Math.pow(h,1.3333);
+}
+function invPow43(h) {
+  if (h<=POW43_MIN) return INV_POW43_LUT[0];
+  if (h>=POW43_MAX) return INV_POW43_LUT[POW43_N-1];
+  const f=(h-POW43_MIN)*POW43_SCALE;
+  const idx=f|0;
+  const v0=INV_POW43_LUT[idx];
+  return v0+(INV_POW43_LUT[idx+1]-v0)*(f-idx);
+}
+
+const _projFluidOut={breakup:false,drop:null,weber:0,reynolds:0,gamma:0};
+
 function rainTerminalVelocity(diameterM,media) {
   const Cd=0.52;
   const num=4*GRAVITY*diameterM*Math.max(100,media.density-AIR_DENSITY);
@@ -60,6 +80,14 @@ class ShallowGrid {
     this.shelter=new Float32Array(this.count);
     this.fx=new Float32Array(this.count);
     this.fz=new Float32Array(this.count);
+    // 3-buffer active-row frontier for O(active) shallow-water stepping + zero-copy ping-pong swaps.
+    this.rowActive=new Uint8Array(this.nz);
+    this.nextRowActive=new Uint8Array(this.nz);
+    this.backRowDirty=new Uint8Array(this.nz);
+    this.hasActivity=false;
+    this.openSkyIdx=null;
+    this.openSkyExp=null;
+    this.openSkyRowMask=new Uint8Array(this.nz);
     this.totalWaterVolume=0;
     this.totalBossVolume=0;
     this.maxDepth=0;
@@ -71,6 +99,10 @@ class ShallowGrid {
 
   initTopography(world) {
     const baseFloor=this.zoneIndex===1?UNDER_Y:0;
+    const homes=this.zoneIndex===0?world?.homes:null;
+    const hasFloor=!!world?.floor;
+    const hasCeiling=!!world?.ceiling;
+    const openIdx=[], openExp=[];
     for (let iz=0;iz<this.nz;iz++) {
       const wz=-this.halfZ+(iz+.5)*DX;
       for (let ix=0;ix<this.nx;ix++) {
@@ -79,25 +111,27 @@ class ShallowGrid {
         const idx=iz*this.nx+ix;
         let bed=0;
         let openSky=this.zoneIndex===0?1:0;
-        if (world?.floor) {
+        if (hasFloor) {
           const fl=world.floor(wx,wz,baseFloor+3);
           if (fl && Number.isFinite(fl.y)) bed=fl.y-baseFloor;
         }
         // Subtle street crown (center road slightly lower toward curb/drains) so sheet runoff feeds drains.
         if (this.zoneIndex===0) {
-          const roadSlope=Math.abs(wz)<11?.04*(1-Math.abs(wz)/11):0;
+          const awz=wz<0?-wz:wz;
+          const roadSlope=awz<11?.04*(1-awz/11):0;
           bed-=roadSlope;
           const st=stairAt(wx,wz,1.2);
           if (st) {
             bed=Math.min(bed,-0.32-st.t*0.14);
             openSky=.75;
           }
-          if (world?.ceiling) {
+          if (hasCeiling) {
             const ceil=world.ceiling(wx,wz,baseFloor+2.5);
             if (ceil && Number.isFinite(ceil.y)) openSky=0.05;
           }
-          if (world?.homes) {
-            for (const h of world.homes) {
+          if (homes) {
+            for (let hi=0;hi<homes.length;hi++) {
+              const h=homes[hi];
               if (wx>=h.x0 && wx<=h.x1 && wz>=h.z0 && wz<=h.z1) {openSky=0; break;}
             }
           }
@@ -107,8 +141,31 @@ class ShallowGrid {
         }
         this.bed[idx]=clamp(bed,-3.2,8.5);
         this.shelter[idx]=openSky;
+        if (openSky>0.02) {
+          openIdx.push(idx);
+          openExp.push(openSky);
+          this.openSkyRowMask[iz]=1;
+        }
       }
     }
+    this.openSkyIdx=Int32Array.from(openIdx);
+    this.openSkyExp=Float32Array.from(openExp);
+  }
+
+  markRow(iz) {
+    this.rowActive[iz]=1;
+    this.hasActivity=true;
+  }
+
+  markAllOpenSkyActive() {
+    const mask=this.openSkyRowMask, ra=this.rowActive;
+    for (let iz=0;iz<this.nz;iz++) if (mask[iz]) ra[iz]=1;
+    if (this.openSkyIdx.length) this.hasActivity=true;
+  }
+
+  markAllActive() {
+    this.rowActive.fill(1);
+    this.hasActivity=true;
   }
 
   reset() {
@@ -122,6 +179,10 @@ class ShallowGrid {
     this.nuz.fill(0);
     this.fx.fill(0);
     this.fz.fill(0);
+    this.rowActive.fill(0);
+    this.nextRowActive.fill(0);
+    this.backRowDirty.fill(0);
+    this.hasActivity=false;
     this.totalWaterVolume=0;
     this.totalBossVolume=0;
     this.maxDepth=0;
@@ -144,33 +205,47 @@ class ShallowGrid {
     const maxX=clamp(Math.floor((lx+radius+this.halfX)*INV_DX),0,this.nx-1);
     const minZ=clamp(Math.floor((wz-radius+this.halfZ)*INV_DX),0,this.nz-1);
     const maxZ=clamp(Math.floor((wz+radius+this.halfZ)*INV_DX),0,this.nz-1);
-    const r2=Math.max(radius*radius,DX*DX*.5);
+    const r2=Math.max(radius*radius,DX*DX*.5), invR2=1/(r2*1.05);
     let weightSum=0;
     for (let iz=minZ;iz<=maxZ;iz++) {
-      const cz=-this.halfZ+(iz+.5)*DX-wz;
+      const cz=-this.halfZ+(iz+.5)*DX-wz, cz2=cz*cz;
       for (let ix=minX;ix<=maxX;ix++) {
         const cx=-this.halfX+(ix+.5)*DX-lx;
-        const d2=cx*cx+cz*cz;
-        if (d2<=r2) weightSum+=1-d2/(r2*1.05);
+        const d2=cx*cx+cz2;
+        if (d2<=r2) weightSum+=1-d2*invR2;
       }
     }
     if (weightSum<=0) return;
-    const cellArea=DX*DX;
+    const invWeightSum=1/weightSum;
+    const cellArea=DX*DX, invCellArea=1/cellArea;
+    const wScale=waterVol*invCellArea*invWeightSum, bScale=bossVol*invCellArea*invWeightSum;
+    const ixScale=impX*invWeightSum, izScale=impZ*invWeightSum;
+    const hasImp=impX!==0 || impZ!==0;
+    const hWater=this.hWater, hBoss=this.hBoss, fx=this.fx, fz=this.fz, nx=this.nx;
     for (let iz=minZ;iz<=maxZ;iz++) {
-      const cz=-this.halfZ+(iz+.5)*DX-wz;
+      const cz=-this.halfZ+(iz+.5)*DX-wz, cz2=cz*cz, row=iz*nx;
+      let touched=false;
       for (let ix=minX;ix<=maxX;ix++) {
         const cx=-this.halfX+(ix+.5)*DX-lx;
-        const d2=cx*cx+cz*cz;
+        const d2=cx*cx+cz2;
         if (d2>r2) continue;
-        const w=(1-d2/(r2*1.05))/weightSum;
-        const idx=iz*this.nx+ix;
-        if (waterVol>0) this.hWater[idx]=Math.min(4.5,this.hWater[idx]+(waterVol*w)/cellArea);
-        if (bossVol>0) this.hBoss[idx]=Math.min(4.5,this.hBoss[idx]+(bossVol*w)/cellArea);
-        if (impX || impZ) {
-          this.fx[idx]+=impX*w;
-          this.fz[idx]+=impZ*w;
+        const w=1-d2*invR2;
+        const idx=row+ix;
+        if (waterVol>0) {
+          const nv=hWater[idx]+wScale*w;
+          hWater[idx]=nv>4.5?4.5:nv;
         }
+        if (bossVol>0) {
+          const nv=hBoss[idx]+bScale*w;
+          hBoss[idx]=nv>4.5?4.5:nv;
+        }
+        if (hasImp) {
+          fx[idx]+=ixScale*w;
+          fz[idx]+=izScale*w;
+        }
+        touched=true;
       }
+      if (touched) {this.rowActive[iz]=1;this.hasActivity=true;}
     }
   }
 
@@ -185,20 +260,11 @@ class ShallowGrid {
     };
   }
 
-  // One conservative finite-volume Rusanov shallow-water step over active wet cells.
+  // One conservative finite-volume Rusanov shallow-water step over active wet rows
+  // with zero-copy ping-pong buffers and LUT Manning bed drag.
   step(dt) {
     if (dt<=0) return;
-    const {nx,nz,hWater,hBoss,ux,uz,nhWater,nhBoss,nux,nuz,bed,fx,fz}=this;
-    const cellArea=DX*DX;
-    // Skip work cleanly when domain is essentially dry.
-    let anyActive=false;
-    for (let i=0;i<this.count;i++) {
-      if (hWater[i]+hBoss[i]>1e-4 || Math.abs(fx[i])>1e-4 || Math.abs(fz[i])>1e-4) {
-        anyActive=true;
-        break;
-      }
-    }
-    if (!anyActive) {
+    if (!this.hasActivity) {
       this.totalWaterVolume=0;
       this.totalBossVolume=0;
       this.maxDepth=0;
@@ -207,88 +273,115 @@ class ShallowGrid {
       this.meanWaterDepth=0;
       return;
     }
-
-    const alpha=clamp(dt*INV_DX,0,0.06);
-    let sumW=0, sumB=0, maxD=0, maxU=0;
-    const nuVisc=0.14;
+    const nx=this.nx, nz=this.nz;
+    const hWater=this.hWater, hBoss=this.hBoss, ux=this.ux, uz=this.uz;
+    const nhWater=this.nhWater, nhBoss=this.nhBoss, nux=this.nux, nuz=this.nuz;
+    const bed=this.bed, fx=this.fx, fz=this.fz;
+    const rowActive=this.rowActive, nextRowActive=this.nextRowActive, backRowDirty=this.backRowDirty;
+    const cellArea=DX*DX;
+    const alpha=dt*INV_DX>0.06?0.06:dt*INV_DX;
+    const halfInvDx=0.5*INV_DX;
+    const dtG=dt*GRAVITY, dtVisc=dt*0.14;
+    const waterManning=FLUID_MEDIA.water.manning;
+    const diffManning=FLUID_MEDIA.boss.manning-waterManning;
+    const dtEvap=dt*(this.zoneIndex===0?0.00045:0.00018);
+    const dtEvapBoss=dtEvap*0.45;
+    const dtYield=0.55*dt;
+    let sumW=0, sumB=0, maxD=0, maxU2=0, nextAny=false;
 
     for (let iz=0;iz<nz;iz++) {
-      const iS=iz>0?(iz-1)*nx:iz*nx;
-      const iN=iz<nz-1?(iz+1)*nx:iz*nx;
       const row=iz*nx;
+      const run=rowActive[iz] || (iz>0 && rowActive[iz-1]) || (iz<nz-1 && rowActive[iz+1]);
+      if (!run) {
+        if (backRowDirty[iz]) {
+          const end=row+nx;
+          nhWater.fill(0,row,end);
+          nhBoss.fill(0,row,end);
+          nux.fill(0,row,end);
+          nuz.fill(0,row,end);
+        }
+        nextRowActive[iz]=0;
+        continue;
+      }
+      const iS=iz>0?row-nx:row;
+      const iN=iz<nz-1?row+nx:row;
+      let rowWet=0;
+      let hw=hWater[row], hb=hBoss[row], h=hw+hb, bedC=bed[row], uxC=ux[row], uzC=uz[row];
+      let hwW=hw, hbW=hb, hW=h, bedW=bedC, uxW=uxC, uzW=uzC;
       for (let ix=0;ix<nx;ix++) {
         const i=row+ix;
-        const hw=hWater[i], hb=hBoss[i], h=hw+hb;
-        const iW=ix>0?i-1:i;
         const iE=ix<nx-1?i+1:i;
-        const hwW=hWater[iW], hbW=hBoss[iW], hW=hwW+hbW;
         const hwE=hWater[iE], hbE=hBoss[iE], hE=hwE+hbE;
-        const hwS=hWater[iS+ix], hbS=hBoss[iS+ix], hS=hwS+hbS;
-        const hwN=hWater[iN+ix], hbN=hBoss[iN+ix], hN=hwN+hbN;
+        const bedE=bed[iE], uxE=ux[iE], uzE=uz[iE];
+        const iSi=iS+ix, iNi=iN+ix;
+        const hwS=hWater[iSi], hbS=hBoss[iSi], hS=hwS+hbS;
+        const hwN=hWater[iNi], hbN=hBoss[iNi], hN=hwN+hbN;
+        const fxi=fx[i], fzi=fz[i];
 
-        if (h<H_MIN && hW<H_MIN && hE<H_MIN && hS<H_MIN && hN<H_MIN && Math.abs(fx[i])+Math.abs(fz[i])<1e-4) {
+        if (h<H_MIN && hW<H_MIN && hE<H_MIN && hS<H_MIN && hN<H_MIN && (fxi<0?-fxi:fxi)+(fzi<0?-fzi:fzi)<1e-4) {
           nhWater[i]=0; nhBoss[i]=0; nux[i]=0; nuz[i]=0;
+          hwW=hw; hbW=hb; hW=h; bedW=bedC; uxW=uxC; uzW=uzC;
+          hw=hwE; hb=hbE; h=hE; bedC=bedE; uxC=uxE; uzC=uzE;
           continue;
         }
 
-        const eta=bed[i]+h, etaW=bed[iW]+hW, etaE=bed[iE]+hE, etaS=bed[iS+ix]+hS, etaN=bed[iN+ix]+hN;
+        const eta=bedC+h, etaW=bedW+hW, etaE=bedE+hE, etaS=bed[iSi]+hS, etaN=bed[iNi]+hN;
+        const gradX=(etaE-etaW)*halfInvDx;
+        const gradZ=(etaN-etaS)*halfInvDx;
 
-        // Head gradients drive velocity (hydrostatic + bed slope = -g * grad(eta)).
-        const gradX=(etaE-etaW)*0.5*INV_DX;
-        const gradZ=(etaN-etaS)*0.5*INV_DX;
+        const noBoss=(hb+hbW+hbE+hbS+hbN)===0;
+        const bossShare=noBoss?0:(h>H_MIN?hb/h:0);
+        const manning=noBoss?waterManning:waterManning+diffManning*bossShare;
+        const uxi=uxC, uzi=uzC;
 
-        // Effective viscosity / Bingham yield resistance scales when boss thick ink dominates water.
-        const bossShare=h>H_MIN?hb/h:0;
-        const manning=FLUID_MEDIA.water.manning*(1-bossShare)+FLUID_MEDIA.boss.manning*bossShare;
-        const speed=Math.hypot(ux[i],uz[i]);
+        const uxS=ux[iSi], uxN=ux[iNi];
+        const uzS=uz[iSi], uzN=uz[iNi];
+        const lapUx=uxW+uxE+uxS+uxN-4*uxi;
+        const lapUz=uzW+uzE+uzS+uzN-4*uzi;
 
-        // Laplacian smoothing approximates turbulent + molecular eddy viscosity.
-        const lapUx=(ux[iW]+ux[iE]+ux[iS+ix]+ux[iN+ix]-4*ux[i]);
-        const lapUz=(uz[iW]+uz[iE]+uz[iS+ix]+uz[iN+ix]-4*uz[i]);
+        let vx=uxi-dtG*gradX+dtVisc*lapUx+fxi;
+        let vz=uzi-dtG*gradZ+dtVisc*lapUz+fzi;
 
-        let vx=ux[i]-dt*GRAVITY*gradX+dt*nuVisc*lapUx+fx[i];
-        let vz=uz[i]-dt*GRAVITY*gradZ+dt*nuVisc*lapUz+fz[i];
-
-        // Nonlinear Manning bed drag + Bingham yield threshold for viscous boss ink.
-        const effH=Math.max(0.015,h);
-        const drag=GRAVITY*manning*manning*speed/Math.pow(effH,1.3333);
-        const yieldDamp=bossShare*0.55*dt;
-        const damp=1/(1+dt*drag+yieldDamp);
-        vx=clamp(vx*damp,-24,24);
-        vz=clamp(vz*damp,-24,24);
+        const u2=uxi*uxi+uzi*uzi;
+        const drag=u2>0?GRAVITY*manning*manning*Math.sqrt(u2)*invPow43(h>0.015?h:0.015):0;
+        const damp=1/(1+dt*drag+bossShare*dtYield);
+        vx*=damp; vz*=damp;
+        if (vx<-24) vx=-24; else if (vx>24) vx=24;
+        if (vz<-24) vz=-24; else if (vz>24) vz=24;
         if (h<0.002) {vx*=0.65; vz*=0.65;}
-        if (Math.abs(vx)<1e-4) vx=0;
-        if (Math.abs(vz)<1e-4) vz=0;
+        if (vx>-1e-4 && vx<1e-4) vx=0;
+        if (vz>-1e-4 && vz<1e-4) vz=0;
 
-        // Face-centered shallow-water fluxes with upwind/Rusanov stability (guarantees h >= 0).
-        const uW=(ux[iW]+vx)*.5, uE=(vx+ux[iE])*.5;
-        const vS=(uz[iS+ix]+vz)*.5, vN=(vz+uz[iN+ix])*.5;
+        const uW=(uxW+vx)*.5, uE=(vx+uxE)*.5;
+        const vS=(uzS+vz)*.5, vN=(vz+uzN)*.5;
 
-        const waveDiff=0.14*(1-0.45*bossShare);
+        const waveDiff=noBoss?0.14:0.14*(1-0.45*bossShare);
         const fluxW=(uW>=0?hW:h)*uW-waveDiff*(eta-etaW);
         const fluxE=(uE>=0?h:hE)*uE-waveDiff*(etaE-eta);
         const fluxS=(vS>=0?hS:h)*vS-waveDiff*(eta-etaS);
         const fluxN=(vN>=0?h:hN)*vN-waveDiff*(etaN-eta);
 
-        // Species transport follows total flux direction from upwind donor cell.
-        const shareW=(uW>=0?(hW>H_MIN?hbW/hW:0):(h>H_MIN?hb/h:0));
-        const shareE=(uE>=0?(h>H_MIN?hb/h:0):(hE>H_MIN?hbE/hE:0));
-        const shareS=(vS>=0?(hS>H_MIN?hbS/hS:0):(h>H_MIN?hb/h:0));
-        const shareN=(vN>=0?(h>H_MIN?hb/h:0):(hN>H_MIN?hbN/hN:0));
-
         const divTot=alpha*((fluxE-fluxW)+(fluxN-fluxS));
-        const divBoss=alpha*((fluxE*shareE-fluxW*shareW)+(fluxN*shareN-fluxS*shareS));
-        const divWater=divTot-divBoss;
-
-        // Gentle infiltration/evaporation when film thins out.
-        const evap=this.zoneIndex===0?0.00045:0.00018;
-        let nextW=Math.max(0,hw-divWater-dt*evap);
-        let nextB=Math.max(0,hb-divBoss-dt*evap*0.45);
-        // Renormalize extreme negative step if total exceeded available cell depth.
-        const nextTot=nextW+nextB;
+        let nextW, nextB;
+        if (noBoss) {
+          nextW=hw-divTot-dtEvap;
+          if (nextW<0) nextW=0;
+          nextB=0;
+        } else {
+          const shareW=uW>=0?(hW>H_MIN?hbW/hW:0):bossShare;
+          const shareE=uE>=0?bossShare:(hE>H_MIN?hbE/hE:0);
+          const shareS=vS>=0?(hS>H_MIN?hbS/hS:0):bossShare;
+          const shareN=vN>=0?bossShare:(hN>H_MIN?hbN/hN:0);
+          const divBoss=alpha*((fluxE*shareE-fluxW*shareW)+(fluxN*shareN-fluxS*shareS));
+          nextW=hw-(divTot-divBoss)-dtEvap;
+          if (nextW<0) nextW=0;
+          nextB=hb-divBoss-dtEvapBoss;
+          if (nextB<0) nextB=0;
+        }
+        let nextTot=nextW+nextB;
         if (nextTot>4.8) {
           const s=4.8/nextTot;
-          nextW*=s; nextB*=s;
+          nextW*=s; nextB*=s; nextTot=4.8;
         }
         nhWater[i]=nextW;
         nhBoss[i]=nextB;
@@ -297,22 +390,33 @@ class ShallowGrid {
         fx[i]=0;
         fz[i]=0;
 
+        if (nextTot>H_MIN) rowWet=1;
         sumW+=nextW;
         sumB+=nextB;
         if (nextTot>maxD) maxD=nextTot;
-        const spd=Math.hypot(vx,vz);
-        if (spd>maxU) maxU=spd;
+        const spd2=vx*vx+vz*vz;
+        if (spd2>maxU2) maxU2=spd2;
+
+        hwW=hw; hbW=hb; hW=h; bedW=bedC; uxW=uxC; uzW=uzC;
+        hw=hwE; hb=hbE; h=hE; bedC=bedE; uxC=uxE; uzC=uzE;
       }
+      nextRowActive[iz]=rowWet;
+      if (rowWet) nextAny=true;
     }
 
-    this.hWater.set(nhWater);
-    this.hBoss.set(nhBoss);
-    this.ux.set(nux);
-    this.uz.set(nuz);
+    // Zero-copy ping-pong reference swap (eliminates 4x Float32Array.set copies).
+    this.hWater=nhWater; this.nhWater=hWater;
+    this.hBoss=nhBoss; this.nhBoss=hBoss;
+    this.ux=nux; this.nux=ux;
+    this.uz=nuz; this.nuz=uz;
+    this.backRowDirty=rowActive;
+    this.rowActive=nextRowActive;
+    this.nextRowActive=backRowDirty;
+    this.hasActivity=nextAny;
     this.totalWaterVolume=sumW*cellArea;
     this.totalBossVolume=sumB*cellArea;
     this.maxDepth=maxD;
-    this.maxSpeed=maxU;
+    this.maxSpeed=maxU2>0?Math.sqrt(maxU2):0;
     this.meanWaterDepth=sumW/this.count;
     this.meanBossDepth=sumB/this.count;
   }
@@ -324,6 +428,47 @@ export class FluidEngine {
     this.paint=paint;
     this.surface=new ShallowGrid(0,SURF_HALF_X,SURF_HALF_Z,0,world);
     this.underground=new ShallowGrid(UNDER_X,UNDER_HALF_X,UNDER_HALF_Z,1,world);
+    // Precompute exact storm-drain surface/underground indices and B1 radial injection kernels.
+    this._drains=[];
+    const cellArea=DX*DX;
+    for (let i=0;i<STORM_DRAINS.length;i++) {
+      const drain=STORM_DRAINS[i];
+      const sIdx=this.surface.indexAtWorld(drain.sx,drain.sz);
+      const uIdx=this.underground.indexAtWorld(drain.ux,drain.uz);
+      if (sIdx<0 || uIdx<0) continue;
+      const g=this.underground, radius=drain.radius+1.2;
+      const lx=drain.ux-g.originX;
+      const minX=clamp(Math.floor((lx-radius+g.halfX)*INV_DX),0,g.nx-1);
+      const maxX=clamp(Math.floor((lx+radius+g.halfX)*INV_DX),0,g.nx-1);
+      const minZ=clamp(Math.floor((drain.uz-radius+g.halfZ)*INV_DX),0,g.nz-1);
+      const maxZ=clamp(Math.floor((drain.uz+radius+g.halfZ)*INV_DX),0,g.nz-1);
+      const r2=Math.max(radius*radius,DX*DX*.5), invR2=1/(r2*1.05);
+      const cells=[], weights=[], rows=new Set();
+      let wSum=0;
+      for (let iz=minZ;iz<=maxZ;iz++) {
+        const cz=-g.halfZ+(iz+.5)*DX-drain.uz;
+        for (let ix=minX;ix<=maxX;ix++) {
+          const cx=-g.halfX+(ix+.5)*DX-lx;
+          const d2=cx*cx+cz*cz;
+          if (d2<=r2) {
+            const w=1-d2*invR2;
+            cells.push(iz*g.nx+ix);
+            weights.push(w);
+            rows.add(iz);
+            wSum+=w;
+          }
+        }
+      }
+      const invSum=wSum>0?1/wSum:0;
+      this._drains.push({
+        sIdx, uIdx, cdArea:drain.cd*drain.area,
+        chuteDir:drain.kind==='stair'?(drain.sx<0?1:-1)*2.4:0,
+        cells:Int32Array.from(cells),
+        normW:Float32Array.from(weights,w=>w*invSum),
+        areaW:Float32Array.from(weights,w=>(w*invSum)/cellArea),
+        rows:Int32Array.from(rows)
+      });
+    }
     this.clock=0;
     this.bossRainRate=0;
     this.weatherRainRate=0;
@@ -376,17 +521,17 @@ export class FluidEngine {
     const rate=0.0115; // m/s scaled real-time rainfall intensity for dynamic puddles
     this.weatherRainRate=rate;
     const cellArea=DX*DX;
-    // Stratified rainfall addition onto open-sky surface cells + aerodynamic wind shear.
-    const windX=1.35, windZ=0.45;
-    for (let i=0;i<g.count;i++) {
-      const exp=g.shelter[i];
-      if (exp<=0.02) continue;
-      const dh=rate*exp*dt;
-      g.hWater[i]=Math.min(3.5,g.hWater[i]+dh);
-      // Rain impact imparts slight tangential shear toward slope/wind.
-      g.fx[i]+=windX*0.18*exp*dt;
-      g.fz[i]+=windZ*0.18*exp*dt;
+    // Stratified rainfall addition onto precomputed open-sky surface cells + aerodynamic wind shear.
+    const rateDt=rate*dt, fxDt=1.35*0.18*dt, fzDt=0.45*0.18*dt;
+    const idxs=g.openSkyIdx, exps=g.openSkyExp, hWater=g.hWater, fx=g.fx, fz=g.fz;
+    for (let k=0,n=idxs.length;k<n;k++) {
+      const i=idxs[k], exp=exps[k];
+      const nv=hWater[i]+rateDt*exp;
+      hWater[i]=nv>3.5?3.5:nv;
+      fx[i]+=fxDt*exp;
+      fz[i]+=fzDt*exp;
     }
+    g.markAllOpenSkyActive();
     // Dynamic rain wash driven by sheet depth + terminal impact kinetic stress (leaves Zone 1 dry).
     if (paint) {
       const kineticScale=clamp(0.45+g.meanWaterDepth*4.5+g.maxSpeed*0.03,0.45,1.85);
@@ -406,27 +551,27 @@ export class FluidEngine {
       return;
     }
     const g=this.surface;
-    // Continuous black precipitation intensity scales slightly with boss phase (phase 1..3).
     const phaseBoost=1+0.22*Math.max(0,(boss.phase??1)-1);
     const bossRainDepthRate=0.0165*phaseBoost;
     this.bossRainRate=bossRainDepthRate;
 
-    for (let i=0;i<g.count;i++) {
-      const exp=g.shelter[i];
-      if (exp<=0.02) continue;
-      const addH=bossRainDepthRate*exp*dt;
-      g.hBoss[i]=Math.min(4.2,g.hBoss[i]+addH);
+    const addDt=bossRainDepthRate*dt;
+    const idxs=g.openSkyIdx, exps=g.openSkyExp, hBoss=g.hBoss;
+    for (let k=0,n=idxs.length;k<n;k++) {
+      const i=idxs[k];
+      const nv=hBoss[i]+addDt*exps[k];
+      hBoss[i]=nv>4.2?4.2:nv;
     }
+    g.markAllOpenSkyActive();
 
-    // Direct raindrop impact splatters onto paint surface (both Zone 0 open ground & elevated decks)
-    // and accumulates kinetic boss droplets across roofs, streets, and destructible objects.
     this._bossAccum+=dt*phaseBoost;
     if (paint && this._bossAccum>=0.045) {
       const drops=Math.min(18,Math.max(4,Math.floor(this._bossAccum/0.022)));
       this._bossAccum=0;
       const bw=BOUNDS[0]-1.5, bd=BOUNDS[1]-1.5;
+      const stage=battle.stage, world=battle.world;
+      const strikeInkRain=stage?.destruction?.strikeInkRain;
       for (let k=0;k<drops;k++) {
-        // Golden-ratio quasi-random coverage across surface arena + deterministic rng jitter.
         this._rainCursor=(this._rainCursor+0.61803398875)%1;
         const u1=this._rainCursor;
         const u2=((this._rainCursor*7.131+k*0.381966)%1);
@@ -434,14 +579,13 @@ export class FluidEngine {
         const rz=(u2*2-1)*bd;
         const idx=g.indexAtWorld(rx,rz);
         if (idx>=0 && g.shelter[idx]<0.12) continue;
-        const layer=Math.abs(rz)<11.5 && Math.abs(rx)<24?0:Math.abs(rx)<51 && (Math.abs(rz)<33)?0:1;
-        // Paint black ink (team = 2 -> owner = 3).
         paint.stamp(rx,rz,1.25+0.45*phaseBoost,2,0,this.clock*2+k,.042*phaseBoost);
-        if (Math.abs(rx)>12 && Math.abs(rx)<48 && Math.abs(rz)<18 && k%3===0) {
+        const arx=rx<0?-rx:rx, arz=rz<0?-rz:rz;
+        if (arx>12 && arx<48 && arz<18 && k%3===0) {
           paint.stamp(rx,rz,1.05,2,1,this.clock+k,.034);
         }
-        // Ink bombardment weight also stresses exposed destructible objects/buildings on the surface.
-        battle.stage?.strikeAt?.(rx,battle.world?.floor(rx,rz)?.y??0,rz,6.5*phaseBoost,2,0.55,{inkRain:true});
+        if (strikeInkRain) stage.destruction.strikeInkRain(rx,rz,6.5*phaseBoost,2);
+        else stage?.strikeAt?.(rx,world?.floorY?world.floorY(rx,rz):world?.floor(rx,rz)?.y??0,rz,6.5*phaseBoost,2,0.55,{inkRain:true});
       }
     }
   }
@@ -451,36 +595,42 @@ export class FluidEngine {
     const paint=battle?.paint;
     const surf=this.surface;
     const under=this.underground;
-    const cellArea=DX*DX;
+    const cellArea=DX*DX, invCellArea=1/cellArea;
     let totalBossFlux=0, totalWaterFlux=0;
+    const sWater=surf.hWater, sBoss=surf.hBoss;
+    const uWater=under.hWater, uBoss=under.hBoss, uFx=under.fx;
+    const drains=this._drains;
 
-    for (const drain of STORM_DRAINS) {
-      const sIdx=surf.indexAtWorld(drain.sx,drain.sz);
-      const uIdx=under.indexAtWorld(drain.ux,drain.uz);
-      if (sIdx<0 || uIdx<0) continue;
-
-      // Sample neighborhood around intake so runoff in a 2.5m catchment reaches the grate/stairwell.
-      const sx0=drain.sx, sz0=drain.sz;
-      const headH=surf.hBoss[sIdx]+surf.hWater[sIdx];
+    for (let d=0;d<drains.length;d++) {
+      const dr=drains[d];
+      const sIdx=dr.sIdx;
+      const sb=sBoss[sIdx], sw=sWater[sIdx], headH=sb+sw;
       if (headH<=0.002) continue;
 
-      // Torricelli orifice/weir discharge: Q = Cd * A * sqrt(2 * g * h_head)
-      const qMax=drain.cd*drain.area*Math.sqrt(2*GRAVITY*Math.max(0.01,headH));
+      const qMax=dr.cdArea*Math.sqrt(2*GRAVITY*(headH>0.01?headH:0.01));
       const availableVol=headH*cellArea;
       const volOut=Math.min(availableVol*0.65,qMax*dt);
       if (volOut<=1e-6) continue;
 
-      const bossFrac=surf.hBoss[sIdx]/headH;
+      const bossFrac=sb/headH;
       const dBossVol=volOut*bossFrac;
-      const dWaterVol=volOut*(1-bossFrac);
+      const dWaterVol=volOut-dBossVol;
 
-      // Conserve mass: remove from surface cell and inject radially into B1 with stair-chute momentum!
-      const dhOut=volOut/cellArea;
-      surf.hBoss[sIdx]=Math.max(0,surf.hBoss[sIdx]-dhOut*bossFrac);
-      surf.hWater[sIdx]=Math.max(0,surf.hWater[sIdx]-dhOut*(1-bossFrac));
+      const dhOut=volOut*invCellArea;
+      sBoss[sIdx]=Math.max(0,sb-dhOut*bossFrac);
+      sWater[sIdx]=Math.max(0,sw-dhOut*(1-bossFrac));
 
-      const chuteDir=drain.kind==='stair'?(drain.sx<0?1:-1)*2.4:0;
-      under.addFluidAt(drain.ux,drain.uz,drain.radius+1.2,dWaterVol,dBossVol,chuteDir*dt*4,0);
+      const cells=dr.cells, areaW=dr.areaW, normW=dr.normW;
+      const impX=dr.chuteDir*dt*4;
+      for (let k=0,n=cells.length;k<n;k++) {
+        const ci=cells[k], aw=areaW[k];
+        if (dWaterVol>0) {const nv=uWater[ci]+dWaterVol*aw; uWater[ci]=nv>4.5?4.5:nv;}
+        if (dBossVol>0) {const nv=uBoss[ci]+dBossVol*aw; uBoss[ci]=nv>4.5?4.5:nv;}
+        if (impX) uFx[ci]+=impX*normW[k];
+      }
+      const rows=dr.rows;
+      for (let r=0;r<rows.length;r++) under.rowActive[rows[r]]=1;
+      under.hasActivity=true;
       totalBossFlux+=dBossVol;
       totalWaterFlux+=dWaterVol;
     }
@@ -489,33 +639,30 @@ export class FluidEngine {
     this.cumulativePercolatedBoss+=totalBossFlux;
     this.cumulativePercolatedWater+=totalWaterFlux;
 
-    // Update rising standing B1 black ink depth & transfer settled boss fluid onto B1 Paint cells.
     const targetBossDepth=clamp(under.totalBossVolume/(UNDER_BOUNDS[0]*UNDER_BOUNDS[1]*0.42),0,2.25);
     if (battle?.boss?.active) {
       this.underBossDepth=this.underBossDepth+(targetBossDepth-this.underBossDepth)*Math.min(1,dt*2.4);
     } else {
-      // Drains slowly via storm pumps once boss is defeated.
       this.underBossDepth=Math.max(0,this.underBossDepth-dt*0.032);
     }
     this.underWaterDepth=clamp(under.totalWaterVolume/(UNDER_BOUNDS[0]*UNDER_BOUNDS[1]*0.45),0,2.7);
 
-    // Paint B1 cells wherever percolating boss black ink spreads across the B1 floor!
+    // Paint B1 cells along active wet rows only.
     if (paint && under.totalBossVolume>0.02) {
       this._paintAccum+=dt;
       if (this._paintAccum>=0.08) {
         this._paintAccum=0;
-        const nx=under.nx, nz=under.nz;
+        const nx=under.nx, nz=under.nz, ra=under.rowActive;
+        const phaseTick=Math.floor(this.clock*12);
         let stamped=0;
         for (let iz=1;iz<nz-1 && stamped<28;iz++) {
-          const z=-under.halfZ+(iz+.5)*DX;
+          if (!ra[iz]) continue;
+          const z=-under.halfZ+(iz+.5)*DX, row=iz*nx;
           for (let ix=1;ix<nx-1;ix++) {
-            const idx=iz*nx+ix;
-            const depth=under.hBoss[idx];
+            const depth=uBoss[row+ix];
             if (depth>0.0038) {
-              // Stride jitter so paint fills cleanly & quickly along the flowing front.
-              if (((ix+iz+Math.floor(this.clock*12))&1)===0 || depth>0.025) {
-                const lx=-under.halfX+(ix+.5)*DX;
-                const wx=UNDER_X+lx;
+              if (((ix+iz+phaseTick)&1)===0 || depth>0.025) {
+                const wx=UNDER_X-under.halfX+(ix+.5)*DX;
                 paint.stamp(wx,z,1.45,2,2,this.clock*2.5,Math.min(.08,0.032+depth*1.8));
                 stamped++;
                 if (stamped>=28) break;
@@ -529,7 +676,6 @@ export class FluidEngine {
 
   // Step 4: Unified Projectile / Shot Fluid Physics (aerodynamic drag, Weber droplet breakup, impact impulse).
   projectileDragGamma(weapon) {
-    // Coalesced heavy projectiles experience modest aerodynamic drag; wide/fine spray droplets experience stronger drag.
     const r=weapon?.radius??1.0;
     const pellets=weapon?.pellets??1;
     const densityScale=pellets>1?2.2:weapon?.id==='lob'?0.035:clamp(1.1/Math.max(0.4,r),0.04,0.14);
@@ -538,12 +684,12 @@ export class FluidEngine {
   }
 
   stepProjectileFluid(shot,gravity,dt,rng=Math.random) {
-    const vel=shot.vel;
-    const speed=Math.hypot(vel[0],vel[1],vel[2]);
+    const vel=shot.vel, vx=vel[0], vy=vel[1], vz=vel[2];
+    const speed2=vx*vx+vy*vy+vz*vz, speed=Math.sqrt(speed2);
     const rM=clamp((shot.weapon?.radius??1.0)*0.09,0.035,0.22);
     const media=shot.team===-1||shot.team===2?FLUID_MEDIA.boss:FLUID_MEDIA.ink;
     const Re=Math.max(1,(AIR_DENSITY*speed*(2*rM))/1.8e-5);
-    const weber=(media.density*speed*speed*(2*rM))/media.surfaceTension;
+    const weber=(media.density*speed2*(2*rM))/media.surfaceTension;
     this.meanWeberNumber=this.meanWeberNumber*0.92+weber*0.08;
 
     const gamma=shot.dragGamma??(shot.dragGamma=this.projectileDragGamma(shot.weapon));
@@ -551,21 +697,20 @@ export class FluidEngine {
     const kPos=gamma>1e-5?(1-decay)/gamma:dt;
     const termY=gamma>1e-5?gravity/gamma:0;
 
-    // Exact linear-drag ODE advance matching inverse-drag launch compensation in ballistic aiming.
-    const nvx=vel[0]*decay;
-    const nvz=vel[2]*decay;
-    const nvy=gamma>1e-5?(vel[1]+termY)*decay-termY:vel[1]-gravity*dt;
+    const nvx=vx*decay;
+    const nvz=vz*decay;
+    const nvy=gamma>1e-5?(vy+termY)*decay-termY:vy-gravity*dt;
 
-    const nx=shot.pos[0]+vel[0]*kPos;
-    const nz=shot.pos[2]+vel[2]*kPos;
+    const pos=shot.pos;
+    const nx=pos[0]+vx*kPos;
+    const nz=pos[2]+vz*kPos;
     const ny=gamma>1e-5
-      ?shot.pos[1]+(vel[1]+termY)*kPos-termY*dt
-      :shot.pos[1]+vel[1]*dt-0.5*gravity*dt*dt;
+      ?pos[1]+(vy+termY)*kPos-termY*dt
+      :pos[1]+vy*dt-0.5*gravity*dt*dt;
 
-    shot.pos[0]=nx; shot.pos[1]=ny; shot.pos[2]=nz;
+    pos[0]=nx; pos[1]=ny; pos[2]=nz;
     vel[0]=nvx; vel[1]=nvy; vel[2]=nvz;
 
-    // Bag-breakup / Kelvin-Helmholtz droplet shedding when Weber number exceeds critical threshold.
     let breakupDrop=null;
     if (weber>38000 && !shot.noBreakup && rng()<dt*8.0) {
       breakupDrop={
@@ -577,7 +722,12 @@ export class FluidEngine {
         vz:nvz*0.30+(rng()-.5)*2.2
       };
     }
-    return {breakup:!!breakupDrop,drop:breakupDrop,weber,reynolds:Re,gamma};
+    _projFluidOut.breakup=!!breakupDrop;
+    _projFluidOut.drop=breakupDrop;
+    _projFluidOut.weber=weber;
+    _projFluidOut.reynolds=Re;
+    _projFluidOut.gamma=gamma;
+    return _projFluidOut;
   }
 
   // Inject splash momentum from ink projectile impact into the ShallowGrid.
@@ -622,6 +772,7 @@ export class FluidEngine {
       const lx0=t.x-half, lx1=t.x+half;
       const minIx=clamp(Math.floor((lx0+g.halfX)*INV_DX),0,g.nx-1);
       const maxIx=clamp(Math.floor((lx1+g.halfX)*INV_DX),0,g.nx-1);
+      let anyTouched=false;
       for (let ix=minIx;ix<=maxIx;ix++) {
         const wx=-g.halfX+(ix+.5)*DX;
         const prof=this.tsunamiProfile(t,wx);
@@ -632,10 +783,13 @@ export class FluidEngine {
             const subH=Math.max(0,prof.depth-g.bed[i]);
             g.hWater[i]=Math.max(g.hWater[i],Math.min(4.2,subH*0.55));
             g.fx[i]+=(prof.ux-g.ux[i])*Math.min(1,dt*8)*0.6;
+            g.rowActive[iz]=1;
+            anyTouched=true;
           }
         }
         if (prof.pressure>peakForce) peakForce=prof.pressure;
       }
+      if (anyTouched) g.hasActivity=true;
 
       if (paint) {
         const sweep=(t.speed||12.5)*dt;
@@ -675,9 +829,12 @@ export class FluidEngine {
     if (u?.active && battle?.timeless!==true) {
       const ug=this.underground;
       const target=u.depth||0;
+      const fillH=target*0.72;
+      const uWater=ug.hWater;
       for (let i=0;i<ug.count;i++) {
-        ug.hWater[i]=Math.max(ug.hWater[i],target*0.72);
+        if (fillH>uWater[i]) uWater[i]=fillH;
       }
+      if (fillH>H_MIN) ug.markAllActive();
       if (paint && target>0.4) {
         paint.wash(4,Math.min(1,dt*(0.28+0.15*target)));
       }

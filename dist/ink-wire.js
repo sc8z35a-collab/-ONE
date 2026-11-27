@@ -134,6 +134,10 @@ export function resetVisualInk(paint,mask) {
     paint.owner.fill(0,from,to);
     paint.pixels.fill(0,from*4,to*4);
   }
+  if ((mask & 19)===19 && paint.activeBox) {
+    paint.activeBox[0]=Infinity; paint.activeBox[1]=-Infinity;
+    paint.activeBox[2]=Infinity; paint.activeBox[3]=-Infinity;
+  }
   paint.touchLayers(mask);
 }
 
@@ -153,6 +157,9 @@ function writeCell(paint,layer,px,pz,cell,value) {
   }
   paint.pixels[p+2]=Math.round((value&31)*255/31);
   paint.pixels[p+3]=value?paint.floorByte[index]:0;
+  if (value && (layer===0 || layer===1 || layer===4) && paint.expandActive) {
+    paint.expandActive((x+.5)*paint.invW-paint.boundX,(z+.5)*paint.invH-paint.boundZ,1);
+  }
   paint.touchRow(layer,z);
 }
 

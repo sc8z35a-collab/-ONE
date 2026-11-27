@@ -201,6 +201,15 @@ export class Subweapons {
   }
 
   block(from,to,team,joined=true) {
+    const items=this.items, n=items.length;
+    if (!n) return null;
+    const clock=this.battle.clock;
+    let hasCurtain=false;
+    for (let i=0;i<n;i++) {
+      const it=items[i];
+      if (it.id==='curtain' && it.owner.team!==team && it.hp>0 && it.until>clock) {hasCurtain=true;break;}
+    }
+    if (!hasCurtain) return null;
     const seam=joined && stairRay(from,to);
     if (seam) {
       const near=seam.t>0 && this.block(from,seam.point,team,false);
@@ -210,19 +219,63 @@ export class Subweapons {
       return far?{...far,t:seam.t+far.t*(1-seam.t)}:null;
     }
     let best=null;
-    const span=sub(to,from);
-    for (const item of this.items) {
-      if (item.id!=='curtain' || item.owner.team===team || item.hp<=0 || item.until<=this.battle.clock ||
-          !sameLevel(item.p[0],from[0])) continue;
-      const normal=forward(item.yaw), length=dot(span,normal);
-      if (Math.abs(length)<1e-6) continue;
-      const t=dot(sub(item.p,from),normal)/length;
+    const fx=from[0], fy=from[1], fz=from[2];
+    const sx=to[0]-fx, sy=to[1]-fy, sz=to[2]-fz;
+    for (let i=0;i<n;i++) {
+      const item=items[i];
+      if (item.id!=='curtain' || item.owner.team===team || item.hp<=0 || item.until<=clock ||
+          !sameLevel(item.p[0],fx)) continue;
+      const ny=Math.sin(item.yaw), nz=-Math.cos(item.yaw);
+      const length=sx*ny+sz*nz;
+      if (length>-1e-6 && length<1e-6) continue;
+      const ip=item.p;
+      const t=((ip[0]-fx)*ny+(ip[2]-fz)*nz)/length;
       if (t<0 || t>1 || best && t>=best.t) continue;
-      const p=add(from,scale(span,t)), height=p[1]-item.p[1];
-      if (height<-.14 || height>item.height || Math.abs(dot(sub(p,item.p),forward(item.yaw+Math.PI/2)))>item.halfWidth) continue;
-      best={t,p,item};
+      const px=fx+sx*t, py=fy+sy*t, pz=fz+sz*t, height=py-ip[1];
+      if (height<-.14 || height>item.height) continue;
+      // right = forward(yaw + PI/2) = [cos(yaw), 0, sin(yaw)] = [-nz, 0, ny]
+      const side=(px-ip[0])*(-nz)+(pz-ip[2])*ny;
+      if (side>item.halfWidth || side<-item.halfWidth) continue;
+      best={t,p:[px,py,pz],item};
     }
     return best;
+  }
+
+  blockAny(fx,fy,fz,tx,ty,tz,team,joined=true) {
+    const items=this.items, n=items.length;
+    if (!n) return false;
+    const clock=this.battle.clock;
+    let hasCurtain=false;
+    for (let i=0;i<n;i++) {
+      const it=items[i];
+      if (it.id==='curtain' && it.owner.team!==team && it.hp>0 && it.until>clock) {hasCurtain=true;break;}
+    }
+    if (!hasCurtain) return false;
+    if (joined && (fy<ty?fy:ty)<=-.97 && (fy>ty?fy:ty)>=-4.3) {
+      const seam=stairRay([fx,fy,fz],[tx,ty,tz]);
+      if (seam) {
+        if (seam.t>0 && this.blockAny(fx,fy,fz,seam.point[0],seam.point[1],seam.point[2],team,false)) return true;
+        if (seam.t<1 && this.blockAny(seam.point[0]+seam.shift,seam.point[1],seam.point[2],tx+seam.shift,ty,tz,team,false)) return true;
+        return false;
+      }
+    }
+    const sx=tx-fx, sy=ty-fy, sz=tz-fz;
+    for (let i=0;i<n;i++) {
+      const item=items[i];
+      if (item.id!=='curtain' || item.owner.team===team || item.hp<=0 || item.until<=clock ||
+          !sameLevel(item.p[0],fx)) continue;
+      const ny=Math.sin(item.yaw), nz=-Math.cos(item.yaw);
+      const length=sx*ny+sz*nz;
+      if (length>-1e-6 && length<1e-6) continue;
+      const ip=item.p;
+      const t=((ip[0]-fx)*ny+(ip[2]-fz)*nz)/length;
+      if (t<0 || t>1) continue;
+      const py=fy+sy*t, height=py-ip[1];
+      if (height<-.14 || height>item.height) continue;
+      const side=(fx+sx*t-ip[0])*(-nz)+(fz+sz*t-ip[2])*ny;
+      if (side<=item.halfWidth && side>=-item.halfWidth) return true;
+    }
+    return false;
   }
 
   draw(r,viewX) {

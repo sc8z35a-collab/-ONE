@@ -144,7 +144,7 @@ test('ULTRA raytracing quality mode, SwRenderer compatibility & all 23 GLSL shad
     }
     assert.equal(cond,0,name+' unclosed #if');
   }
-  assert(Shaders.COMPOSITE_FRAGMENT.includes('uRaytrace') && Shaders.COMPOSITE_FRAGMENT.includes('uInvVP'));
+  assert(Shaders.COMPOSITE_FRAGMENT.includes('uRaytrace') && Shaders.COMPOSITE_FRAGMENT.includes('uDepthAB') && Shaders.COMPOSITE_FRAGMENT.includes('uVP'));
   assert(Shaders.SKY_FRAGMENT.includes('uBossRage') && Shaders.LITE_SKY_FRAGMENT.includes('uBossRage'));
 
   // Renderer preset semantics: ultra = raytrace (not lite), ultralite = 300p lite
@@ -596,4 +596,96 @@ test('プレイヤー専用: 体力2倍(200HP)とシールド展開(耐久240・
   assert.equal(p.down,0);
   assert.equal(p.hp,200);
   assert.equal(p.maxHp,200);
+});
+
+test('Wave 1 & Wave 2: lossless CPU/GPU optimizations and photorealism shader pipeline invariants',async ()=>{
+  const {surfaceForJS,writeSurfaceSlots}=await import('../dist/surface-solver.js');
+  const {drawTrain}=await import('../dist/train-model.js');
+  const {RAIL}=await import('../dist/layout.js');
+
+  // 1. Paint boss-free fast path (bossDirty=false -> runWordFlat2) produces exact parity with boss path
+  const pClean=new Paint(), pBoss=new Paint();
+  const engine=new RoomEngine({...options,teamSize:2,cheater:false}), b=engine.battle;
+  pClean.setWorld(b.world);
+  pBoss.setWorld(b.world);
+  assert.equal(pClean.bossDirty,false);
+  pClean.stamp(4,2,2.4,0,0,0,.06);
+  pClean.stamp(7,2,2.4,1,0,0,.06);
+  pBoss.stamp(4,2,2.4,0,0,0,.06);
+  pBoss.stamp(7,2,2.4,1,0,0,.06);
+  pBoss.bossDirty=true; // force general 3-team path
+  for (let i=0;i<6;i++) {pClean.advance(1/20); pBoss.advance(1/20);}
+  assert.equal(pClean.bossDirty,false,'2-team stamps keep bossDirty=false');
+  assert.equal(pClean.zoneCount[0][0],pBoss.zoneCount[0][0],'cyan ink cell count matches 3-team path');
+  assert.equal(pClean.zoneCount[0][1],pBoss.zoneCount[0][1],'amber ink cell count matches 3-team path');
+  pClean.stamp(-6,-4,2.0,2,0,0,.06);
+  assert.equal(pClean.bossDirty,true,'boss stamp immediately activates bossDirty');
+
+  // 2. Vehicles _maxCarY early-out + rain parked-car addPacked template cache
+  assert(b.vehicles._maxCarY>1.5,'Vehicles tracks maximum active car roof height');
+  assert.equal(b.vehicles.traceAny(-20,b.vehicles._maxCarY+5,0,20,b.vehicles._maxCarY+5,0),false);
+  let carPackedCalls=0, carAddCalls=0;
+  const packMockR={
+    lite:false,ultralite:false,reach:Infinity,viewPoint:[0,4,14],
+    inFrustum(){return true;},
+    add(){carAddCalls++;},
+    addPacked(){carPackedCalls++;},
+    beam(){},label(){}
+  };
+  b.vehicles.draw(packMockR,0,14,1.5,true); // raining = true!
+  assert(carPackedCalls>0,'parked cars use addPacked template cache even during rain');
+  assert(carAddCalls<carPackedCalls*30,'rain only draws shade/wipers outside parked-car template');
+
+  // 3. Train rigid straight-track addPacked template cache & zero-alloc raw fallback equivalence
+  let trPacked=0, trRaw=0;
+  const mockTrain={x:0,lift:0,lateral:0,yaw:0,roll:0,routePitch:0,wetness:0,speed:0,direction:1,phase:'run',doorOpen:0,berserk:false,marks:[],windows:{}};
+  drawTrain({...packMockR,addPacked(){trPacked++;},add(){},beam(){},label(){}},mockTrain,0,RAIL);
+  assert(trPacked>=3,'straight-track train submits via rigid addPacked templates ('+trPacked+' buckets)');
+  const rawBuf=new Float32Array(STRIDE);
+  drawTrain({
+    lite:false,add(t,x,y,z,w,h,d,c,k,o){packInstance(rawBuf,0,x,y,z,w,h,d,c,k,o,t==='box'?1:0,true); trRaw++;},
+    beam(){},label(){}
+  },mockTrain,0,RAIL);
+  assert(trRaw>150,'zero-alloc drawTrainRaw emits full train geometry when addPacked is absent');
+
+  // 4. Metal kind===4 writeSurfaceSlots fast path & packInstance basis fast paths match surfaceForJS bit-for-bit
+  const buf=new Float32Array(STRIDE);
+  const testColors=[0x202020,0xc8ccd0,0x408050,0x993020,0x3050a0,0x8a7055,0xffffff,0x101418];
+  const testDims=[[0.2,0.1,0.15],[0.6,0.3,0.4],[1.8,0.8,0.6],[5.2,0.4,0.4],[0.8,0.03,0.6],[1.2,0.5,0.5]];
+  const testYs=[0.1,0.9,2.2,5.5];
+  for (const col of testColors) for (const [w,h,d] of testDims) for (const y of testYs) for (const shape of [0,1,2]) {
+    packInstance(buf,0,3.5,y,-4.2,w,h,d,col,4,{},shape,false);
+    const r=buf[16], g=buf[17], bl=buf[18];
+    const f32=Math.fround, fr32=v=>f32(v-Math.floor(v));
+    let qx=fr32(f32(f32(buf[12])*f32(.1031))), qy=fr32(f32(f32(buf[13])*f32(.1030))), qz=fr32(f32(f32(buf[14])*f32(.0973)));
+    const cc=f32(33.33), dd=f32(f32(qx*f32(qy+cc))+f32(qy*f32(qz+cc))+f32(qz*f32(qx+cc)));
+    qx=f32(qx+dd); qy=f32(qy+dd); qz=f32(qz+dd);
+    const seed=fr32(f32(f32(qx+qy)*qz));
+    const sx=f32(w), sy=f32(h), sz=f32(d);
+    const eTop=surfaceForJS(4,r,g,bl,true,false,shape===2,seed,sx,sy,sz,shape,false,false,0,buf[13]+sy*.5);
+    const eSide=surfaceForJS(4,r,g,bl,false,false,false,seed,sx,sy,sz,shape,false,false,0,buf[13]);
+    const eBot=surfaceForJS(4,r,g,bl,false,true,false,seed,sx,sy,sz,shape,false,false,0,buf[13]-sy*.5);
+    assert.equal(buf[3],eTop,'kind=4 top slot parity');
+    assert.equal(buf[7],eSide,'kind=4 side slot parity');
+    assert.equal(buf[11],eBot,'kind=4 bot slot parity');
+  }
+  // Verify basis-transformed kinds (0,3,21,23,31) match writeSurfaceSlots exactly
+  const rotBasis=[[0.8,0,0.6],[0,1.2,0],[-0.6,0,0.8]];
+  const refBuf=new Float32Array(STRIDE);
+  for (const kind of [0,3,21,23,31]) for (const col of [0x15181a,0xf0f4f8,0x804020]) {
+    packInstance(buf,0,2,1.5,-3,0.5,0.2,1.6,col,kind,{basis:rotBasis},1,true);
+    refBuf.set(buf);
+    writeSurfaceSlots(refBuf,0,1);
+    assert.equal(buf[3],refBuf[3],'basis packInstance top kind='+kind);
+    assert.equal(buf[7],refBuf[7],'basis packInstance side kind='+kind);
+    assert.equal(buf[11],refBuf[11],'basis packInstance bot kind='+kind);
+  }
+
+  // 5. Photorealism Wave 2 shader invariants (all 6 upgrades present & balanced)
+  assert(Shaders.COMMON.includes('smoothstep(1.15,6.5,peak)'),'AgX-inspired highlight roll-off in grade()');
+  assert(Shaders.DEFERRED_OUTDOOR_FRAGMENT.includes('envBRDF_AB') && Shaders.DEFERRED_OUTDOOR_FRAGMENT.includes('FmsEms'),'Kulla-Conty multi-scattering PBR');
+  assert(Shaders.DEFERRED_OUTDOOR_FRAGMENT.includes('dampRing') && Shaders.DEFERRED_OUTDOOR_FRAGMENT.includes('.021'),'rain-drenched asphalt capillary shoreline + physical water F0');
+  assert(Shaders.DEFERRED_OUTDOOR_FRAGMENT.includes('meniscus'),'glossy liquid ink meniscus catchlights');
+  assert(Shaders.DEFERRED_OUTDOOR_FRAGMENT.includes('aerialFog') && Shaders.DEFERRED_OUTDOOR_FRAGMENT.includes('rayleigh'),'Rayleigh/Mie aerial perspective');
+  assert(Shaders.COMPOSITE_FRAGMENT.includes('maxSteps') && Shaders.COMPOSITE_FRAGMENT.includes('bounceCol'),'ULTRA RT adaptive SSR + chromatic SSGI');
 });

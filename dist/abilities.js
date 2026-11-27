@@ -195,12 +195,49 @@ export class Abilities {
   }
 
   enemies(actor,atX=actor.x) {
-    const b=this.battle;
-    const list=b.actors.filter(other=>other.team!==actor.team && other.down<=0 && !other.ride && !other.lift && sameLevel(other.x,atX));
-    if (actor.team>=0) {
-      for (const raider of b.raiders.members) if (raider.active && !raider.ride && !raider.lift && sameLevel(raider.x,atX)) list.push(raider);
-      if (b.boss.active && sameLevel(b.boss.x,atX)) list.push(b.boss);
-      if (b.hazards) for (const h of b.hazards.targets(atX)) list.push(h);
+    const b=this.battle, z=zoneOf(atX), team=actor.team;
+    const list=[];
+    for (let i=0;i<b.actors.length;i++) {
+      const other=b.actors[i];
+      if (other.team!==team && other.down<=0 && !other.ride && !other.lift && zoneOf(other.x)===z) list.push(other);
+    }
+    if (team>=0) {
+      for (let i=0;i<b.raiders.members.length;i++) {
+        const raider=b.raiders.members[i];
+        if (raider.active && !raider.ride && !raider.lift && zoneOf(raider.x)===z) list.push(raider);
+      }
+      if (b.boss.active && zoneOf(b.boss.x)===z) list.push(b.boss);
+      if (b.hazards) {
+        const hz=b.hazards.targetsView?b.hazards.targetsView(z):b.hazards.targets(atX);
+        for (let i=0;i<hz.length;i++) list.push(hz[i]);
+      }
+    }
+    return list;
+  }
+
+  enemiesView(team,atX) {
+    const b=this.battle, z=zoneOf(atX), clk=b.clock;
+    const slot=((team<0?2:team)<<2)|z;
+    const cache=this._eCache ?? (this._eCache=Array.from({length:12},()=>[]));
+    const stamps=this._eStamps ?? (this._eStamps=new Float64Array(12).fill(-1));
+    if (stamps[slot]===clk) return cache[slot];
+    stamps[slot]=clk;
+    const list=cache[slot];
+    list.length=0;
+    for (let i=0;i<b.actors.length;i++) {
+      const other=b.actors[i];
+      if (other.team!==team && other.down<=0 && !other.ride && !other.lift && zoneOf(other.x)===z) list.push(other);
+    }
+    if (team>=0) {
+      for (let i=0;i<b.raiders.members.length;i++) {
+        const raider=b.raiders.members[i];
+        if (raider.active && !raider.ride && !raider.lift && zoneOf(raider.x)===z) list.push(raider);
+      }
+      if (b.boss.active && zoneOf(b.boss.x)===z) list.push(b.boss);
+      if (b.hazards) {
+        const hz=b.hazards.targetsView?b.hazards.targetsView(z):b.hazards.targets(atX);
+        for (let i=0;i<hz.length;i++) list.push(hz[i]);
+      }
     }
     return list;
   }

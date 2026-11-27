@@ -560,14 +560,16 @@ export class Transit {
     if ((sx>ex?sx:ex)<x-reachX || (sx<ex?sx:ex)>x+reachX ||
         (sz>ez?sz:ez)<z-reachZ || (sz<ez?sz:ez)>z+reachZ) return null;
     const t=this.train, pose=cached.pose;
+    const local=pose.local(start), delta=sub(pose.local(end),local);
     if (precise) {
+      const pad=clearance+.25;
+      if (!rayBox(local,delta,{min:[-9.6-pad,-.25-pad,-2.0-pad],max:[9.6+pad,5.45+pad,2.0+pad]})) return null;
       if (!this.posedTrain || this.posedTrain.time!==this.time || this.posedTrain.train!==t || this.posedTrain.doorOpen!==t.doorOpen) {
         this.posedTrain={time:this.time,train:t,doorOpen:t.doorOpen,shapes:collectShapes(r=>this.draw(r))};
       }
       const hit=traceShapes(this.posedTrain.shapes,start,end,clearance);
       return hit?{...hit,train:this,local:pose.local(hit.position),localNormal:pose.basis.map(axis=>dot(axis,hit.normal))}:null;
     }
-    const local=pose.local(start), delta=sub(pose.local(end),local);
     let best=null;
     for (let i=0;i<TRAIN_HULLS.length;i++) {
       const hit=rayBox(local,delta,TRAIN_HULLS[i]);

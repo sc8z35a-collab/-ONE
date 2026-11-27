@@ -13,11 +13,17 @@ export const DESTRUCT_MATERIALS={
 const clamp=(v,lo,hi)=>v<lo?lo:v>hi?hi:v;
 const TEAM_TINTS=[0x1fdfff,0xff7a2e,0x141118];
 
+const GRID_CELL=8, INV_GRID=1/GRID_CELL;
+
 export class DestructionPhysics {
   constructor(world) {
     this.world=world;
     this.structures=[];
     this.byId=new Map();
+    this._grid=new Map();
+    this._querySeq=0;
+    this._collapsing=[];
+    this._drawList=[];
     this.chunks=[];
     this.rubble=[];
     this.pendingHide=[];
@@ -33,6 +39,21 @@ export class DestructionPhysics {
     x^=x<<13; x^=x>>>17; x^=x<<5;
     this._rngState=x;
     return (x>>>0)/4294967296;
+  }
+
+  _indexStructure(s) {
+    const hw=s.w*.5, hd=s.d*.5;
+    const x0=Math.floor((s.x-hw)*INV_GRID), x1=Math.floor((s.x+hw)*INV_GRID);
+    const z0=Math.floor((s.z-hd)*INV_GRID), z1=Math.floor((s.z+hd)*INV_GRID);
+    const grid=this._grid;
+    for (let z=z0;z<=z1;z++) {
+      for (let x=x0;x<=x1;x++) {
+        const key=z*2048+x;
+        let bucket=grid.get(key);
+        if (!bucket) {bucket=[];grid.set(key,bucket);}
+        bucket.push(s);
+      }
+    }
   }
 
   registerStructure(def) {
@@ -57,6 +78,7 @@ export class DestructionPhysics {
       zone:zoneOf(def.x),
       x:def.x, y:def.y, z:def.z,
       w, h, d,
+      hw:w*.5, hh:h*.5, hd:d*.5,
       yaw:def.yaw||0,
       tint:def.tint??0xc8c4b4,
       matKind:def.matKind??2,
@@ -78,11 +100,21 @@ export class DestructionPhysics {
       obstacles:def.obstacles||[],
       solids:def.solids||[],
       parts:def.parts||[{dx:0,dy:0,dz:0,w,h,d,tint:def.tint??0xc8c4b4,kind:def.matKind??2}],
-      staticHidden:false
+      staticHidden:false,
+      _seen:0,
+      _inDraw:false
     };
     this.structures.push(struct);
     this.byId.set(struct.id,struct);
+    this._indexStructure(struct);
     return struct;
+  }
+
+  _trackDraw(s) {
+    if (!s._inDraw) {
+      s._inDraw=true;
+      this._drawList.push(s);
+    }
   }
 
   reset() {
@@ -100,9 +132,12 @@ export class DestructionPhysics {
       s.stainRatio=0;
       s.lastHitAt=-1;
       s.staticHidden=false;
+      s._inDraw=false;
       for (const ob of s.obstacles) ob.disabled=false;
       for (const so of s.solids) so.disabled=false;
     }
+    this._collapsing.length=0;
+    this._drawList.length=0;
     this.chunks.length=0;
     this.rubble.length=0;
     this.pendingHide.length=0;
@@ -112,43 +147,69 @@ export class DestructionPhysics {
     this.clock=0;
   }
 
-  // Test if world ray segment [from -> to] hits any intact/collapsing destructible structure.
+  // Test if world ray segment [from -> to] hits any intact/cracked destructible structure via O(cells) spatial grid.
   rayHit(from,to) {
-    const dx=to[0]-from[0], dy=to[1]-from[1], dz=to[2]-from[2];
-    const len=Math.hypot(dx,dy,dz);
-    if (len<1e-6) return null;
-    let bestT=1.0001, best=null;
-    const minX=Math.min(from[0],to[0]), maxX=Math.max(from[0],to[0]);
-    const minY=Math.min(from[1],to[1]), maxY=Math.max(from[1],to[1]);
-    const minZ=Math.min(from[2],to[2]), maxZ=Math.max(from[2],to[2]);
-    for (const s of this.structures) {
-      if (s.state==='destroyed' || s.state==='collapsing') continue;
-      const hw=s.w*.5, hh=s.h*.5, hd=s.d*.5;
-      const sx0=s.x-hw, sx1=s.x+hw, sy0=s.y-hh, sy1=s.y+hh, sz0=s.z-hd, sz1=s.z+hd;
-      if (maxX<sx0 || minX>sx1 || maxY<sy0 || minY>sy1 || maxZ<sz0 || minZ>sz1) continue;
-      let tmin=0, tmax=1, nx=0, ny=0, nz=0;
-      const slab=(o,d,lo,hi,ax,ay,az)=>{
-        if (Math.abs(d)<1e-8) return o>=lo && o<=hi;
-        let t0=(lo-o)/d, t1=(hi-o)/d, sgn=-1;
-        if (t0>t1) {const tmp=t0; t0=t1; t1=tmp; sgn=1;}
-        if (t0>tmin) {tmin=t0; nx=ax*sgn; ny=ay*sgn; nz=az*sgn;}
-        if (t1<tmax) tmax=t1;
-        return tmin<=tmax;
-      };
-      if (!slab(from[0],dx,sx0,sx1,1,0,0)) continue;
-      if (!slab(from[1],dy,sy0,sy1,0,1,0)) continue;
-      if (!slab(from[2],dz,sz0,sz1,0,0,1)) continue;
-      if (tmin>=0 && tmin<bestT) {
-        bestT=tmin;
-        best={
-          structure:s,
-          t:tmin,
-          point:[from[0]+dx*tmin,from[1]+dy*tmin,from[2]+dz*tmin],
-          normal:[nx,ny,nz]
-        };
+    const fx=from[0], fy=from[1], fz=from[2];
+    const dx=to[0]-fx, dy=to[1]-fy, dz=to[2]-fz;
+    if (dx*dx+dy*dy+dz*dz<1e-12) return null;
+    const invDx=(dx>-1e-8 && dx<1e-8)?0:1/dx;
+    const invDy=(dy>-1e-8 && dy<1e-8)?0:1/dy;
+    const invDz=(dz>-1e-8 && dz<1e-8)?0:1/dz;
+    let bestT=1.0001, best=null, bnx=0, bny=0, bnz=0;
+    const minX=fx<to[0]?fx:to[0], maxX=fx>to[0]?fx:to[0];
+    const minY=fy<to[1]?fy:to[1], maxY=fy>to[1]?fy:to[1];
+    const minZ=fz<to[2]?fz:to[2], maxZ=fz>to[2]?fz:to[2];
+    const gx0=Math.floor(minX*INV_GRID), gx1=Math.floor(maxX*INV_GRID);
+    const gz0=Math.floor(minZ*INV_GRID), gz1=Math.floor(maxZ*INV_GRID);
+    const mark=++this._querySeq, grid=this._grid;
+    for (let gz=gz0;gz<=gz1;gz++) {
+      for (let gx=gx0;gx<=gx1;gx++) {
+        const bucket=grid.get(gz*2048+gx);
+        if (!bucket) continue;
+        for (let i=0;i<bucket.length;i++) {
+          const s=bucket[i];
+          if (s._seen===mark || s.state==='destroyed' || s.state==='collapsing') continue;
+          s._seen=mark;
+          const sx0=s.x-s.hw, sx1=s.x+s.hw, sy0=s.y-s.hh, sy1=s.y+s.hh, sz0=s.z-s.hd, sz1=s.z+s.hd;
+          if (maxX<sx0 || minX>sx1 || maxY<sy0 || minY>sy1 || maxZ<sz0 || minZ>sz1) continue;
+          let tmin=0, tmax=bestT<1?bestT:1, nx=0, ny=0, nz=0;
+          if (invDx===0) {if (fx<sx0 || fx>sx1) continue;}
+          else {
+            let t0=(sx0-fx)*invDx, t1=(sx1-fx)*invDx, sgn=-1;
+            if (t0>t1) {const tmp=t0;t0=t1;t1=tmp;sgn=1;}
+            if (t0>tmin) {tmin=t0;nx=sgn;ny=0;nz=0;}
+            if (t1<tmax) tmax=t1;
+            if (tmin>tmax) continue;
+          }
+          if (invDy===0) {if (fy<sy0 || fy>sy1) continue;}
+          else {
+            let t0=(sy0-fy)*invDy, t1=(sy1-fy)*invDy, sgn=-1;
+            if (t0>t1) {const tmp=t0;t0=t1;t1=tmp;sgn=1;}
+            if (t0>tmin) {tmin=t0;nx=0;ny=sgn;nz=0;}
+            if (t1<tmax) tmax=t1;
+            if (tmin>tmax) continue;
+          }
+          if (invDz===0) {if (fz<sz0 || fz>sz1) continue;}
+          else {
+            let t0=(sz0-fz)*invDz, t1=(sz1-fz)*invDz, sgn=-1;
+            if (t0>t1) {const tmp=t0;t0=t1;t1=tmp;sgn=1;}
+            if (t0>tmin) {tmin=t0;nx=0;ny=0;nz=sgn;}
+            if (t1<tmax) tmax=t1;
+            if (tmin>tmax) continue;
+          }
+          if (tmin>=0 && tmin<bestT) {
+            bestT=tmin; best=s; bnx=nx; bny=ny; bnz=nz;
+          }
+        }
       }
     }
-    return best;
+    if (!best) return null;
+    return {
+      structure:best,
+      t:bestT,
+      point:[fx+dx*bestT,fy+dy*bestT,fz+dz*bestT],
+      normal:[bnx,bny,bnz]
+    };
   }
 
   _spawnDebrisBurst(s,hitX,hitY,hitZ,fx,fy,fz,team,count,scaleMul=1) {
@@ -162,7 +223,7 @@ export class DestructionPhysics {
       const px=s.x+rx, py=Math.max(0.35,s.y+ry), pz=s.z+rz;
       const dirX=px-(hitX??s.x)+(fx*.02);
       const dirZ=pz-(hitZ??s.z)+(fz*.02);
-      const dLen=Math.hypot(dirX,dirZ)||1;
+      const dLen=Math.sqrt(dirX*dirX+dirZ*dirZ)||1;
       const spd=(3.2+this._rand()*6.8)*scaleMul;
       const size=(s.kind==='building'?clamp(0.45+this._rand()*0.95,0.4,1.5):clamp(0.22+this._rand()*0.38,0.18,0.68));
       const stained=this._rand()<0.42;
@@ -196,11 +257,12 @@ export class DestructionPhysics {
     s.state='collapsing';
     s.hp=0;
     s.tiltAngle=0.04;
-    // Torque r x F determines physical overturning axis perpendicular to push direction.
+    this._collapsing.push(s);
+    this._trackDraw(s);
     const tx=(hitX??s.x)-s.x, tz=(hitZ??s.z)-s.z;
     const pushX=Math.abs(fx)>0.1?fx:-tx;
     const pushZ=Math.abs(fz)>0.1?fz:-tz;
-    const pLen=Math.hypot(pushX,pushZ);
+    const pLen=Math.sqrt(pushX*pushX+pushZ*pushZ);
     if (pLen>0.01) {
       s.tiltAxisX=pushX/pLen;
       s.tiltAxisZ=pushZ/pLen;
@@ -209,10 +271,10 @@ export class DestructionPhysics {
       s.tiltAxisX=Math.cos(a);
       s.tiltAxisZ=Math.sin(a);
     }
-    // Initial angular velocity omega = L / I from impact impulse at elevation height.
     const lever=clamp((hitY??s.y)-(s.y-s.h*.5),s.h*.25,s.h);
-    const inertia=Math.max(1,(s.mass/3)*(s.h*s.h+0.25*Math.min(s.w,s.d)**2));
-    const impactTorque=lever*Math.max(1800,Math.hypot(fx,fz)*180);
+    const minWD=s.w<s.d?s.w:s.d;
+    const inertia=Math.max(1,(s.mass/3)*(s.h*s.h+0.25*minWD*minWD));
+    const impactTorque=lever*Math.max(1800,Math.sqrt(fx*fx+fz*fz)*180);
     s.tiltVel=clamp(0.42+impactTorque/inertia,0.38,1.95);
     s.sinkVel=s.kind==='building'?0.35:0.15;
 
@@ -230,7 +292,6 @@ export class DestructionPhysics {
     if (s.kind==='building' || s.kind==='shop') this.collapsedBuildings++;
     else this.collapsedObjects++;
 
-    // Remove disabled solid/obstacle collision boxes from geometry solver so players/shots/fluid pass through!
     for (const ob of s.obstacles) {
       ob.disabled=true;
       this.world?.disableSolid?.(ob);
@@ -239,10 +300,9 @@ export class DestructionPhysics {
       so.disabled=true;
       this.world?.disableSolid?.(so);
     }
-    const rotSpan=Math.hypot(s.w,s.d)*.52+0.35;
+    const rotSpan=Math.sqrt(s.w*s.w+s.d*s.d)*.52+0.35;
     this.world?.disableRegion?.(s.zone,s.x-rotSpan,s.x+rotSpan,s.minY,s.maxY+1.5,s.z-rotSpan,s.z+rotSpan);
 
-    // Final ground slam shatters the collapsing body into rubble slabs + scattered debris chunks + ink splatter!
     const groundY=s.y-s.h*.5;
     const spread=Math.max(s.w,s.d)*.55;
     this._spawnDebrisBurst(
@@ -271,7 +331,6 @@ export class DestructionPhysics {
       }
     }
 
-    // Stamp structural ink spill onto painted surface around footprint and excite shallow-water shockwave.
     if (battle?.paint && s.stainTeam>=0) {
       const lay=s.zone===1?2:0;
       battle.paint.stamp(
@@ -285,19 +344,33 @@ export class DestructionPhysics {
     battle?.callbacks?.sound?.('break');
   }
 
-  // Direct projectile / impact stress at world coordinate.
+  // O(1) spatial-grid direct projectile / impact stress at world coordinate.
   applyInkImpact(x,y,z,fx,fy,fz,damage,team=0,radius=1.2) {
     if (!(damage>0)) return null;
-    let target=null, bestDist=Infinity;
-    for (const s of this.structures) {
-      if (s.state==='destroyed' || s.state==='collapsing') continue;
-      const dx=Math.max(0,Math.abs(x-s.x)-s.w*.5);
-      const dy=Math.max(0,Math.abs(y-s.y)-s.h*.5);
-      const dz=Math.max(0,Math.abs(z-s.z)-s.d*.5);
-      const d=Math.hypot(dx,dy,dz);
-      if (d<=radius+0.45 && d<bestDist) {
-        bestDist=d;
-        target=s;
+    const reach=radius+0.45, reach2=reach*reach;
+    const gx0=Math.floor((x-reach)*INV_GRID), gx1=Math.floor((x+reach)*INV_GRID);
+    const gz0=Math.floor((z-reach)*INV_GRID), gz1=Math.floor((z+reach)*INV_GRID);
+    const mark=++this._querySeq, grid=this._grid;
+    let target=null, bestD2=reach2+1e-9;
+    for (let gz=gz0;gz<=gz1;gz++) {
+      for (let gx=gx0;gx<=gx1;gx++) {
+        const bucket=grid.get(gz*2048+gx);
+        if (!bucket) continue;
+        for (let i=0;i<bucket.length;i++) {
+          const s=bucket[i];
+          if (s._seen===mark || s.state==='destroyed' || s.state==='collapsing') continue;
+          s._seen=mark;
+          let dx=x-s.x; if (dx<0) dx=-dx; dx-=s.hw; if (dx<0) dx=0;
+          let dz=z-s.z; if (dz<0) dz=-dz; dz-=s.hd; if (dz<0) dz=0;
+          let d2=dx*dx+dz*dz;
+          if (d2>=bestD2) continue;
+          let dy=y-s.y; if (dy<0) dy=-dy; dy-=s.hh; if (dy<0) dy=0;
+          d2+=dy*dy;
+          if (d2<=reach2 && d2<bestD2) {
+            bestD2=d2;
+            target=s;
+          }
+        }
       }
     }
     if (!target) return null;
@@ -309,8 +382,8 @@ export class DestructionPhysics {
     target.lastHitAt=this.clock;
     if (target.hp>0 && target.hp<target.maxHp*0.58 && target.state==='intact') {
       target.state='cracked';
-      // Minor structural micro-tilt on upper hits
-      const hRatio=clamp((y-(target.y-target.h*.5))/Math.max(0.5,target.h),0,1);
+      this._trackDraw(target);
+      const hRatio=clamp((y-(target.y-target.hh))/Math.max(0.5,target.h),0,1);
       target.tiltAngle=Math.max(target.tiltAngle,0.015*hRatio);
     }
     if (target.hp<=0) {
@@ -319,32 +392,46 @@ export class DestructionPhysics {
     return target;
   }
 
-  // Overpressure wave damage from explosions / boss mortar / grenade / slam.
+  // O(cells) spatial-grid overpressure wave damage from explosions / boss mortar / grenade / slam.
   applySplashDamage(x,y,z,radius,damage,team=0,impulse=14) {
     if (!(damage>0) || !(radius>0)) return 0;
     let hits=0;
     const r2=radius*radius;
-    for (const s of this.structures) {
-      if (s.state==='destroyed' || s.state==='collapsing') continue;
-      const dx=Math.max(0,Math.abs(x-s.x)-s.w*.5);
-      const dy=Math.max(0,Math.abs(y-s.y)-s.h*.5);
-      const dz=Math.max(0,Math.abs(z-s.z)-s.d*.5);
-      const d2=dx*dx+dy*dy+dz*dz;
-      if (d2>r2) continue;
-      const d=Math.sqrt(d2);
-      const falloff=clamp(1-d/radius,0.12,1);
-      const pX=s.x-x, pZ=s.z-z, pLen=Math.hypot(pX,pZ)||1;
-      const dmg=damage*falloff*s.mat.softening;
-      s.hp=Math.max(0,s.hp-dmg);
-      s.saturation=clamp(s.saturation+dmg/s.maxHp,0,1.5);
-      s.stainTeam=team===2||team===-1?2:team===1?1:0;
-      s.stainRatio=clamp(s.stainRatio+dmg/(s.maxHp*0.65),0,1);
-      s.lastHitAt=this.clock;
-      if (s.hp>0 && s.hp<s.maxHp*0.60) s.state='cracked';
-      if (s.hp<=0) {
-        this._beginCollapse(s,x,y,z,(pX/pLen)*impulse*falloff,impulse*0.4,(pZ/pLen)*impulse*falloff,team);
+    const gx0=Math.floor((x-radius)*INV_GRID), gx1=Math.floor((x+radius)*INV_GRID);
+    const gz0=Math.floor((z-radius)*INV_GRID), gz1=Math.floor((z+radius)*INV_GRID);
+    const mark=++this._querySeq, grid=this._grid;
+    for (let gz=gz0;gz<=gz1;gz++) {
+      for (let gx=gx0;gx<=gx1;gx++) {
+        const bucket=grid.get(gz*2048+gx);
+        if (!bucket) continue;
+        for (let i=0;i<bucket.length;i++) {
+          const s=bucket[i];
+          if (s._seen===mark || s.state==='destroyed' || s.state==='collapsing') continue;
+          s._seen=mark;
+          let dx=x-s.x; if (dx<0) dx=-dx; dx-=s.hw; if (dx<0) dx=0;
+          let dy=y-s.y; if (dy<0) dy=-dy; dy-=s.hh; if (dy<0) dy=0;
+          let dz=z-s.z; if (dz<0) dz=-dz; dz-=s.hd; if (dz<0) dz=0;
+          const d2=dx*dx+dy*dy+dz*dz;
+          if (d2>r2) continue;
+          const d=Math.sqrt(d2);
+          const falloff=clamp(1-d/radius,0.12,1);
+          const pX=s.x-x, pZ=s.z-z, pLen=Math.sqrt(pX*pX+pZ*pZ)||1;
+          const dmg=damage*falloff*s.mat.softening;
+          s.hp=Math.max(0,s.hp-dmg);
+          s.saturation=clamp(s.saturation+dmg/s.maxHp,0,1.5);
+          s.stainTeam=team===2||team===-1?2:team===1?1:0;
+          s.stainRatio=clamp(s.stainRatio+dmg/(s.maxHp*0.65),0,1);
+          s.lastHitAt=this.clock;
+          if (s.hp>0 && s.hp<s.maxHp*0.60) {
+            s.state='cracked';
+            this._trackDraw(s);
+          }
+          if (s.hp<=0) {
+            this._beginCollapse(s,x,y,z,(pX/pLen)*impulse*falloff,impulse*0.4,(pZ/pLen)*impulse*falloff,team);
+          }
+          hits++;
+        }
       }
-      hits++;
     }
     return hits;
   }
@@ -359,21 +446,24 @@ export class DestructionPhysics {
     if (!(peakPressure>0)) return 0;
     const half=width*.62;
     let hit=0;
-    for (const s of this.structures) {
+    for (let i=0;i<this.structures.length;i++) {
+      const s=this.structures[i];
       if (s.state==='destroyed' || s.state==='collapsing' || s.zone!==0) continue;
-      if (s.x+s.w*.5<waveX-half || s.x-s.w*.5>waveX+half) continue;
-      const bottomY=s.y-s.h*.5;
+      if (s.x+s.hw<waveX-half || s.x-s.hw>waveX+half) continue;
+      const bottomY=s.y-s.hh;
       if (bottomY>height) continue;
       const submerged=Math.min(s.h,height-bottomY);
       const area=s.d*submerged;
-      // Scale hydrodynamic stress proportionally to exposed wetted area & stagnation pressure
       const hydroDamage=clamp((peakPressure*area*0.00018)*dt*s.mat.softening,0,220*dt);
       if (hydroDamage<=0.01) continue;
       s.hp=Math.max(0,s.hp-hydroDamage);
       s.saturation=clamp(s.saturation+hydroDamage/s.maxHp,0,1.5);
-      if (s.hp>0 && s.hp<s.maxHp*0.62) s.state='cracked';
+      if (s.hp>0 && s.hp<s.maxHp*0.62) {
+        s.state='cracked';
+        this._trackDraw(s);
+      }
       if (s.hp<=0) {
-        this._beginCollapse(s,s.x-dir*s.w*.5,bottomY+submerged*.5,s.z,dir*24,2,0,0);
+        this._beginCollapse(s,s.x-dir*s.hw,bottomY+submerged*.5,s.z,dir*24,2,0,0);
       }
       hit++;
     }
@@ -383,11 +473,14 @@ export class DestructionPhysics {
   update(dt,battle=null) {
     if (dt<=0) return;
     this.clock+=dt;
-    // Step rigid-body toppling structures
-    for (const s of this.structures) {
-      if (s.state!=='collapsing') continue;
-      const effH=Math.max(1.0,s.h);
-      const inertia=Math.max(1,(s.mass/3)*(effH*effH+0.25*Math.min(s.w,s.d)**2));
+    // Step ONLY actively collapsing structures in O(collapsing).
+    const col=this._collapsing;
+    for (let i=col.length-1;i>=0;i--) {
+      const s=col[i];
+      if (s.state!=='collapsing') {col.splice(i,1);continue;}
+      const effH=s.h>1.0?s.h:1.0;
+      const minWD=s.w<s.d?s.w:s.d;
+      const inertia=Math.max(1,(s.mass/3)*(effH*effH+0.25*minWD*minWD));
       const gravTorque=s.mass*GRAVITY*(effH*0.5)*Math.sin(Math.min(Math.PI*.48,s.tiltAngle));
       const angAccel=gravTorque/inertia;
       s.tiltVel=clamp(s.tiltVel+angAccel*dt,0.25,4.2);
@@ -396,20 +489,22 @@ export class DestructionPhysics {
       s.sinkVel=Math.min(6.5,s.sinkVel+GRAVITY*0.25*dt);
       if (s.tiltAngle>=1.28 || s.sink>=s.h*0.72) {
         this._finishCollapse(s,battle);
+        col.splice(i,1);
       }
     }
 
     // Step fractured rigid-body debris chunks
-    for (let i=this.chunks.length-1;i>=0;i--) {
-      const c=this.chunks[i];
+    const chunks=this.chunks;
+    const world=this.world;
+    const drag=1/(1+0.12*dt);
+    for (let i=chunks.length-1;i>=0;i--) {
+      const c=chunks[i];
       c.age+=dt;
       if (c.age>=c.life) {
-        this.chunks.splice(i,1);
+        chunks.splice(i,1);
         continue;
       }
       c.vy-=GRAVITY*dt;
-      // Linear air drag
-      const drag=1/(1+0.12*dt);
       c.vx*=drag; c.vz*=drag;
       c.x+=c.vx*dt;
       c.y+=c.vy*dt;
@@ -417,7 +512,7 @@ export class DestructionPhysics {
       c.yaw+=c.vyaw*dt;
       c.pitch+=c.vpitch*dt;
 
-      const fl=this.world?.floor?.(c.x,c.z,c.y+0.5)?.y??(zoneOf(c.x)===1?-8:0);
+      const fl=world?.floorY?world.floorY(c.x,c.z):(world?.floor?.(c.x,c.z,c.y+0.5)?.y??(zoneOf(c.x)===1?-8:0));
       const minY=fl+c.h*.5;
       if (c.y<=minY) {
         c.y=minY;
@@ -435,10 +530,10 @@ export class DestructionPhysics {
           }
         } else {
           c.vy=0;
-          c.vx*=Math.max(0,1-dt*5.5);
-          c.vz*=Math.max(0,1-dt*5.5);
-          c.vyaw*=Math.max(0,1-dt*6);
-          c.vpitch*=Math.max(0,1-dt*6);
+          const stop=Math.max(0,1-dt*5.5);
+          c.vx*=stop; c.vz*=stop;
+          const stopW=Math.max(0,1-dt*6);
+          c.vyaw*=stopW; c.vpitch*=stopW;
         }
       }
     }
@@ -449,7 +544,7 @@ export class DestructionPhysics {
     while (this.pendingHide.length) {
       const s=this.pendingHide.pop();
       const pad=0.35;
-      const rotSpan=Math.hypot(s.w,s.d)*.52+pad;
+      const rotSpan=Math.sqrt(s.w*s.w+s.d*s.d)*.52+pad;
       r.hideStaticRegion(
         s.zone,
         s.x-rotSpan,s.x+rotSpan,
@@ -461,25 +556,28 @@ export class DestructionPhysics {
 
   draw(r,eyeX=0,eyeZ=0) {
     this.flushRendererHides(r);
-    // Draw cracking overlays, toppling/collapsing monoliths, rubble piles, and dynamic debris chunks.
-    for (const s of this.structures) {
-      if (zoneOf(eyeX)!==s.zone) continue;
-      const dist2=(s.x-eyeX)**2+(s.z-eyeZ)**2;
-      if (dist2>190*190) continue;
+    const viewZone=zoneOf(eyeX);
+    // Draw ONLY cracked/collapsing structures via compact active list (O(damaged), not O(N)).
+    const dl=this._drawList;
+    for (let i=dl.length-1;i>=0;i--) {
+      const s=dl[i];
+      if (s.state==='destroyed' || s.state==='intact') {s._inDraw=false;dl.splice(i,1);continue;}
+      if (viewZone!==s.zone) continue;
+      const dx=s.x-eyeX, dz=s.z-eyeZ;
+      if (dx*dx+dz*dz>190*190) continue;
 
       if (s.state==='cracked') {
         const dmgRatio=1-s.hp/s.maxHp;
         const crackTint=s.stainTeam===2?0x151118:s.stainTeam===1?0xe07022:0x22d6ff;
         const seamH=s.h*clamp(dmgRatio*0.85,0.2,0.88);
         r.add('box',s.x,s.y-s.h*.1,s.z,s.w+0.06,0.09,s.d+0.06,crackTint,2,{dynamic:true,yaw:s.yaw+s.tiltAngle*.2});
-        r.add('box',s.x,s.y-s.h*.5+seamH*.5,s.z,0.10+dmgRatio*.16,seamH,s.d+0.08,0x2c2927,2,{dynamic:true,yaw:s.yaw+.4});
+        r.add('box',s.x,s.y-s.hh+seamH*.5,s.z,0.10+dmgRatio*.16,seamH,s.d+0.08,0x2c2927,2,{dynamic:true,yaw:s.yaw+.4});
       } else if (s.state==='collapsing') {
-        // Rigid-body pivoting & sinking building/object monolith!
         const pitchSign=s.tiltAxisZ*Math.cos(s.yaw)-s.tiltAxisX*Math.sin(s.yaw);
         const angle=s.tiltAngle;
-        const pivotY=s.y-s.h*.5-s.sink;
-        const liftY=Math.cos(angle)*(s.h*.5);
-        const shiftH=Math.sin(angle)*(s.h*.5);
+        const pivotY=s.y-s.hh-s.sink;
+        const liftY=Math.cos(angle)*s.hh;
+        const shiftH=Math.sin(angle)*s.hh;
         const wx=s.x+s.tiltAxisX*shiftH;
         const wy=pivotY+liftY;
         const wz=s.z+s.tiltAxisZ*shiftH;
@@ -490,13 +588,15 @@ export class DestructionPhysics {
       }
     }
 
-    for (const rb of this.rubble) {
-      if (zoneOf(eyeX)!==rb.zone && zoneOf(rb.x)!==zoneOf(eyeX)) continue;
+    for (let i=0;i<this.rubble.length;i++) {
+      const rb=this.rubble[i];
+      if (viewZone!==rb.zone && zoneOf(rb.x)!==viewZone) continue;
       r.add('bevel',rb.x,rb.y,rb.z,rb.w,rb.h,rb.d,rb.tint,rb.kind,{dynamic:true,yaw:rb.yaw});
     }
 
-    for (const c of this.chunks) {
-      if (zoneOf(c.x)!==zoneOf(eyeX)) continue;
+    for (let i=0;i<this.chunks.length;i++) {
+      const c=this.chunks[i];
+      if (zoneOf(c.x)!==viewZone) continue;
       const fade=c.age>c.life-1?clamp(c.life-c.age,0.1,1):1;
       r.add('box',c.x,c.y,c.z,c.w*fade,c.h*fade,c.d*fade,c.tint,c.kind,{dynamic:true,yaw:c.yaw,pitch:c.pitch});
     }

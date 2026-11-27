@@ -290,7 +290,8 @@ export class HNV1 {
    */
   scoreTarget(actor,enemy,previous=null) {
     const b=this.battle, m=this.mind(actor);
-    const d=Math.hypot(enemy.x-actor.x,(enemy.y-actor.y)*.85,enemy.z-actor.z);
+    const dx=enemy.x-actor.x, dy=(enemy.y-actor.y)*.85, dz=enemy.z-actor.z;
+    const d=Math.sqrt(dx*dx+dy*dy+dz*dz);
     let score=d;
 
     // Target stickiness (human commitment — avoids robotic target flicker)
@@ -318,14 +319,18 @@ export class HNV1 {
 
     // Ally peel / rescue instinct (for team crew)
     if (actor.team>=0 && !actor.isBoss && !actor.isRaider && b.actors?.length) {
-      for (let i=0;i<b.actors.length;i++) {
-        const ally=b.actors[i];
-        if (ally===actor || ally.team!==actor.team || ally.down>0) continue;
-        if (ally.hp<68 && sameLevel(ally.x,enemy.x) && dist2(ally,enemy)<10.5) {
-          score-=4.5*m.traits.teamwork;
-          m.peelTarget=enemy;
-          m.peelUntil=b.clock+2.4;
-          break;
+      const actors=b.actors;
+      for (let i=0;i<actors.length;i++) {
+        const ally=actors[i];
+        if (ally===actor || ally.team!==actor.team || ally.down>0 || ally.hp>=68) continue;
+        if (sameLevel(ally.x,enemy.x)) {
+          const ax=ally.x-enemy.x, az=ally.z-enemy.z;
+          if (ax*ax+az*az<110.25) {
+            score-=4.5*m.traits.teamwork;
+            m.peelTarget=enemy;
+            m.peelUntil=b.clock+2.4;
+            break;
+          }
         }
       }
     }
@@ -343,9 +348,13 @@ export class HNV1 {
       // Bonus for clustered fighters (splash/multi-kill value)
       if ((actor.isGoat || actor.isBoss) && b.actors?.length) {
         let cluster=0;
-        for (let i=0;i<b.actors.length;i++) {
-          const other=b.actors[i];
-          if (other!==enemy && other.down<=0 && sameLevel(other.x,enemy.x) && dist2(other,enemy)<7.5) cluster++;
+        const actors=b.actors;
+        for (let i=0;i<actors.length;i++) {
+          const other=actors[i];
+          if (other!==enemy && other.down<=0 && sameLevel(other.x,enemy.x)) {
+            const ox=other.x-enemy.x, oz=other.z-enemy.z;
+            if (ox*ox+oz*oz<56.25) cluster++;
+          }
         }
         score-=cluster*3.4;
       }
@@ -371,12 +380,12 @@ export class HNV1 {
     const vz=isSight?(sightOrTarget.velocity?.[2]??foe?.vz??0):(foe?.vz??0);
 
     const dx=basePoint[0]-actor.x, dy=basePoint[1]-(actor.y+1.25), dz=basePoint[2]-actor.z;
-    const horiz=Math.hypot(dx,dz);
+    const horiz=Math.sqrt(dx*dx+dz*dz);
     let travel=0;
     if (w) {
       const power=w.charge?clamp(.27+.73*(actor.charge||.85),.27,1):1;
       travel=w.speed
-        ?(w.arc||w.gravity?shotTravel(w,horiz,actor.rangeFactor??1,power):Math.hypot(horiz,dy)/Math.max(10,w.speed))
+        ?(w.arc||w.gravity?shotTravel(w,horiz,actor.rangeFactor??1,power):Math.sqrt(horiz*horiz+dy*dy)/Math.max(10,w.speed))
         :horiz/60;
     }
     const staleness=isSight?Math.min(.10,Math.max(0,b.clock-(sightOrTarget.at??b.clock))):0;
@@ -386,9 +395,10 @@ export class HNV1 {
 
     // Second-order damped acceleration prediction (catches turning & strafing targets)
     const accGain=actor.isCheater?.42:.28*m.focus;
-    const px=basePoint[0]+vx*t+m.accel[0]*t*t*accGain;
-    const py=basePoint[1]+vy*t*.62+m.accel[1]*t*t*accGain*.35;
-    const pz=basePoint[2]+vz*t+m.accel[2]*t*t*accGain;
+    const t2a=t*t*accGain;
+    const px=basePoint[0]+vx*t+m.accel[0]*t2a;
+    const py=basePoint[1]+vy*t*.62+m.accel[1]*t2a*.35;
+    const pz=basePoint[2]+vz*t+m.accel[2]*t2a;
 
     // Clamp predicted point to walkable floor / avoid aiming through walls
     let aimX=px, aimY=py, aimZ=pz;
@@ -396,13 +406,15 @@ export class HNV1 {
       const fl=b.world.floor?.(aimX,aimZ);
       if (fl && aimY<fl.y+.24) aimY=fl.y+.35;
     }
-    if (b.traceShot && horiz>2.5 && Math.hypot(aimX-basePoint[0],aimZ-basePoint[2])>.8) {
-      const eye=[actor.x,actor.y+(actor.isSniper?1.35:1.28),actor.z];
-      if (b.traceShot(eye,[aimX,aimY,aimZ],true)) {
+    const ldx=aimX-basePoint[0], ldz=aimZ-basePoint[2];
+    if (horiz>2.5 && ldx*ldx+ldz*ldz>.64) {
+      const ey=actor.y+(actor.isSniper?1.35:1.28);
+      const blocked=b.lineBlocked?b.lineBlocked(actor.x,ey,actor.z,aimX,aimY,aimZ):(b.traceShot && !!b.traceShot([actor.x,ey,actor.z],[aimX,aimY,aimZ],true));
+      if (blocked) {
         // Predicted lead went behind cover — blend back to visible edge
-        aimX=basePoint[0]+(aimX-basePoint[0])*.35;
+        aimX=basePoint[0]+ldx*.35;
         aimY=basePoint[1]+(aimY-basePoint[1])*.35;
-        aimZ=basePoint[2]+(aimZ-basePoint[2])*.35;
+        aimZ=basePoint[2]+ldz*.35;
       }
     }
 
@@ -633,8 +645,8 @@ export class HNV1 {
       const floor=b.world.support(x,actor.y,z);
       const distFoe=Math.hypot(foePoint.x-x,foePoint.z-z);
       const ink=b.surfaceInk({x,z},floor);
-      const cover=!!(b.traceShot(foeEye,[x,floor.y+.68,z],true)?.t<.98);
-      const canShoot=!(b.traceShot([x,floor.y+look,z],foeEye,true)?.t<.98);
+      const cover=b.lineBlocked?b.lineBlocked(foeEye[0],foeEye[1],foeEye[2],x,floor.y+.68,z,.98):!!(b.traceShot(foeEye,[x,floor.y+.68,z],true)?.t<.98);
+      const canShoot=b.lineBlocked?!b.lineBlocked(x,floor.y+look,z,foeEye[0],foeEye[1],foeEye[2],.98):!(b.traceShot([x,floor.y+look,z],foeEye,true)?.t<.98);
 
       // Ally spacing + Crossfire geometry bonus!
       let allyPenalty=0, crossfireBonus=0;
@@ -845,17 +857,32 @@ export class HNV1 {
    */
   pickSniperTarget(sniper,range,dt) {
     const b=this.battle, m=this.tick(sniper,dt);
-    const eye=[sniper.x,sniper.y+1.35,sniper.z];
-    let best=null, bestScore=Infinity, bestDist=range;
+    const ex=sniper.x, ey=sniper.y+1.35, ez=sniper.z;
+    const range2=range*range, hasLineBlocked=typeof b.lineBlocked==='function', hasBlockAny=typeof b.subweapons.blockAny==='function';
+    const cands=this._sCand ?? (this._sCand=[]), scores=this._sScores ?? (this._sScores=[]), dists=this._sDists ?? (this._sDists=[]);
+    let n=0;
     for (let i=0;i<b.actors.length;i++) {
       const actor=b.actors[i];
       if (actor.down>0 || actor.shield>0 || actor.ride || actor.lift || zoneOf(actor.x)!==0) continue;
-      const tp=[actor.x,actor.y+(actor.swimming?.36:1.05),actor.z];
-      const dist=Math.hypot(tp[0]-eye[0],tp[1]-eye[1],tp[2]-eye[2]);
-      if (dist>=range || dist<2) continue;
-      if (b.traceShot(eye,tp,true) || b.subweapons.block(eye,tp,-1)) continue;
-      const score=this.scoreTarget(sniper,actor,m.lastTarget);
-      if (score<bestScore) {bestScore=score;bestDist=dist;best=actor;}
+      const dx=actor.x-ex, dy=actor.y+(actor.swimming?.36:1.05)-ey, dz=actor.z-ez, d2=dx*dx+dy*dy+dz*dz;
+      if (d2>=range2 || d2<4) continue;
+      const sc=this.scoreTarget(sniper,actor,m.lastTarget);
+      // Insertion sort ascending by score (N <= 16) so 1st unblocked hit is guaranteed globally optimal.
+      let pos=n++;
+      while (pos>0 && scores[pos-1]>sc) {
+        cands[pos]=cands[pos-1]; scores[pos]=scores[pos-1]; dists[pos]=dists[pos-1];
+        pos--;
+      }
+      cands[pos]=actor; scores[pos]=sc; dists[pos]=d2;
+    }
+    let best=null, bestDist=range;
+    for (let i=0;i<n;i++) {
+      const actor=cands[i];
+      const tx=actor.x, ty=actor.y+(actor.swimming?.36:1.05), tz=actor.z;
+      const blocked=hasLineBlocked
+        ? (b.lineBlocked(ex,ey,ez,tx,ty,tz,1) || (hasBlockAny?b.subweapons.blockAny(ex,ey,ez,tx,ty,tz,-1):!!b.subweapons.block([ex,ey,ez],[tx,ty,tz],-1)))
+        : (!!b.traceShot([ex,ey,ez],[tx,ty,tz],true) || !!b.subweapons.block([ex,ey,ez],[tx,ty,tz],-1));
+      if (!blocked) {best=actor; bestDist=Math.sqrt(dists[i]); break;}
     }
     m.lastTarget=best;
     if (!best) return null;
@@ -869,20 +896,33 @@ export class HNV1 {
    */
   planRogueDrone(drone,siblings,weapon,dt) {
     const b=this.battle, m=this.tick(drone,dt);
-    const from=[drone.x,drone.y-.18,drone.z];
-    let chase=null, chaseScore=Infinity, fireActor=null, fireScore=Infinity;
+    const fx=drone.x, fy=drone.y-.18, fz=drone.z;
+    const range2=weapon.range*weapon.range, hasLineBlocked=typeof b.lineBlocked==='function', hasBlockAny=typeof b.subweapons.blockAny==='function';
+    const cands=this._dCand ?? (this._dCand=[]), scores=this._dScores ?? (this._dScores=[]);
+    let chase=null, chaseScore=Infinity, n=0;
     for (let i=0;i<b.actors.length;i++) {
       const actor=b.actors[i];
       if (actor.down>0 || actor.ride || actor.lift || !sameLevel(actor.x,drone.x)) continue;
-      const tp=[actor.x,actor.y+(actor.swimming?.36:.92),actor.z];
-      const dist=Math.hypot(tp[0]-from[0],tp[1]-from[1],tp[2]-from[2]);
       const sc=this.scoreTarget(drone,actor,m.lastTarget);
       if (sc<chaseScore) {chaseScore=sc;chase=actor;}
-      if (actor.shield<=0 && dist<weapon.range && dist>.9 && sc<fireScore &&
-          !b.traceShot(from,tp,true) && !b.subweapons.block(from,tp,-1)) {
-        fireScore=sc;
-        fireActor=actor;
+      if (actor.shield>0) continue;
+      const dx=actor.x-fx, dy=actor.y+(actor.swimming?.36:.92)-fy, dz=actor.z-fz, d2=dx*dx+dy*dy+dz*dz;
+      if (d2>=range2 || d2<=.81) continue;
+      let pos=n++;
+      while (pos>0 && scores[pos-1]>sc) {
+        cands[pos]=cands[pos-1]; scores[pos]=scores[pos-1];
+        pos--;
       }
+      cands[pos]=actor; scores[pos]=sc;
+    }
+    let fireActor=null;
+    for (let i=0;i<n;i++) {
+      const actor=cands[i];
+      const tx=actor.x, ty=actor.y+(actor.swimming?.36:.92), tz=actor.z;
+      const blocked=hasLineBlocked
+        ? (b.lineBlocked(fx,fy,fz,tx,ty,tz,1) || (hasBlockAny?b.subweapons.blockAny(fx,fy,fz,tx,ty,tz,-1):!!b.subweapons.block([fx,fy,fz],[tx,ty,tz],-1)))
+        : (!!b.traceShot([fx,fy,fz],[tx,ty,tz],true) || !!b.subweapons.block([fx,fy,fz],[tx,ty,tz],-1));
+      if (!blocked) {fireActor=actor; break;}
     }
     m.lastTarget=fireActor ?? chase;
 

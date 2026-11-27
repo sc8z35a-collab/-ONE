@@ -261,7 +261,7 @@ float hash12(vec2 p){vec3 q=fract(vec3(p.xyx)*.1031);q+=dot(q,q.yzx+33.33);retur
 vec2 hash22(vec2 p){vec3 q=fract(vec3(p.xyx)*vec3(.1031,.1030,.0973));q+=dot(q,q.yzx+33.33);return fract((q.xx+q.yz)*q.zy);}
 float lum(vec3 c){return dot(c,vec3(.2126,.7152,.0722));}
 vec3 toLinear(vec3 c){return c*(c*(c*.305306011+.682171111)+.012522878);}
-vec3 toSRGB(vec3 c){c=max(c,vec3(0.));return mix(c*12.92,1.055*pow(c,vec3(.4166667))-.055,step(vec3(.0031308),c));}
+vec3 toSRGB(vec3 c){c=max(c,vec3(0.));vec3 s1=sqrt(c),s2=sqrt(s1),s3=sqrt(s2);return max(vec3(0.),.662002687*s1+.684122060*s2-.323583601*s3-.022541147*c);}
 vec3 aces(vec3 x){
   const mat3 I=mat3(.59719,.07600,.02840,.35458,.90834,.13383,.04823,.01566,.83777);
   const mat3 O=mat3(1.60475,-.10208,-.00327,-.53108,1.10813,-.07276,-.07367,-.00605,1.07602);
@@ -270,13 +270,31 @@ vec3 aces(vec3 x){
   return sat3(O*(a/b));
 }
 vec3 grade(vec3 c){
-  c=aces(c*vec3(1.66,1.62,1.55));
+  c=max(c*vec3(1.64,1.60,1.54),vec3(0.));
+  // AgX-inspired highlight crosstalk: rolls intense sun glints, neon and fire toward
+  // natural filmic white without yellow/magenta hue skew while preserving deep contrast.
+  float peak=max(max(c.r,c.g),c.b);
+  c=mix(c,vec3(lum(c)),smoothstep(1.15,6.5,peak)*.30);
+  c=aces(c);
   float l=lum(c);
-  c=max(mix(vec3(l),c,1.07),vec3(0.));
-  c*=mix(vec3(.972,.995,1.035),vec3(1.035,1.,.952),smoothstep(.08,.75,l));
+  c=max(mix(vec3(l),c,1.08),vec3(0.));
+  c*=mix(vec3(.968,.994,1.038),vec3(1.032,1.002,.956),smoothstep(.08,.78,l));
   return toSRGB(sat3(c));
 }
 vec2 envUV(vec3 d){return vec2(atan(d.x,-d.z)*.15915494+.5,acos(clamp(d.y,-1.,1.))*.31830989);}
+// Exact-cardinal octahedral normal packing into RGBA8: maps [-1,1] -> [0,254/255] so all 6
+// axis-aligned normals (+/-X,+/-Y,+/-Z) reconstruct with 0.0000 degree quantization error.
+vec2 octEnc(vec3 n){
+  vec2 p=n.xz/(abs(n.x)+abs(n.y)+abs(n.z)+1e-6);
+  if (n.y<0.) p=(1.-abs(p.yx))*vec2(p.x>=0.?1.:-1.,p.y>=0.?1.:-1.);
+  return p*(127./255.)+(127./255.);
+}
+vec3 octDec(vec2 e){
+  vec2 f=clamp((e*255.-127.)*(1./127.),vec2(-1.),vec2(1.));
+  vec3 n=vec3(f.x,1.-abs(f.x)-abs(f.y),f.y);
+  if (n.y<0.) n.xz=(1.-abs(n.zx))*vec2(n.x>=0.?1.:-1.,n.z>=0.?1.:-1.);
+  return normalize(n);
+}
 vec3 envDecode(vec4 c){return c.rgb/max(vec3(1.)-c.rgb,vec3(.004));}
 vec3 envEncode(vec3 c){c=max(c,vec3(0.));return c/(1.+c);}
 `;
@@ -309,7 +327,7 @@ float cloudField(vec2 p){
   vec4 t1=texture(uDetail,q*.83+vec2(t0.b*.09,-t0.b*.07));
   return t0.r*.70+t1.r*.30+t1.a*.09;
 }
-vec4 skyClouds(vec3 d){
+vec4 skyClouds(vec3 d,vec3 atmos){
   if (d.y<.004) return vec4(0.);
   vec2 p=d.xz/(d.y+.04);
   float n=cloudField(p), cover=mix(mix(.585,.22,uRainLevel),.43,uBossRage);
@@ -325,27 +343,29 @@ vec4 skyClouds(vec3 d){
   vec3 col=mix(dark,lit,shade)*(1.-core*mix(.28,.55,max(uBossRage,uRainLevel*.85)));
   float mu=max(dot(d,uSun),0.);
   col+=mix(vec3(1.,.86,.66),vec3(.75,.07,.06),uBossRage)*pow(mu,14.)*(1.-dens)*2.6*(1.-uRainLevel*.88);
-  col=mix(skyAtmos(d),col,mix(.30,1.,smoothstep(.015,.32,d.y)));
+  col=mix(atmos,col,mix(.30,1.,smoothstep(.015,.32,d.y)));
   return vec4(col,dens*smoothstep(.004,.14,d.y));
 }
-float skylineHeight(vec3 d){
-  float az=atan(d.x,-d.z)*36.;
+float skylineHeight(float az){
   float cell=floor(az);
   float h=.003+pow(hash12(vec2(cell,1.7)),2.2)*.026+step(.9,hash12(vec2(cell,9.1)))*.030;
   return h*(.55+.45*hash12(vec2(floor(az*.17),4.)));
 }
 vec3 skyFull(vec3 d,bool clouds,bool disk){
-  vec3 col=skyAtmos(d);
-  if (clouds && d.y>0.) {vec4 c=skyClouds(d);col=mix(col,c.rgb,c.a);}
-  float top=skylineHeight(d);
-  if (d.y<top && d.y>-.04) {
+  vec3 atmos=skyAtmos(d);
+  vec3 col=atmos;
+  if (clouds && d.y>0.) {vec4 c=skyClouds(d,atmos);col=mix(col,c.rgb,c.a);}
+  if (d.y<.06 && d.y>-.04) {
     float az=atan(d.x,-d.z)*36.;
-    float id=hash12(vec2(floor(az),2.3));
-    float side=step(.5,fract(az))*.5+.5;
-    vec3 tower=mix(mix(vec3(.25,.31,.37),vec3(.06,.02,.03),uBossRage),mix(vec3(.37,.42,.47),vec3(.11,.025,.032),uBossRage),id)*mix(.82,1.08,side*sat(uSun.y+.3));
-    float rows=step(.55,fract(d.y*640.))*step(.45,fract(az*7.))*.035;
-    vec3 building=(tower+rows*mix(vec3(1.),vec3(.8,.12,.1),uBossRage))*1.15;
-    col=mix(building,col,.42+.38*sat(1.-(top-d.y)*40.));
+    float top=skylineHeight(az);
+    if (d.y<top) {
+      float id=hash12(vec2(floor(az),2.3));
+      float side=step(.5,fract(az))*.5+.5;
+      vec3 tower=mix(mix(vec3(.25,.31,.37),vec3(.06,.02,.03),uBossRage),mix(vec3(.37,.42,.47),vec3(.11,.025,.032),uBossRage),id)*mix(.82,1.08,side*sat(uSun.y+.3));
+      float rows=step(.55,fract(d.y*640.))*step(.45,fract(az*7.))*.035;
+      vec3 building=(tower+rows*mix(vec3(1.),vec3(.8,.12,.1),uBossRage))*1.15;
+      col=mix(building,col,.42+.38*sat(1.-(top-d.y)*40.));
+    }
   }
   if (disk) {
     float s=dot(d,uSun);
@@ -508,6 +528,12 @@ layout(location=9) in vec4 aExtra;
 uniform mat4 uVP;
 uniform float uDrawOffset;
 uniform bool uMergeStairs;
+#ifdef USE_SHADOW0
+uniform mat4 uShadowM0;
+uniform vec4 uShadowTexel;
+uniform vec3 uSun;
+out vec3 vShadow0;
+#endif
 out vec3 vPos;
 out vec3 vNormal;
 out vec2 vUV;
@@ -528,9 +554,14 @@ void main(){
   vec4 p=vec4(m*aPos+a3.xyz,1.);
   vPos=p.xyz;
   // Analytical orthogonal inverse-transpose without 3x3 matrix inversion or sqrt.
-  vNormal=normalize(a0.xyz*(aNormal.x/max(dot(a0.xyz,a0.xyz),1e-12))
+  vec3 wn=normalize(a0.xyz*(aNormal.x/max(dot(a0.xyz,a0.xyz),1e-12))
                    +a1.xyz*(aNormal.y/max(dot(a1.xyz,a1.xyz),1e-12))
                    +a2.xyz*(aNormal.z/max(dot(a2.xyz,a2.xyz),1e-12)));
+  vNormal=wn;
+#ifdef USE_SHADOW0
+  float slope0=1.-clamp(dot(wn,uSun),0.,1.);
+  vShadow0=(uShadowM0*vec4(p.xyz+wn*uShadowTexel.z*(1.2+slope0*1.6),1.)).xyz*.5+.5;
+#endif
   vUV=aUV;
   vLocal=aPos;
   vTint=aTint;
@@ -543,8 +574,9 @@ void main(){
   gl_Position=uMergeStairs && aExtra.z>.5?vec4(2.,2.,2.,1.):uVP*p;
 }`;
 
-// Minimal 4-varying vertex shader for pure architectural opaque solids.
-// Packs (slotTop, slotSide, slotBot, inkLayer) into a single flat vec4 varying.
+// Minimal vertex shader for pure architectural & dynamic opaque solids.
+// Packs (slotTop, slotSide, slotBot, inkLayer) into a single flat vec4 varying,
+// and optionally pre-projects orthographic Cascade-0 shadow coords per vertex.
 export const ARCH_VERTEX=`#version 300 es
 precision highp float;
 invariant gl_Position;
@@ -559,6 +591,12 @@ layout(location=9) in vec4 aExtra;
 uniform mat4 uVP;
 uniform float uDrawOffset;
 uniform bool uMergeStairs;
+#ifdef USE_SHADOW0
+uniform mat4 uShadowM0;
+uniform vec4 uShadowTexel;
+uniform vec3 uSun;
+out vec3 vShadow0;
+#endif
 out vec3 vPos;
 out vec3 vNormal;
 flat out vec4 vTint;
@@ -567,18 +605,24 @@ void main(){
   mat3 m=mat3(a0.xyz,a1.xyz,a2.xyz);
   vec4 p=vec4(m*aPos+a3.xyz,1.);
   vPos=p.xyz;
-  vNormal=normalize(a0.xyz*(aNormal.x/max(dot(a0.xyz,a0.xyz),1e-12))
+  vec3 wn=normalize(a0.xyz*(aNormal.x/max(dot(a0.xyz,a0.xyz),1e-12))
                    +a1.xyz*(aNormal.y/max(dot(a1.xyz,a1.xyz),1e-12))
                    +a2.xyz*(aNormal.z/max(dot(a2.xyz,a2.xyz),1e-12)));
+  vNormal=wn;
+#ifdef USE_SHADOW0
+  float slope0=1.-clamp(dot(wn,uSun),0.,1.);
+  vShadow0=(uShadowM0*vec4(p.xyz+wn*uShadowTexel.z*(1.2+slope0*1.6),1.)).xyz*.5+.5;
+#endif
   vTint=aTint;
   vSlots=vec4(a0.w,a1.w,a2.w,aExtra.y);
   p.x+=uDrawOffset;
   gl_Position=uMergeStairs && aExtra.z>.5?vec4(2.,2.,2.,1.):uVP*p;
 }`;
 
-// Specialized 4-varying zero-discard outdoor PBR shader for opaque architectural
-// surfaces (painted, floor, concrete, lamp, metal, brick, plaster, wood: kinds
-// 0, 1, 2, 3, 4, 13, 19, 29). Covers ~87% of outdoor static geometry.
+// Specialized lean zero-discard outdoor PBR shader for opaque architectural AND
+// dynamic PBR surfaces (kinds 0, 1, 2, 3, 4, 9, 13, 15, 18, 19, 20, 21, 29, 30, 31).
+// Uses vertex-precomputed Cascade-0 shadows, 2-tap checkerboard hardware PCF,
+// analytical SH diffuse irradiance & analytical fog (zero uEnv taps on matte surfaces).
 export const ARCH_OUTDOOR_FRAGMENT=`#version 300 es
 #define FAST_SLOT 1
 precision highp float;
@@ -587,6 +631,9 @@ precision highp sampler2DShadow;
 ${COMMON}
 in vec3 vPos;
 in vec3 vNormal;
+#ifdef USE_SHADOW0
+in vec3 vShadow0;
+#endif
 flat in vec4 vTint;
 flat in vec4 vSlots;
 uniform vec3 uEye;
@@ -614,9 +661,20 @@ uniform float uRaytrace;
 uniform float uWetLevel;
 uniform float uBossRage;
 uniform float uRainLevel;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
 out vec4 frag;
 ${SURFACE_HIGH}
 vec3 envAt(vec3 d,float lod){return envDecode(textureLod(uEnv,envUV(d),lod));}
+vec3 shDiffuse(vec3 n){float t=clamp(.5-n.y*.7071068,0.,1.);return max(mix(uSH0,uSH1,t)+uSH2*n.x+uSH3*n.z+uSH4*(t*(1.-t)),vec3(0.));}
+vec3 fogEnv(vec3 d){return max(uFog0+uFog1*d.y+uFog2*d.x+uFog3*d.z,vec3(0.));}
 float ggxD(float nh,float a){float a2=a*a;float d=nh*nh*(a2-1.)+1.;return a2/max(PI*d*d,1e-6);}
 float visSmith(float nv,float nl,float a){float k=a*.5;return .25/max((nv*(1.-k)+k)*(nl*(1.-k)+k),1e-4);}
 vec3 envBRDF(vec3 f0,float rough,float nv){
@@ -627,19 +685,20 @@ vec3 envBRDF(vec3 f0,float rough,float nv){
   vec2 ab=vec2(-1.04,1.04)*a004+r.zw;
   return f0*ab.x+ab.y;
 }
+// 2-tap checkerboard-alternated hardware-bilinear PCF (8 filtered texels, zero cos/sin).
 float shadowTap(sampler2DShadow s,vec3 c,float texel){
-  float ang=fract(52.9829189*fract(dot(gl_FragCoord.xy,vec2(.06711056,.00583715))))*6.2831853;
-  float ca=cos(ang), sa=sin(ang);
-  mat2 rot=mat2(ca,-sa,sa,ca)*(texel*1.32);
-  return (texture(s,vec3(c.xy+rot*vec2(-.61,-.73),c.z))
-         +texture(s,vec3(c.xy+rot*vec2( .74,-.41),c.z))
-         +texture(s,vec3(c.xy+rot*vec2(-.48, .79),c.z))
-         +texture(s,vec3(c.xy+rot*vec2( .67, .62),c.z)))*.25;
+  int chk=(int(gl_FragCoord.x)^int(gl_FragCoord.y))&1;
+  vec2 d=(chk==0?vec2(.62,.44):vec2(-.44,.62))*(texel*1.22);
+  return (texture(s,vec3(c.xy+d,c.z))+texture(s,vec3(c.xy-d,c.z)))*.5;
 }
 float sunShadow(vec3 p,vec3 ng){
   if (!uShadowOn) return 1.;
+#ifdef USE_SHADOW0
+  vec3 c0=vShadow0;
+#else
   float slope=1.-sat(dot(ng,uSun));
   vec3 c0=(uShadowM0*vec4(p+ng*uShadowTexel.z*(1.2+slope*1.6),1.)).xyz*.5+.5;
+#endif
   vec2 e0=min(c0.xy,1.-c0.xy);
   float inner=min(e0.x,e0.y);
   float s0=1.;
@@ -647,7 +706,8 @@ float sunShadow(vec3 p,vec3 ng){
   if (uCascades<2) return inner>0.?s0:1.;
   float blend=smoothstep(.0,.08,inner);
   if (blend>=1.) return s0;
-  vec3 c1=(uShadowM1*vec4(p+ng*uShadowTexel.w*(1.2+slope*1.6),1.)).xyz*.5+.5;
+  float slope1=1.-sat(dot(ng,uSun));
+  vec3 c1=(uShadowM1*vec4(p+ng*uShadowTexel.w*(1.2+slope1*1.6),1.)).xyz*.5+.5;
   vec2 e1=min(c1.xy,1.-c1.xy);
   float s1=1.;
   if (min(e1.x,e1.y)>0. && c1.z<1.) s1=texture(uShadow1,vec3(c1.xy,c1.z-.00045));
@@ -684,7 +744,8 @@ void main(){
     float fogAmt=1.-exp(-density*dist*max(integral,0.));
     if (uDrawFar>0.) fogAmt=max(fogAmt,smoothstep(uDrawFar*.6,uDrawFar*.97,dist));
     if (fogAmt>.002) {
-      vec3 fogCol=mix(envAt(normalize(vec3(dir.x,max(dir.y,.035),dir.z)),4.5)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
+      vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+      vec3 fogCol=mix(fogEnv(fdir)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
       col=mix(col,fogCol,fogAmt);
     }
     if (uHDR) frag=vec4(col,0.);
@@ -692,9 +753,9 @@ void main(){
     return;
   }
   bool vertical=an.y<.45;
-  float wallBase=vertical && vPos.y<1.65?1.-smoothstep(0.,.95+texture(uDetail,uvW*.043).r*.6,vPos.y):0.;
+  float wallBase=vertical && vPos.y<1.65 && (kind==2 || kind==4 || kind==13 || kind==19)?1.-smoothstep(0.,.95+texture(uDetail,uvW*.043).r*.6,vPos.y):0.;
   vec3 albedo=tint, emit=vec3(0.);
-  float rough=.86, metal=0., f0Base=.04, surfH=0., relief=0.;
+  float rough=.86, metal=0., f0Base=.04, clear=0., sheen=0., trans=0., surfH=0., relief=0.;
   if (kind==4) {
     vec4 d2=texture(uDetail,uvW*3.1);
     float sat0=max(max(tint.r,tint.g),tint.b)-min(min(tint.r,tint.g),tint.b);
@@ -709,8 +770,8 @@ void main(){
     }
     rough=mix(.38+d2.r*.14,.34+d2.g*.2,galvanized);
     albedo=mix(albedo,albedo*.6,wallBase*.4*float(vertical));
-  } else if (kind==1) {
-    float oil=smoothstep(.62,.8,texture(uDetail,uvW*.09+.7).r)*.18;
+  } else if (kind==1 || kind==15) {
+    float oil=kind==1?smoothstep(.62,.8,texture(uDetail,uvW*.09+.7).r)*.18:0.;
     if (real) {
       albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH)*(1.-oil);
       relief=1.;
@@ -718,6 +779,36 @@ void main(){
       albedo=tint*(.92+(texture(uDetail,uvW*.31).r-.5)*.14)*(1.-oil);
     }
     rough=.82-oil*.25;
+  } else if (kind==20) {
+    clear=.75; f0Base=.04;
+    if (real) {
+      albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,.6,.002,surfH);
+      rough=.33; relief=.4;
+    } else {
+      float peel=texture(uDetail,uvW*9.).r;
+      albedo=tint*(.97+peel*.04);
+      rough=.30+peel*.06;
+    }
+  } else if (kind==21) {
+    sheen=.18; f0Base=.035;
+    if (real) {
+      albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.003,surfH);
+      rough=.72; relief=.5;
+    } else {
+      vec4 d2=texture(uDetail,uvW*4.);
+      albedo=tint*(.9+d2.r*.14)+vec3(.012)*sat(ng.y);
+      rough=.68+d2.a*.1;
+    }
+  } else if (kind==18 || kind==30 || kind==31) {
+    rough=.88; sheen=.55; f0Base=.03;
+    if (real) {
+      albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.003,surfH);
+      relief=.5;
+    } else {
+      albedo=tint*(.9+texture(uDetail,uvW*2.).r*.12);
+    }
+  } else if (kind==9) {
+    albedo=tint*.92; rough=.07; clear=1.; f0Base=.04; trans=.35; emit=tint*.22;
   } else if (kind==0) {
     vec4 d2=texture(uDetail,uvW*2.3);
     float worn=an.y>.6?smoothstep(.55,.75,texture(uDetail,uvW*.6).r*.6+d2.r*.5):0.;
@@ -763,7 +854,7 @@ void main(){
     float area=dot(sdpx,r1);
     n=normalize(abs(area)*n-sign(area)*(surfSlope.x*r1+surfSlope.y*r2));
   }
-  if (kind==1 && ng.y>.48 && vPos.y>-.055) {
+  if ((kind==1 || kind==15) && ng.y>.48 && (kind==15 || vPos.y>-.055)) {
     vec2 inkUV=(vPos.xz/uInkBounds+1.)*.5;
     if (all(greaterThan(inkUV,vec2(0))) && all(lessThan(inkUV,vec2(1)))) {
       vec4 inkProbe=texture(uInk,vec3(inkUV,vSlots.w));
@@ -774,7 +865,7 @@ void main(){
         vec2 part=fract(grid);
         part=part*part*(3.-2.*part);
         int layer=int(vSlots.w);
-        float clearance=layer==4?.207:${f(FILM_HEIGHT_TOLERANCE)};
+        float clearance=kind==15 || layer==4?.207:${f(FILM_HEIGHT_TOLERANCE)};
         vec4 a=filmCell(pixel,size,layer,vPos.y,clearance);
         vec4 b=filmCell(pixel+ivec2(1,0),size,layer,vPos.y,clearance);
         vec4 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
@@ -808,7 +899,7 @@ void main(){
     }
   }
   float wetEnv=max(uWetLevel,uBossRage*.58);
-  if (wetEnv>.002 && ng.y>.42 && kind!=0 && kind!=3) {
+  if (wetEnv>.002 && ng.y>.42 && kind!=0 && kind!=3 && kind!=9) {
     float pNoise=texture(uDetail,uvW*.17+vec2(.13,.41)).r;
     float puddle=smoothstep(.44,.76,pNoise+.26*wetEnv)*wetEnv;
     albedo=mix(albedo,albedo*.62,puddle*.68);
@@ -819,22 +910,34 @@ void main(){
   vec3 R=reflect(-V,n), direct=vec3(0.);
   vec3 f0=mix(vec3(f0Base),albedo,metal);
   vec3 diffC=albedo*(1.-metal);
-  if (nl>.001) {
+  if (nl>.001 || trans>0.) {
     float sh=sunShadow(vPos,ng);
     if (sh>.001) {
       vec3 sun=uSunColor*sh;
-      vec3 h=normalize(uSun+V);
-      float nh=max(dot(n,h),0.), vh=max(dot(V,h),0.), a=max(rough*rough,.0016);
-      vec3 F=f0+(1.-f0)*pow5(1.-vh);
-      direct=diffC*(1./PI)*sun*nl+sun*(ggxD(nh,a)*visSmith(nv,nl,a)*F*nl);
+      float wrap=trans>0.?sat((nl+.4)/1.4):nl;
+      direct=diffC*(1./PI)*sun*wrap;
+      if (nl>.001) {
+        vec3 h=normalize(uSun+V);
+        float nh=max(dot(n,h),0.), vh=max(dot(V,h),0.), a=max(rough*rough,.0016);
+        vec3 F=f0+(1.-f0)*pow5(1.-vh);
+        direct+=sun*(ggxD(nh,a)*visSmith(nv,nl,a)*F*nl);
+        if (clear>0.) {
+          float ac=.0025;
+          vec3 Fc=vec3(.04)+vec3(.96)*pow5(1.-vh);
+          direct+=sun*(ggxD(nh,ac)*visSmith(nv,nl,ac)*Fc*nl)*clear;
+        }
+      }
+      if (trans>0.) direct+=diffC*trans*sun*pow(sat(dot(-V,uSun)),3.)*.9*sat(1.-nl);
     }
   }
-  vec3 irr=envAt(n,uEnvLod-1.6)*.92+vec3(.36,.34,.30)*(sat(-n.y)*.2);
+  vec3 irr=shDiffuse(n)+vec3(.36,.34,.30)*(sat(-n.y)*.2);
   if (uBossRage>.005) irr=mix(irr,irr*vec3(1.15,.36,.34)+vec3(.028,.004,.005),uBossRage*.55);
-  // Matte dielectrics sample a ~2x1 mip; reusing irr eliminates atan2/acos/textureLod.
+  // Matte dielectrics reuse SH irradiance (zero uEnv texture fetches on ~85% of pixels!).
   vec3 spec=(rough>.72 && metal<.01)?irr:envAt(R,clamp(sqrt(rough)*uEnvLod,0.,uEnvLod));
   if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
   vec3 ambient=diffC*irr+spec*envBRDF(f0,rough,nv);
+  if (clear>0.) ambient+=envAt(R,clamp(sqrt(.05)*uEnvLod,0.,uEnvLod))*(.04+.96*pow5(1.-nv))*clear;
+  if (sheen>0.) {float s1=1.-nv, s2=s1*s1; ambient+=albedo*sheen*(s2*s2)*irr*.9;}
   vec3 col=direct+ambient+emit;
   vec3 dir=-V;
   float fall=mix(.022,.004,uRainLevel), h0=uEye.y, dy=vPos.y-uEye.y;
@@ -843,7 +946,8 @@ void main(){
   float fogAmt=1.-exp(-density*dist*max(integral,0.));
   if (uDrawFar>0.) fogAmt=max(fogAmt,smoothstep(uDrawFar*.6,uDrawFar*.97,dist));
   if (fogAmt>.002) {
-    vec3 fogCol=mix(envAt(normalize(vec3(dir.x,max(dir.y,.035),dir.z)),4.5)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
+    vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+    vec3 fogCol=mix(fogEnv(fdir)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
     col=mix(col,fogCol,fogAmt);
   }
   if (uHDR) frag=vec4(col,sat(lum(ambient)/(lum(col)+1e-4))*(1.-fogAmt));
@@ -1159,6 +1263,11 @@ layout(location=7) in vec4 a3;
 uniform mat4 uLight;
 void main(){gl_Position=uLight*vec4(mat3(a0.xyz,a1.xyz,a2.xyz)*aPos+a3.xyz,1.);}`;
 
+export const SHADOW_BAKED_VERTEX=`#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uLight;
+void main(){gl_Position=uLight*vec4(aPos,1.);}`;
+
 export const SHADOW_FRAGMENT=`#version 300 es
 precision mediump float;
 void main(){}`;
@@ -1180,6 +1289,15 @@ uniform vec3 uSun;
 uniform vec3 uSunColor;
 uniform sampler2D uEnv;
 uniform float uEnvLod;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
 ${SURFACE_CORE}
 out vec4 frag;
 void main(){
@@ -1215,7 +1333,8 @@ void main(){
   if (kind==11 && an.y<=.55) albedo=mix(albedo,vec3(.08,.11,.13),.38);
   else if (kind==5) albedo*=.70;
   float nl=max(dot(ng,uSun),0.);
-  vec3 irr=envDecode(textureLod(uEnv,envUV(ng),uEnvLod-1.6))*.92;
+  float shT=clamp(.5-ng.y*.7071068,0.,1.);
+  vec3 irr=max(mix(uSH0,uSH1,shT)+uSH2*ng.x+uSH3*ng.z+uSH4*(shT*(1.-shT)),vec3(0.));
   vec3 col=albedo*(uSunColor*(nl/PI)+irr)+emit;
   vec3 V=uEye-vPos;
   float dist=length(V);
@@ -1223,8 +1342,2842 @@ void main(){
   float fall=.022, h0=uEye.y, dy=vPos.y-uEye.y;
   float integral=abs(dy)>.01?(exp(-fall*h0)-exp(-fall*vPos.y))/(fall*dy):exp(-fall*h0);
   float fogAmt=1.-exp(-.0021*dist*max(integral,0.));
-  vec3 fogCol=envDecode(textureLod(uEnv,envUV(normalize(vec3(dir.x,max(dir.y,.035),dir.z))),4.5));
-  col=mix(col,fogCol,fogAmt);
+  if (fogAmt>.002) {
+    vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+    vec3 fogCol=max(uFog0+uFog1*fdir.y+uFog2*fdir.x+uFog3*fdir.z,vec3(0.));
+    col=mix(col,fogCol,fogAmt);
+  }
+  frag=vec4(col,0.);
+}`;
+
+// ---------- 3-MRT Deferred Outdoor & 2-MRT Deferred Mirror Pipeline ----------
+// Eliminates 10x-15x forward fragment overdraw by writing compact G-Buffers
+// (G0: RGB8 tint + kind, G1: RGB8 exact-cardinal oct normal + surface slot + meta,
+// and for complex facades/windows only G2: RGBA32F face coords & size) and executing
+// exact PBR + 2-cascade shadow + ink + room-raytrace + sky lighting at 1.00x overdraw.
+export const GBUF_ARCH_VERTEX=`#version 300 es
+precision highp float;
+invariant gl_Position;
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=4) in vec4 a0;
+layout(location=5) in vec4 a1;
+layout(location=6) in vec4 a2;
+layout(location=7) in vec4 a3;
+layout(location=8) in vec4 aTint;
+layout(location=9) in vec4 aExtra;
+uniform mat4 uVP;
+uniform float uDrawOffset;
+uniform bool uMergeStairs;
+out vec3 vNormal;
+#ifdef MIRROR_CLIP
+out float vPosY;
+#endif
+flat out vec4 vTint;
+flat out vec4 vSlots;
+void main(){
+#ifdef MIRROR_CLIP
+  if (a3.y+(abs(a0.y)+abs(a1.y)+abs(a2.y))*.62<.037) {gl_Position=vec4(2.,2.,2.,1.);return;}
+#endif
+  mat3 m=mat3(a0.xyz,a1.xyz,a2.xyz);
+  vec4 p=vec4(m*aPos+a3.xyz,1.);
+#ifdef MIRROR_CLIP
+  vPosY=p.y;
+#endif
+  vNormal=normalize(a0.xyz*(aNormal.x/max(dot(a0.xyz,a0.xyz),1e-12))
+                   +a1.xyz*(aNormal.y/max(dot(a1.xyz,a1.xyz),1e-12))
+                   +a2.xyz*(aNormal.z/max(dot(a2.xyz,a2.xyz),1e-12)));
+  vTint=aTint;
+  vSlots=vec4(a0.w,a1.w,a2.w,aExtra.y);
+  p.x+=uDrawOffset;
+  gl_Position=uMergeStairs && aExtra.z>.5?vec4(2.,2.,2.,1.):uVP*p;
+}`;
+
+export const GBUF_ARCH_FRAGMENT=`#version 300 es
+precision highp float;
+${COMMON}
+in vec3 vNormal;
+#ifdef MIRROR_CLIP
+in float vPosY;
+#endif
+flat in vec4 vTint;
+flat in vec4 vSlots;
+layout(location=0) out vec4 g0;
+layout(location=1) out vec4 g1;
+void main(){
+#ifdef MIRROR_CLIP
+  if (vPosY<.037) discard;
+#endif
+  vec3 ng=normalize(vNormal);
+  float slot=floor((ng.y>.6?vSlots.x:ng.y<-.6?vSlots.z:vSlots.y)+.5);
+  float meta=clamp(floor(vSlots.w+.5),0.,15.);
+  g0=vec4(vTint.rgb,floor(vTint.a+.5)/255.);
+  g1=vec4(octEnc(ng),(clamp(slot,-1.,253.)+1.)/255.,meta/255.);
+}`;
+
+export const GBUF_FULL_VERTEX=`#version 300 es
+precision highp float;
+invariant gl_Position;
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec2 aUV;
+layout(location=4) in vec4 a0;
+layout(location=5) in vec4 a1;
+layout(location=6) in vec4 a2;
+layout(location=7) in vec4 a3;
+layout(location=8) in vec4 aTint;
+layout(location=9) in vec4 aExtra;
+uniform mat4 uVP;
+uniform float uDrawOffset;
+uniform bool uMergeStairs;
+out vec3 vNormal;
+out vec2 vUV;
+out vec3 vLocal;
+flat out vec4 vTint;
+flat out vec4 vExtra;
+flat out vec3 vSize;
+flat out vec3 vAxisX;
+flat out vec3 vAxisY;
+flat out float vSeed;
+flat out vec3 vSlots;
+void main(){
+  mat3 m=mat3(a0.xyz,a1.xyz,a2.xyz);
+  vec3 q=fract(a3.xyz*vec3(.1031,.1030,.0973));
+  q+=dot(q,q.yzx+33.33);
+  vSeed=fract((q.x+q.y)*q.z);
+  vec4 p=vec4(m*aPos+a3.xyz,1.);
+  vNormal=normalize(a0.xyz*(aNormal.x/max(dot(a0.xyz,a0.xyz),1e-12))
+                   +a1.xyz*(aNormal.y/max(dot(a1.xyz,a1.xyz),1e-12))
+                   +a2.xyz*(aNormal.z/max(dot(a2.xyz,a2.xyz),1e-12)));
+  vUV=aUV;
+  vLocal=aPos;
+  vTint=aTint;
+  vExtra=aExtra;
+  vSize=vec3(length(a0.xyz),length(a1.xyz),length(a2.xyz));
+  vAxisX=a0.xyz/max(vSize.x,1e-6);
+  vAxisY=a1.xyz/max(vSize.y,1e-6);
+  vSlots=vec3(a0.w,a1.w,a2.w);
+  p.x+=uDrawOffset;
+  gl_Position=uMergeStairs && aExtra.z>.5?vec4(2.,2.,2.,1.):uVP*p;
+}`;
+
+export const GBUF_FULL_FRAGMENT=`#version 300 es
+precision highp float;
+${COMMON}
+const int S_ROOF_MEMBRANE=${SURFACES.findIndex(s=>s.id==='roof_membrane')};
+const int S_APT_CORRIDOR=${SURFACES.findIndex(s=>s.id==='apt_corridor')};
+const int S_APT_ENDWALL=${SURFACES.findIndex(s=>s.id==='apt_endwall')};
+const int S_APT_BALCONY=${SURFACES.findIndex(s=>s.id==='apt_balcony')};
+const int S_APT_LOGGIA=${SURFACES.findIndex(s=>s.id==='apt_loggia')};
+const int S_APT_RIBBON=${SURFACES.findIndex(s=>s.id==='apt_ribbon')};
+const int S_APT_FINS=${SURFACES.findIndex(s=>s.id==='apt_fins')};
+const int S_APT_SCREEN=${SURFACES.findIndex(s=>s.id==='apt_screen')};
+const int S_APT_BRICK=${SURFACES.findIndex(s=>s.id==='apt_brick')};
+const int S_APT_GLASS=${SURFACES.findIndex(s=>s.id==='apt_glass')};
+int apartmentSlot(int style,int face){
+  if (face==1) return S_APT_CORRIDOR;
+  if (face==2) return S_APT_ENDWALL;
+  return style==0?S_APT_BALCONY:style==1?S_APT_LOGGIA:style==2?S_APT_RIBBON:style==3?S_APT_FINS:
+    style==4?S_APT_SCREEN:style==5?S_APT_BRICK:S_APT_GLASS;
+}
+in vec3 vNormal;
+in vec2 vUV;
+in vec3 vLocal;
+flat in vec4 vTint;
+flat in vec4 vExtra;
+flat in vec3 vSize;
+flat in vec3 vAxisX;
+flat in vec3 vAxisY;
+flat in float vSeed;
+flat in vec3 vSlots;
+uniform int uShape;
+layout(location=0) out vec4 g0;
+layout(location=1) out vec4 g1;
+layout(location=2) out vec4 g2;
+void main(){
+  vec3 ng=normalize(vNormal);
+  int kind=int(vTint.a+.5);
+  float slot=floor((ng.y>.6?vSlots.x:ng.y<-.6?vSlots.z:vSlots.y)+.5);
+  float meta=0.;
+  vec4 extra=vec4(0.);
+  if (kind==6 || kind==8 || kind==10 || kind==11 || kind==15 || kind==29) {
+    vec3 axZ=cross(vAxisX,vAxisY);
+    vec3 lp=vLocal*vSize;
+    vec3 nObj=vec3(dot(ng,vAxisX),dot(ng,vAxisY),dot(ng,axZ));
+    vec3 fMask=step(vec3(.5),abs(nObj));
+    vec2 faceUV=lp.xz, faceSize=vSize.xz;
+    if (fMask.x>.5) {faceUV=vec2(-sign(nObj.x)*lp.z,lp.y); faceSize=vSize.zy;}
+    else if (fMask.z>.5) {faceUV=vec2(sign(nObj.z)*lp.x,lp.y); faceSize=vSize.xy;}
+    if (kind==10) {
+      if (abs(ng.y)>.55) slot=float(S_ROOF_MEMBRANE);
+      else {
+        int face=fMask.z>.5?(nObj.z>0.?0:1):2;
+        slot=float(apartmentSlot(int(vExtra.x+.5),face));
+      }
+      meta=16.+floor(clamp(vSeed,0.,.999)*15.+.5);
+      extra=vec4(faceUV+faceSize*.5,faceSize);
+    } else if (kind==15) {
+      meta=16.+clamp(floor(vExtra.y+.5),0.,15.);
+      extra=vec4(faceUV,faceSize);
+    } else {
+      meta=16.+clamp(float(uShape),0.,15.);
+      extra=vec4(faceUV+faceSize*.5,faceSize);
+    }
+  } else if (kind==23 || kind==25) {
+    meta=16.+clamp(float(uShape),0.,15.);
+    extra=vec4(vUV,0.,0.);
+  } else if (kind==5) {
+    meta=16.+clamp(floor(vExtra.y+.5),0.,15.);
+  } else {
+    meta=16.+clamp(float(uShape),0.,15.);
+  }
+  g0=vec4(vTint.rgb,float(kind)/255.);
+  g1=vec4(octEnc(ng),(clamp(slot,-1.,253.)+1.)/255.,meta/255.);
+  g2=extra;
+}`;
+
+// Zero-fragment-math flat-faceted G-buffer shader (box, ramp, tri, bevel:lo):
+// precomputes octahedral normal, surface slot, kind & ink layer once per vertex
+// so fragment shading is literally two register moves (g0=vG0; g1=vG1;).
+export const GBUF_FLAT_VERTEX=`#version 300 es
+precision highp float;
+invariant gl_Position;
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=4) in vec4 a0;
+layout(location=5) in vec4 a1;
+layout(location=6) in vec4 a2;
+layout(location=7) in vec4 a3;
+layout(location=8) in vec4 aTint;
+layout(location=9) in vec4 aExtra;
+uniform mat4 uVP;
+uniform float uDrawOffset;
+uniform bool uMergeStairs;
+#ifdef MIRROR_CLIP
+out float vPosY;
+#endif
+flat out vec4 vG0;
+flat out vec4 vG1;
+vec2 octEnc(vec3 n){
+  vec2 p=n.xz/(abs(n.x)+abs(n.y)+abs(n.z)+1e-6);
+  if (n.y<0.) p=(1.-abs(p.yx))*vec2(p.x>=0.?1.:-1.,p.y>=0.?1.:-1.);
+  return p*(127./255.)+(127./255.);
+}
+void main(){
+#ifdef MIRROR_CLIP
+  if (a3.y+(abs(a0.y)+abs(a1.y)+abs(a2.y))*.62<.037) {gl_Position=vec4(2.,2.,2.,1.);return;}
+#endif
+  mat3 m=mat3(a0.xyz,a1.xyz,a2.xyz);
+  vec4 p=vec4(m*aPos+a3.xyz,1.);
+#ifdef MIRROR_CLIP
+  vPosY=p.y;
+#endif
+  vec3 invS2=1./max(vec3(dot(a0.xyz,a0.xyz),dot(a1.xyz,a1.xyz),dot(a2.xyz,a2.xyz)),vec3(1e-12));
+  vec3 wn=normalize(a0.xyz*(aNormal.x*invS2.x)+a1.xyz*(aNormal.y*invS2.y)+a2.xyz*(aNormal.z*invS2.z));
+  float slot=floor((wn.y>.6?a0.w:wn.y<-.6?a2.w:a1.w)+.5);
+  float meta=clamp(floor(aExtra.y+.5),0.,15.);
+  vG0=vec4(aTint.rgb,floor(aTint.a+.5)/255.);
+  vG1=vec4(octEnc(wn),(clamp(slot,-1.,253.)+1.)/255.,meta/255.);
+  p.x+=uDrawOffset;
+  gl_Position=uMergeStairs && aExtra.z>.5?vec4(2.,2.,2.,1.):uVP*p;
+}`;
+
+export const GBUF_FLAT_FRAGMENT=`#version 300 es
+precision highp float;
+#ifdef MIRROR_CLIP
+in float vPosY;
+#endif
+flat in vec4 vG0;
+flat in vec4 vG1;
+layout(location=0) out vec4 g0;
+layout(location=1) out vec4 g1;
+void main(){
+#ifdef MIRROR_CLIP
+  if (vPosY<.037) discard;
+#endif
+  g0=vG0;
+  g1=vG1;
+}`;
+
+// Flat-faceted 3-MRT Full G-buffer shader (box/ramp/bevel:lo facades, windows, roads, stairs, wood):
+// moves all basis/normal/faceSize/apartmentSlot/octEnc work to the vertex shader,
+// leaving only 1 smooth vec2 (vFaceUV) and 3 register writes per fragment.
+export const GBUF_FULL_FLAT_VERTEX=`#version 300 es
+precision highp float;
+invariant gl_Position;
+const int S_ROOF_MEMBRANE=${SURFACES.findIndex(s=>s.id==='roof_membrane')};
+const int S_APT_CORRIDOR=${SURFACES.findIndex(s=>s.id==='apt_corridor')};
+const int S_APT_ENDWALL=${SURFACES.findIndex(s=>s.id==='apt_endwall')};
+const int S_APT_BALCONY=${SURFACES.findIndex(s=>s.id==='apt_balcony')};
+const int S_APT_LOGGIA=${SURFACES.findIndex(s=>s.id==='apt_loggia')};
+const int S_APT_RIBBON=${SURFACES.findIndex(s=>s.id==='apt_ribbon')};
+const int S_APT_FINS=${SURFACES.findIndex(s=>s.id==='apt_fins')};
+const int S_APT_SCREEN=${SURFACES.findIndex(s=>s.id==='apt_screen')};
+const int S_APT_BRICK=${SURFACES.findIndex(s=>s.id==='apt_brick')};
+const int S_APT_GLASS=${SURFACES.findIndex(s=>s.id==='apt_glass')};
+int apartmentSlot(int style,int face){
+  if (face==1) return S_APT_CORRIDOR;
+  if (face==2) return S_APT_ENDWALL;
+  return style==0?S_APT_BALCONY:style==1?S_APT_LOGGIA:style==2?S_APT_RIBBON:style==3?S_APT_FINS:
+    style==4?S_APT_SCREEN:style==5?S_APT_BRICK:S_APT_GLASS;
+}
+vec2 octEnc(vec3 n){
+  vec2 p=n.xz/(abs(n.x)+abs(n.y)+abs(n.z)+1e-6);
+  if (n.y<0.) p=(1.-abs(p.yx))*vec2(p.x>=0.?1.:-1.,p.y>=0.?1.:-1.);
+  return p*(127./255.)+(127./255.);
+}
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec2 aUV;
+layout(location=4) in vec4 a0;
+layout(location=5) in vec4 a1;
+layout(location=6) in vec4 a2;
+layout(location=7) in vec4 a3;
+layout(location=8) in vec4 aTint;
+layout(location=9) in vec4 aExtra;
+uniform mat4 uVP;
+uniform float uDrawOffset;
+uniform bool uMergeStairs;
+uniform int uShape;
+flat out vec4 vG0;
+flat out vec4 vG1;
+out vec2 vFaceUV;
+flat out vec2 vFaceSize;
+void main(){
+  mat3 m=mat3(a0.xyz,a1.xyz,a2.xyz);
+  vec4 p=vec4(m*aPos+a3.xyz,1.);
+  vec3 vSize=vec3(length(a0.xyz),length(a1.xyz),length(a2.xyz));
+  vec3 invS=1./max(vSize,vec3(1e-6));
+  vec3 ax=a0.xyz*invS.x, ay=a1.xyz*invS.y, az=a2.xyz*invS.z;
+  vec3 wn=normalize(ax*(aNormal.x*invS.x)+ay*(aNormal.y*invS.y)+az*(aNormal.z*invS.z));
+  int kind=int(aTint.a+.5);
+  float slot=floor((wn.y>.6?a0.w:wn.y<-.6?a2.w:a1.w)+.5);
+  float meta=16.+clamp(float(uShape),0.,15.);
+  vec2 fuv=vec2(0.), fsz=vec2(0.);
+  if (kind==6 || kind==8 || kind==10 || kind==11 || kind==15 || kind==29) {
+    vec3 lp=aPos*vSize;
+    vec3 nObj=vec3(dot(wn,ax),dot(wn,ay),dot(wn,cross(ax,ay)));
+    vec3 fMask=step(vec3(.5),abs(nObj));
+    vec2 faceUV=lp.xz, faceSize=vSize.xz;
+    if (fMask.x>.5) {faceUV=vec2(-sign(nObj.x)*lp.z,lp.y); faceSize=vSize.zy;}
+    else if (fMask.z>.5) {faceUV=vec2(sign(nObj.z)*lp.x,lp.y); faceSize=vSize.xy;}
+    fsz=faceSize;
+    if (kind==10) {
+      if (abs(wn.y)>.55) slot=float(S_ROOF_MEMBRANE);
+      else {
+        int face=fMask.z>.5?(nObj.z>0.?0:1):2;
+        slot=float(apartmentSlot(int(aExtra.x+.5),face));
+      }
+      vec3 q=fract(a3.xyz*vec3(.1031,.1030,.0973));
+      q+=dot(q,q.yzx+33.33);
+      float vSeed=fract((q.x+q.y)*q.z);
+      meta=16.+floor(clamp(vSeed,0.,.999)*15.+.5);
+      fuv=faceUV+faceSize*.5;
+    } else if (kind==15) {
+      meta=16.+clamp(floor(aExtra.y+.5),0.,15.);
+      fuv=faceUV;
+    } else {
+      fuv=faceUV+faceSize*.5;
+    }
+  } else if (kind==23 || kind==25) {
+    fuv=aUV;
+  } else if (kind==5) {
+    meta=16.+clamp(floor(aExtra.y+.5),0.,15.);
+  }
+  vG0=vec4(aTint.rgb,float(kind)/255.);
+  vG1=vec4(octEnc(wn),(clamp(slot,-1.,253.)+1.)/255.,meta/255.);
+  vFaceUV=fuv;
+  vFaceSize=fsz;
+  p.x+=uDrawOffset;
+  gl_Position=uMergeStairs && aExtra.z>.5?vec4(2.,2.,2.,1.):uVP*p;
+}`;
+
+export const GBUF_FULL_FLAT_FRAGMENT=`#version 300 es
+precision highp float;
+flat in vec4 vG0;
+flat in vec4 vG1;
+in vec2 vFaceUV;
+flat in vec2 vFaceSize;
+layout(location=0) out vec4 g0;
+layout(location=1) out vec4 g1;
+layout(location=2) out vec4 g2;
+void main(){
+  g0=vG0;
+  g1=vG1;
+  g2=vec4(vFaceUV,vFaceSize);
+}`;
+
+// Non-instanced baked/streamed G-buffer shaders: eliminate per-instance drawElementsInstanced
+// dispatch overhead with pre-transformed world vertices and byte-packed G-buffer payloads.
+export const GBUF_BAKED_FLAT_VERTEX=`#version 300 es
+precision highp float;
+invariant gl_Position;
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 aG0;
+layout(location=2) in vec4 aG1;
+uniform mat4 uVP;
+#ifdef MIRROR_CLIP
+out float vPosY;
+#endif
+flat out vec4 vG0;
+flat out vec4 vG1;
+void main(){
+#ifdef MIRROR_CLIP
+  vPosY=aPos.y;
+#endif
+  vG0=aG0;
+  vG1=aG1;
+  gl_Position=uVP*vec4(aPos,1.);
+}`;
+
+export const GBUF_BAKED_FLAT_FRAGMENT=`#version 300 es
+precision highp float;
+#ifdef MIRROR_CLIP
+in float vPosY;
+#endif
+flat in vec4 vG0;
+flat in vec4 vG1;
+layout(location=0) out vec4 g0;
+layout(location=1) out vec4 g1;
+void main(){
+#ifdef MIRROR_CLIP
+  if (vPosY<.037) discard;
+#endif
+  g0=vG0;
+  g1=vG1;
+}`;
+
+export const GBUF_BAKED_FULL_VERTEX=`#version 300 es
+precision highp float;
+invariant gl_Position;
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 aG0;
+layout(location=2) in vec4 aG1;
+layout(location=3) in vec4 aG2;
+uniform mat4 uVP;
+flat out vec4 vG0;
+flat out vec4 vG1;
+out vec4 vG2;
+void main(){
+  vG0=aG0;
+  vG1=aG1;
+  vG2=aG2;
+  gl_Position=uVP*vec4(aPos,1.);
+}`;
+
+export const GBUF_BAKED_FULL_FRAGMENT=`#version 300 es
+precision highp float;
+flat in vec4 vG0;
+flat in vec4 vG1;
+in vec4 vG2;
+layout(location=0) out vec4 g0;
+layout(location=1) out vec4 g1;
+layout(location=2) out vec4 g2;
+void main(){
+  g0=vG0;
+  g1=vG1;
+  g2=vG2;
+}`;
+
+export const GBUF_BAKED_ARCH_VERTEX=`#version 300 es
+precision highp float;
+invariant gl_Position;
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 aNorm;
+layout(location=2) in vec4 aG0;
+layout(location=3) in vec4 aMeta;
+uniform mat4 uVP;
+out vec3 vNormal;
+#ifdef MIRROR_CLIP
+out float vPosY;
+#endif
+flat out vec4 vG0;
+flat out vec4 vMeta;
+void main(){
+  vNormal=aNorm.xyz;
+#ifdef MIRROR_CLIP
+  vPosY=aPos.y;
+#endif
+  vG0=aG0;
+  vMeta=aMeta;
+  gl_Position=uVP*vec4(aPos,1.);
+}`;
+
+export const GBUF_BAKED_ARCH_FRAGMENT=`#version 300 es
+precision highp float;
+${COMMON}
+in vec3 vNormal;
+#ifdef MIRROR_CLIP
+in float vPosY;
+#endif
+flat in vec4 vG0;
+flat in vec4 vMeta;
+layout(location=0) out vec4 g0;
+layout(location=1) out vec4 g1;
+void main(){
+#ifdef MIRROR_CLIP
+  if (vPosY<.037) discard;
+#endif
+  vec3 ng=normalize(vNormal);
+  float slot1=ng.y>.6?vMeta.x:ng.y<-.6?vMeta.z:vMeta.y;
+  g0=vG0;
+  g1=vec4(octEnc(ng),slot1*(1./255.),vMeta.w*(1./255.));
+}`;
+
+// Single-pass branch-coherent Deferred Outdoor PBR + Sky shader (analytic vRay,
+// #define NO_SURFACES 1 procedural fast path, 0.06% sky early-return, 18.9% full-PBR
+// branch isolation, pre-biased 3x4 affine shadows & CPU-hoisted uFogParams).
+export const DEFERRED_OUTDOOR_FRAGMENT=`#version 300 es
+#define FAST_SLOT 1
+precision highp float;
+precision highp sampler2DArray;
+precision highp sampler2DShadow;
+${COMMON}
+${SKY}
+in vec2 vUV;
+in vec3 vRay;
+uniform highp sampler2D uGDepth;
+uniform sampler2D uG0;
+uniform sampler2D uG1;
+uniform highp sampler2D uG2;
+uniform vec2 uDepthAB;
+uniform vec3 uEye;
+uniform float uPixelStep;
+uniform vec3 uSunColor;
+uniform bool uShadowOn;
+uniform int uCascades;
+uniform sampler2DShadow uShadow0;
+uniform sampler2DShadow uShadow1;
+uniform mat4 uShadowM0;
+uniform mat4 uShadowM1;
+uniform vec4 uShadowTexel;
+uniform sampler2DArray uInk;
+uniform vec2 uInkTexel;
+uniform vec2 uInkBounds;
+uniform vec4 uInkActiveBox;
+uniform sampler2D uEnv;
+uniform float uEnvLod;
+uniform sampler2D uReflection;
+uniform bool uReflectOn;
+uniform vec2 uViewport;
+uniform vec4 uFogParams;
+uniform float uRaytrace;
+uniform float uWetLevel;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
+out vec4 frag;
+#ifndef NO_SURFACES
+${SURFACE_HIGH}
+#endif
+vec4 det(vec2 p){return texture(uDetail,p);}
+vec3 envSpec(vec3 r,float rough){return envDecode(textureLod(uEnv,envUV(r),clamp(sqrt(rough)*uEnvLod,0.,uEnvLod)));}
+vec3 shDiffuse(vec3 n){float t=clamp(.5-n.y*.7071068,0.,1.);return max(mix(uSH0,uSH1,t)+uSH2*n.x+uSH3*n.z+uSH4*(t*(1.-t)),vec3(0.));}
+vec3 fogEnv(vec3 d){return max(uFog0+uFog1*d.y+uFog2*d.x+uFog3*d.z,vec3(0.));}
+float ggxD(float nh,float a){float a2=a*a;float d=nh*nh*(a2-1.)+1.;return a2/max(PI*d*d,1e-6);}
+float visSmith(float nv,float nl,float a){float k=a*.5;return .25/max((nv*(1.-k)+k)*(nl*(1.-k)+k),1e-4);}
+vec3 specGGX(vec3 n,vec3 v,vec3 l,vec3 f0,float rough,float nv,float nl){
+  vec3 h=normalize(l+v);
+  float nh=max(dot(n,h),0.), a=max(rough*rough,.0016);
+  vec3 F=f0+(1.-f0)*pow5(1.-max(dot(v,h),0.));
+  return ggxD(nh,a)*visSmith(nv,nl,a)*F*nl;
+}
+vec2 envBRDF_AB(float rough,float nv){
+  const vec4 c0=vec4(-1.,-.0275,-.572,.022);
+  const vec4 c1=vec4(1.,.0425,1.04,-.04);
+  vec4 r=rough*c0+c1;
+  float a004=min(r.x*r.x,exp2(-9.28*nv))*r.x+r.y;
+  return vec2(-1.04,1.04)*a004+r.zw;
+}
+vec3 envBRDF(vec3 f0,float rough,float nv){
+  vec2 ab=envBRDF_AB(rough,nv);
+  return f0*ab.x+ab.y;
+}
+// Physically-based Rayleigh cool sky scatter + two-lobe Mie sun forward scatter aerial perspective.
+vec3 aerialFog(vec3 dir){
+  vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+  vec3 baseFog=fogEnv(fdir);
+  float clearAir=(1.-uRainLevel*.82)*(1.-uBossRage*.88);
+  vec3 rayleigh=vec3(.52,.72,1.04)*(lum(baseFog)*.26)*clearAir*smoothstep(-.05,.32,dir.y+.10);
+  float sm=sat(dot(dir,uSun)); float sm2=sm*sm; float sm8=sm2*sm2; sm8*=sm8;
+  vec3 mie=uSunColor*((sm2*.032+sm8*.092)*(1.-uRainLevel*.88));
+  vec3 rainCol=mix(vec3(.13,.155,.185),vec3(.16,.035,.042),uBossRage);
+  return mix(baseFog+rayleigh+mie,rainCol,uRainLevel*.55);
+}
+float shadowTap(sampler2DShadow s,vec3 c,float texel){
+  int chk=(int(gl_FragCoord.x)^int(gl_FragCoord.y))&1;
+  vec2 d=(chk==0?vec2(.62,.44):vec2(-.44,.62))*(texel*1.22);
+  return (texture(s,vec3(c.xy+d,c.z))+texture(s,vec3(c.xy-d,c.z)))*.5;
+}
+float sunShadow(vec3 p,vec3 ng){
+  if (!uShadowOn) return 1.;
+  float slope=1.-sat(dot(ng,uSun));
+  vec3 q0=p+ng*(uShadowTexel.z*(1.2+slope*1.6));
+  vec3 c0=uShadowM0[0].xyz*q0.x+uShadowM0[1].xyz*q0.y+uShadowM0[2].xyz*q0.z+uShadowM0[3].xyz;
+  vec2 e0=min(c0.xy,1.-c0.xy);
+  float inner=min(e0.x,e0.y);
+  float s0=1.;
+  if (inner>0. && c0.z<1.) s0=shadowTap(uShadow0,vec3(c0.xy,c0.z-.00022),uShadowTexel.x);
+  if (uCascades<2) return inner>0.?s0:1.;
+  float blend=smoothstep(.0,.08,inner);
+  if (blend>=1.) return s0;
+  vec3 q1=p+ng*(uShadowTexel.w*(1.2+slope*1.6));
+  vec3 c1=uShadowM1[0].xyz*q1.x+uShadowM1[1].xyz*q1.y+uShadowM1[2].xyz*q1.z+uShadowM1[3].xyz;
+  vec2 e1=min(c1.xy,1.-c1.xy);
+  float s1=1.;
+  if (min(e1.x,e1.y)>0. && c1.z<1.) s1=texture(uShadow1,vec3(c1.xy,c1.z-.00045));
+  s1=mix(1.,s1,smoothstep(0.,.06,min(e1.x,e1.y)));
+  return mix(s1,s0,blend);
+}
+vec4 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
+  vec4 cell=texelFetch(uInk,ivec3(clamp(pixel,ivec2(0),size-1),layer),0);
+  float bed=${f(FILM_HEIGHT_ORIGIN)}+(round(cell.a*255.)-1.)*${f(FILM_HEIGHT_STEP)};
+  bool match=cell.a>0. && abs(height-bed)<tolerance;
+  return vec4(match?cell.rgb:vec3(0.),cell.a<=0. || match?1.:0.);
+}
+vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth,float px){
+  vec3 o=vec3(uv-.5,0.);
+  vec3 ray=vec3(viewT.xy,max(viewT.z,.05)/depth);
+  vec2 safe=sign(ray.xy+1e-5)*max(abs(ray.xy),vec2(1e-4));
+  vec2 side=(sign(safe)*.5-o.xy)/safe;
+  float back=1./ray.z, t=min(back,min(side.x,side.y));
+  vec3 hit=o+ray*t;
+  float floorHit=step(side.y,min(back,side.x))*step(ray.y,0.);
+  float ceilHit=step(side.y,min(back,side.x))*step(0.,ray.y);
+  float backHit=step(back,min(side.x,side.y));
+  vec3 wallC=mix(vec3(.55,.52,.46),vec3(.42,.47,.48),seed);
+  vec3 col=wallC*mix(.74,.9,backHit);
+  col=mix(col,vec3(.22,.18,.15)*(1.+seed*.4),floorHit);
+  col=mix(col,vec3(.72,.71,.66),ceilHit);
+  float furniture=backHit*step(abs(hit.x+.18-seed*.3),.22)*step(hit.y,-.12);
+  col=mix(col,vec3(.18,.17,.16),furniture*.85);
+#ifndef NO_SURFACES
+  if (uSurfaceSheets>0 && px<.045) {
+    float texels=.5/uSurfaceEdge.x, metres=1.5;
+    int floorSlot=seed<.33?S_TATAMI:seed<.66?S_WOOD_FLOORING:S_CARPET_TILE;
+    int wallSlot=fract(seed*7.31)<.5?S_VINYL_WALLPAPER:S_GYPSUM_PAINTED;
+    if (floorHit>.5 && surfaceReady(floorSlot)) {
+      float lod=log2(max(px*2.5*texels/S_METERS[floorSlot],1.));
+      vec3 c=toLinear(surfaceLod(floorSlot,hit.xz*metres,lod).rgb);
+      col=c*(.9+seed*.2);
+    } else if (ceilHit<.5 && surfaceReady(wallSlot)) {
+      float lod=log2(max(px*2.*texels/S_METERS[wallSlot],1.));
+      vec2 wp=(backHit>.5?hit.xy:vec2(hit.z,hit.y))*metres;
+      vec3 c=toLinear(surfaceLod(wallSlot,wp,lod).rgb);
+      col*=c/max(toLinear(surfaceMean(wallSlot)),vec3(.02));
+    }
+  }
+#endif
+  float shelf=backHit*step(.18,hit.x)*step(hit.x,.42)*step(abs(fract(hit.y*3.)-.5),.06);
+  col=mix(col,vec3(.30,.26,.21),shelf);
+  float lamp=ceilHit*smoothstep(.16,.05,length(hit.xz-vec2(0.,.4*depth)));
+  vec3 light=mix(vec3(.30,.32,.33),vec3(1.,.82,.58)*1.6,lightOn);
+  return col*light+vec3(1.,.86,.62)*lamp*lightOn*4.;
+}
+void main(){
+  ivec2 ipx=ivec2(gl_FragCoord.xy);
+  float rawD=texelFetch(uGDepth,ipx,0).r;
+  float invRL=inversesqrt(dot(vRay,vRay));
+  vec3 dir=vRay*invRL;
+  if (rawD>=.99999) {
+    frag=vec4(skyFull(dir,true,true),0.);
+    return;
+  }
+  float zView=uDepthAB.x/(uDepthAB.y-rawD);
+  vec3 vPos=uEye+vRay*zView;
+  float dist=zView/invRL;
+  vec3 V=-dir;
+  vec4 g0=texelFetch(uG0,ipx,0);
+  vec4 g1=texelFetch(uG1,ipx,0);
+  int kind=int(g0.a*255.+.5);
+  vec3 ng=octDec(g1.rg);
+  int meta=int(g1.a*255.+.5);
+  bool isFull=(meta&16)!=0;
+  int lowMeta=meta&15;
+  vec3 tint=toLinear(g0.rgb);
+  vec3 an=abs(ng);
+  vec2 xz=vPos.xz;
+  vec2 uvW=an.y>.6?xz:(an.x>an.z?vPos.zy:vPos.xy);
+#ifdef NO_SURFACES
+  float px=dist*uPixelStep;
+#else
+  vec3 sdpxRaw=dFdx(vPos), sdpyRaw=dFdy(vPos);
+  float maxStep=max(dist*uPixelStep*5.,0.008), maxStep2=maxStep*maxStep;
+  float ldx2=dot(sdpxRaw,sdpxRaw), ldy2=dot(sdpyRaw,sdpyRaw);
+  bool discEdge=(ldx2>maxStep2 || ldy2>maxStep2);
+  vec3 sdpx=ldx2>maxStep2?sdpxRaw*(maxStep*inversesqrt(ldx2)):sdpxRaw;
+  vec3 sdpy=ldy2>maxStep2?sdpyRaw*(maxStep*inversesqrt(ldy2)):sdpyRaw;
+  float px=max(length(sdpx),length(sdpy));
+  vec2 sdx=an.y>.6?sdpx.xz:(an.x>an.z?sdpx.zy:sdpx.xy);
+  vec2 sdy=an.y>.6?sdpy.xz:(an.x>an.z?sdpy.zy:sdpy.xy);
+  int slot=uSurfaceSheets>0?(int(g1.b*255.+.5)-1):-1;
+  bool real=surfaceReady(slot);
+#endif
+
+  if (kind==3) {
+    vec3 col=tint*3.2;
+#ifndef NO_SURFACES
+    if (real) {
+      vec4 stex=surfaceTap(slot,uvW,sdx,sdy);
+      col*=mix(vec3(1.),toLinear(stex.rgb)/max(toLinear(surfaceMean(slot)),vec3(.05)),.75);
+    }
+#endif
+    float dy=vPos.y-uEye.y;
+    float integral=abs(dy)>.01?(uFogParams.z-exp(-uFogParams.x*vPos.y))/(uFogParams.x*dy):uFogParams.z;
+    float fogAmt=1.-exp(-uFogParams.y*dist*max(integral,0.));
+    if (uFogParams.w>0.) fogAmt=max(fogAmt,smoothstep(uFogParams.w*.6,uFogParams.w*.97,dist));
+    if (fogAmt>.002) col=mix(col,aerialFog(dir),fogAmt);
+    frag=vec4(col,0.);
+    return;
+  }
+  if (kind==25) {
+    vec2 uv2=texelFetch(uG2,ipx,0).xy;
+    float rim=pow(1.-max(0.,dot(ng,V)),2.5);
+    float veins=sin(uv2.x*32.+uv2.y*21.-uClock*19.+det(uv2*1.3).r*9.);
+    float streak=smoothstep(.42,.96,veins)*.55+rim*.46;
+    vec3 liquid=tint*(1.2+.5*max(dot(ng,uSun),0.)+.25*veins);
+    vec3 col=mix(liquid,vec3(2.6,2.3,2.6),sat(streak))*1.4;
+    frag=vec4(col,0.);
+    return;
+  }
+
+  bool vertical=an.y<.45;
+  float wallBase=vertical && vPos.y<1.65 && (kind==2 || kind==4 || kind==10 || kind==13 || kind==19)?
+    1.-smoothstep(0.,.95+det(uvW*.043).r*.6,vPos.y):0.;
+  vec3 albedo=tint, emit=vec3(0.), n=ng;
+  float rough=.86, metal=0., ao=1., f0Base=.04, clear=0., sheen=0., trans=0., surfH=0., relief=0.;
+
+  if (!isFull) {
+    if (kind==1) {
+      float oil=smoothstep(.62,.8,det(uvW*.09+.7).r)*.18;
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH)*(1.-oil); relief=1.;}
+      else
+#endif
+      albedo=tint*(.92+(det(uvW*.31).r-.5)*.14)*(1.-oil);
+      rough=.82-oil*.25;
+    } else if (kind==4) {
+      vec4 d2=det(uvW*3.1);
+      float sat0=max(max(tint.r,tint.g),tint.b)-min(min(tint.r,tint.g),tint.b);
+      float galvanized=step(sat0,.035)*step(.12,lum(tint));
+      metal=galvanized;
+      vec3 baseCol=mix(tint,vec3(.56,.57,.58)*(.85+d2.g*.3),galvanized*.8);
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,baseCol,1.,.004,surfH); relief=1.;}
+      else
+#endif
+      albedo=baseCol*(.94+(d2.r-.5)*.12);
+      rough=mix(.38+d2.r*.14,.34+d2.g*.2,galvanized);
+      albedo=mix(albedo,albedo*.6,wallBase*.4*float(vertical));
+    } else if (kind==2 || kind==19) {
+#ifndef NO_SURFACES
+      if (real) {
+        albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH); relief=1.;
+        albedo=mix(albedo,albedo*vec3(.62,.60,.52),wallBase*.55*float(vertical)); rough=.88;
+      } else
+#endif
+      {
+        float g=det(uvW*.29).r;
+        albedo=tint*(.92+(g-.5)*.16);
+        if (vertical) albedo=mix(albedo,albedo*vec3(.62,.60,.52),wallBase*.55);
+      }
+    } else if (kind==20) {
+      clear=.75;
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,.6,.002,surfH); rough=.33; relief=.4;}
+      else
+#endif
+      {float peel=det(uvW*9.).r; albedo=tint*(.97+peel*.04); rough=.30+peel*.06;}
+    } else if (kind==21) {
+      sheen=.18; f0Base=.035;
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.003,surfH); rough=.72; relief=.5;}
+      else
+#endif
+      {vec4 d2=det(uvW*4.); albedo=tint*(.9+d2.r*.14)+vec3(.012)*sat(ng.y); rough=.68+d2.a*.1;}
+    } else if (kind==18 || kind==30 || kind==31) {
+      rough=.88; sheen=.55; f0Base=.03;
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.003,surfH); relief=.5;}
+      else
+#endif
+      albedo=tint*(.9+det(uvW*2.).r*.12);
+    } else if (kind==9) {
+      albedo=tint*.92; rough=.07; clear=1.; trans=.35; emit=tint*.22;
+    } else if (kind==0 || kind==22) {
+      vec4 d2=det(uvW*2.3);
+      float worn=an.y>.6?smoothstep(.55,.75,det(uvW*.6).r*.6+d2.r*.5):0.;
+      albedo=mix(tint*(.95+d2.a*.08),tint*.55+vec3(.05),worn*.7);
+      rough=.62+worn*.2;
+      if (kind==22 && an.y>.6 && px<.015) {
+        float bead=step(.985,det(uvW*31.).a)*(1.-worn);
+        f0Base=mix(.04,.4,bead); rough=mix(rough,.2,bead);
+      }
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,albedo,kind==22?1.:.7,.003,surfH); relief=.5;}
+#endif
+    } else if (kind==13) {
+#ifndef NO_SURFACES
+      if (real) {
+        albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.012,surfH); relief=1.;
+        bool nat=slot==S_BARK || slot==S_SOIL || slot==S_MULCH;
+        if (!nat) albedo=mix(albedo,albedo*.66,wallBase*.6*float(vertical));
+        rough=nat?.9:.78;
+      } else
+#endif
+      {
+        vec2 bricks=uvW/vec2(.69,.296);
+        bricks.x+=mod(floor(bricks.y),2.)*.5;
+        vec2 b=fract(bricks), id=floor(bricks);
+        vec2 jd=min(b,1.-b)*vec2(.69,.296);
+        float mortar=1.-smoothstep(.006,.016+px*.5,min(jd.x,jd.y));
+        albedo=mix(tint*(.84+hash12(id)*.24),vec3(.52,.50,.46),mortar*.85);
+        albedo=mix(albedo,albedo*.66,wallBase*.6*float(vertical));
+        rough=mix(.78,.92,mortar);
+      }
+    } else {
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH); relief=1.; rough=.78;}
+      else
+#endif
+      {
+        float g=det(uvW*.29).r;
+        albedo=tint*(.92+(g-.5)*.16);
+        if (vertical) albedo=mix(albedo,albedo*vec3(.62,.60,.52),wallBase*.55);
+      }
+    }
+#ifndef NO_SURFACES
+    surfH*=relief*(1.-smoothstep(.004,.03,px));
+    vec2 surfSlope=vec2(dFdx(surfH),dFdy(surfH));
+    if (relief>0. && px<.03 && !discEdge) {
+      vec3 r1=cross(sdpy,ng), r2=cross(ng,sdpx);
+      float area=dot(sdpx,r1);
+      n=normalize(abs(area)*n-sign(area)*(surfSlope.x*r1+surfSlope.y*r2));
+    }
+#endif
+  } else {
+    // Full PBR path (~19% of screen): roads, skyscrapers, apartments, windows, stairs, wood, boss.
+#ifdef NO_SURFACES
+    vec3 sdpxRaw=dFdx(vPos), sdpyRaw=dFdy(vPos);
+    float maxStep=max(dist*uPixelStep*5.,0.008), maxStep2=maxStep*maxStep;
+    float ldx2=dot(sdpxRaw,sdpxRaw), ldy2=dot(sdpyRaw,sdpyRaw);
+    bool discEdge=(ldx2>maxStep2 || ldy2>maxStep2);
+    vec3 sdpx=ldx2>maxStep2?sdpxRaw*(maxStep*inversesqrt(ldx2)):sdpxRaw;
+    vec3 sdpy=ldy2>maxStep2?sdpyRaw*(maxStep*inversesqrt(ldy2)):sdpyRaw;
+    px=max(length(sdpx),length(sdpy));
+#endif
+    rough=.6;
+    if (kind==5) {
+      vec4 d1=det(uvW*.23);
+      float crackZone=smoothstep(.58,.70,det(uvW*.031+.4).r);
+      float tar=crackZone>.005?smoothstep(.84,.97,det(uvW*.083+.2).b)*crackZone*.85:0.;
+      float puddleField=det(xz*.045+.11).r*.75+d1.r*.35+uWetLevel*.10;
+      float puddle=smoothstep(.56,.70,puddleField);
+      // Capillary damp shoreline halo around puddles (darkens porous stone at water's edge)
+      float dampRing=smoothstep(.42,.60,puddleField)*(1.-puddle);
+      float wet=sat(puddle*1.6);
+      vec3 asphalt;
+#ifndef NO_SURFACES
+      if (real) {
+        vec4 stex=surfaceTap(slot,uvW,sdx,sdy);
+        float h1=0., h2=0., aged=smoothstep(.38,.62,sfNoise(xz*.026+1.7));
+        vec3 fresh=realSurface(stex,S_ASPHALT,tint*.70,1.,.008,h1), old=fresh;
+        if (aged>.01 && surfaceReady(S_ASPHALT_WORN)) old=realSurface(surfaceTap(S_ASPHALT_WORN,uvW+vec2(9.,23.),sdx,sdy),S_ASPHALT_WORN,tint*.70,1.,.008,h2);
+        else h2=h1;
+        asphalt=mix(fresh,old,aged);
+        surfH=mix(h1,h2,aged);
+        relief=1.-wet;
+        rough=mix(.82,.05,puddle);
+      } else
+#endif
+      {
+        vec4 d2=det(uvW*1.9), d3=det(uvW*7.1);
+        float stones=smoothstep(.30,.08,d3.g), patchy=smoothstep(.45,.62,d1.r);
+        asphalt=tint*.70*(.86+(d2.r-.5)*.24+stones*.32+(d3.a-.5)*.18)*mix(1.,.86,patchy);
+        rough=mix(.86-stones*.12,.05,puddle);
+        surfH=-d3.g*.0045;
+        relief=1.-wet;
+      }
+      rough=mix(rough,rough*.64,dampRing);
+      f0Base=mix(f0Base,.021,puddle);
+      asphalt=mix(asphalt,vec3(.018,.019,.02),tar);
+      albedo=asphalt*mix(1.,.44,sat(wet+dampRing*.68));
+      ao=1.-tar*.3;
+      if (puddle>.01) {
+        float t1=uClock*1.3, t2=uClock*2.7;
+        float r1=sin(xz.x*5.1+xz.y*2.3+t1)*sin(xz.y*4.7-xz.x*1.1-t1*.85);
+        float r2=sin(xz.x*13.7-xz.y*9.4+t2)*cos(xz.y*11.3+xz.x*8.9-t2*1.15);
+        float rAmp=mix(.018,.034,uRainLevel);
+        n=normalize(mix(n,vec3((r1+r2*.42)*rAmp,1.,(r1*.75-r2*.38)*rAmp),puddle));
+      }
+    } else if (kind==10) {
+      vec4 g2=texelFetch(uG2,ipx,0);
+      vec2 fp=g2.xy, fsz=g2.zw;
+      if (an.y>.55) {
+        albedo=tint*.66; rough=.9;
+#ifndef NO_SURFACES
+        if (uSurfaceSheets>0 && surfaceReady(S_ROOF_MEMBRANE)) {
+          albedo=realSurface(surfaceTap(S_ROOF_MEMBRANE,uvW,sdx,sdy),S_ROOF_MEMBRANE,tint*.66,1.,.01,surfH);
+          relief=1.;
+        }
+#endif
+      } else {
+        vec2 rs=vec2(max(1.,floor(fsz.x/6.+.5))/fsz.x,1./5.84);
+        float parapet=step(fsz.y-1.05,fp.y);
+#ifndef NO_SURFACES
+        if (real) {
+          vec3 tx=an.y<.99?normalize(cross(vec3(0.,1.,0.),ng)):vec3(1.,0.,0.);
+          vec2 fdx=vec2(dot(sdpx,tx),sdpx.y), fdy=vec2(dot(sdpy,tx),sdpy.y);
+          float seed=float(lowMeta)/15.;
+          float cell=hash12(floor(fp*rs*vec2(1.,2.))+seed*13.);
+          vec4 t=surfaceTap(slot,fp*rs,fdx*rs,fdy*rs);
+          vec3 c=realSurface(t,slot,tint,1.,0.,surfH)*(.96+cell*.08);
+          float glass=smoothstep(.02,.07,t.b-t.r)*smoothstep(.62,.3,t.b)*(1.-parapet);
+          albedo=mix(c,tint*.86,parapet);
+          rough=mix(.82,.1,glass);
+          f0Base=mix(.04,.06,glass);
+        } else
+#endif
+        {
+          float storey=fract(fp.y/2.92);
+          float win=step(.25,storey)*step(storey,.8)*step(.12,fract(fp.x*rs.x*2.))*step(fract(fp.x*rs.x*2.),.88);
+          albedo=mix(tint*.92,vec3(.05,.06,.07),win*(1.-parapet));
+          rough=mix(.85,.12,win);
+        }
+        albedo=mix(albedo,albedo*vec3(.72,.70,.64),wallBase*.5);
+      }
+    } else if (kind==8 || kind==6) {
+      vec4 g2=texelFetch(uG2,ipx,0);
+      vec2 fp=g2.xy, faceSize=g2.zw;
+      bool windowPane=kind==8 && vertical && min(faceSize.x,faceSize.y)>.55 && max(faceSize.x,faceSize.y)>.9 && lowMeta==1;
+      if (kind==6 && !vertical) {
+        float rip=sin(xz.x*4.3+xz.y*1.9+uClock*.9)*sin(xz.y*4.7-xz.x*.9-uClock*.82);
+        n=normalize(vec3(rip*.05,1.,cos(xz.x*2.7+xz.y*1.8+uClock*.8)*.04));
+        albedo=tint*.25; rough=.04; f0Base=.02;
+      } else {
+        float dirt=det(uvW*.8).r;
+        albedo=tint*.05; rough=.02+dirt*.05; f0Base=.045;
+#ifndef NO_SURFACES
+        if (real) {
+          vec4 stex=surfaceTap(slot,uvW,sdx,sdy);
+          float smear=sfLum(stex.rgb);
+          rough=mix(rough,.38,smear*.55);
+          albedo=mix(albedo,toLinear(stex.rgb)*.3,smear*.22);
+        }
+#endif
+        vec3 tx=an.y<.99?normalize(cross(vec3(0.,1.,0.),ng)):vec3(1.,0.,0.);
+        vec3 ty=vec3(0.,1.,0.);
+        if (lowMeta==1 && vertical && max(faceSize.x,faceSize.y)>2.6) {
+          vec2 paneSz=vec2(faceSize.x/max(1.,floor(faceSize.x/1.5)),faceSize.y/max(1.,floor(faceSize.y/1.7)));
+          vec2 pg=fp/paneSz, pc=fract(pg), pid=floor(pg);
+          float fr=1.-smoothstep(.025,.045,min(min(pc.x,1.-pc.x)*paneSz.x,min(pc.y,1.-pc.y)*paneSz.y));
+          n=normalize(n+(tx*(hash12(pid)-.5)+ty*(hash12(pid+3.)-.5))*.035);
+          albedo=mix(albedo,vec3(.05,.055,.06),fr);
+          rough=mix(rough+hash12(pid+7.)*.05,.45,fr);
+          f0Base=mix(f0Base,.04,fr);
+        }
+        if (windowPane || kind==6) {
+          vec3 vt=vec3(dot(-V,tx),dot(-V,ty),dot(V,n));
+          vec2 cellSz=kind==6?vec2(1.6,2.7):faceSize;
+          vec2 uv=fp/cellSz;
+          vec2 rid=floor(uv)+floor(vPos.xz*.1);
+          float seed=hash12(rid+floor(vPos.y/3.));
+          float on=step(.62,hash12(rid*1.7+3.))*.35;
+#ifdef SAFE
+          vec3 room=vec3(.2,.21,.2)*(.7+seed*.5);
+#else
+          vec3 room=(px<.12 && dist<65.)?roomBehind(fract(uv),vt,seed,on,kind==6?2.2:1.6,px):mix(vec3(.22,.23,.24),vec3(.62,.52,.38),on)*(.75+seed*.45);
+#endif
+          float fres=.04+.96*pow5(1.-max(dot(n,V),0.));
+          emit=room*(1.-fres)*(kind==6?.22:.34)*(1.-dirt*.3);
+          f0Base=kind==6?.07:f0Base;
+          float blind=kind==6?step(.7,seed)*smoothstep(.0,.02,fract(uv.y)-.6):0.;
+          emit*=1.-blind*.7;
+          albedo=mix(albedo,vec3(.62,.6,.55),blind);
+#if !defined(SAFE) && !defined(NO_SURFACES)
+          if (kind==6 && uSurfaceSheets>0) {
+            if (blind>0. && surfaceReady(S_WINDOW_BLINDS)) albedo=mix(albedo,toLinear(surfaceTap(S_WINDOW_BLINDS,uvW,sdx,sdy).rgb)*.85,blind);
+            float reed=step(.47,seed)*step(seed,.55);
+            if (reed>0. && surfaceReady(S_SUDARE)) {albedo=mix(albedo,toLinear(surfaceTap(S_SUDARE,uvW,sdx,sdy).rgb)*.8,.88); emit*=.3; f0Base=mix(f0Base,.03,.88);}
+            float paper=step(.55,seed)*step(seed,.7);
+            if (paper>0. && surfaceReady(S_SHOJI_PAPER)) {vec3 shoji=toLinear(surfaceTap(S_SHOJI_PAPER,uvW,sdx,sdy).rgb); emit=shoji*mix(.16,.55,on)*(1.-fres); albedo=mix(albedo,shoji*.45,.5);}
+          }
+#endif
+        }
+      }
+    } else if (kind==11) {
+      if (an.y>.55) {
+#ifndef NO_SURFACES
+        if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint*.72,1.,.01,surfH); rough=.9; relief=1.;}
+        else
+#endif
+        {vec4 d1=det(uvW*.4); albedo=tint*.72*(.85+d1.r*.25)*mix(1.,.8,smoothstep(.6,.8,det(uvW*.17+.31).r)); rough=.9;}
+      } else {
+        vec4 g2=texelFetch(uG2,ipx,0);
+        vec2 fp=g2.xy, fsz=g2.zw;
+        vec3 tx=an.y<.99?normalize(cross(vec3(0.,1.,0.),ng)):vec3(1.,0.,0.);
+        vec2 fdx=vec2(dot(sdpx,tx),sdpx.y), fdy=vec2(dot(sdpy,tx),sdpy.y);
+        float facade=fract(dot(g0.rgb,vec3(17.3,7.9,11.1)));
+        bool curtain=facade>.72 && fsz.y>9.;
+        bool ribbon=!curtain && facade>.46;
+        vec2 cellSz=vec2(fsz.x/max(1.,floor(fsz.x/(curtain?1.6:2.2))),3.15);
+        vec2 g=fp/cellSz, cell=fract(g), cid=floor(g);
+        vec2 fw=(abs(fdx)+abs(fdy))/cellSz;
+        vec2 lo=curtain?vec2(.035,.05):ribbon?vec2(.02,.30):vec2(.17,.24);
+        vec2 hiE=curtain?vec2(.965,.95):ribbon?vec2(.98,.82):vec2(.83,.86);
+        vec2 inW=smoothstep(lo-fw,lo+fw,cell)*(1.-smoothstep(hiE-fw,hiE+fw,cell));
+        float win=inW.x*inW.y;
+        float detailVis=1.-smoothstep(.10,.30,max(fw.x,fw.y));
+        vec3 wall=tint;
+        if (win<.995 && detailVis>.01) {
+#ifndef NO_SURFACES
+          if (real) {wall=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.008,surfH); relief=1.-win;}
+          else
+#endif
+          wall=tint*(.9+(det(uvW*1.2).r-.5)*.14);
+          if (detailVis>.25) {
+            float under=smoothstep(lo.y,lo.y-.25,cell.y)*step(lo.x,cell.x)*step(cell.x,hiE.x);
+            if (under>.005) wall*=1.-under*smoothstep(.4,.8,det(vec2(g.x*3.,g.y*.25)).r)*.32;
+            float stain=det(uvW*.17+.31).r;
+            wall=mix(wall,wall*.8,smoothstep(.55,.8,stain)*.5);
+          }
+          float sill=smoothstep(.035,.0,abs(cell.y-lo.y+.03))*step(lo.x-.03,cell.x)*step(cell.x,hiE.x+.03);
+          wall=mix(wall,vec3(.75,.74,.70),sill*.6*detailVis);
+        }
+        albedo=wall; rough=.82;
+        if (win>.002 && detailVis>.005) {
+          vec3 vt=vec3(dot(-V,tx),-V.y,dot(V,n));
+          vec2 recess=vt.xy/max(vt.z,.2)*.08/cellSz;
+          vec2 wuv=(cell-lo)/(hiE-lo);
+          vec2 rev=step(wuv,-recess*4.)+step(1.-recess*4.,wuv);
+          float reveal=sat(max(rev.x,rev.y))*detailVis;
+          float seed=hash12(cid+floor(vPos.xz*.37));
+          float on=step(.7,hash12(cid*3.1+1.7));
+#ifdef SAFE
+          vec3 room=vec3(.18,.2,.21)*(.8+seed*.4);
+#else
+          vec3 room=(detailVis>.30 && dist<75.)?roomBehind(sat(wuv),vt,seed,on,1.4,px):mix(vec3(.22,.23,.24),vec3(.62,.52,.38),on)*(.75+seed*.45);
+#endif
+          float mull=1.-smoothstep(.006,.014,abs(wuv.x-.5));
+          float pane=hash12(cid+.3);
+          vec3 glassTint=curtain?mix(vec3(.025,.04,.05),vec3(.04,.05,.045),pane):vec3(.03);
+          albedo=mix(wall,glassTint,win);
+          rough=mix(.82,.03+pane*.04,win);
+          f0Base=mix(.04,curtain?.11:.075,win);
+          vec3 nWin=normalize(n+(tx*(pane-.5)+vec3(0.,1.,0.)*(hash12(cid+5.)-.5))*.02);
+          n=normalize(mix(n,nWin,win));
+          float fres=.04+.96*pow5(1.-max(dot(n,V),0.));
+          emit=room*win*(1.-fres)*(1.-reveal)*.30*(1.-mull*.8);
+          albedo=mix(albedo,vec3(.42,.43,.42),reveal*win+mull*win*detailVis);
+          rough=mix(rough,.6,reveal*win);
+          ao=1.-reveal*win*.5;
+        }
+        if (detailVis<.99) {
+          vec3 far=mix(wall,vec3(.08,.1,.11),.45);
+#ifndef NO_SURFACES
+          float pick=fract(facade*7.3);
+          int farSlot=curtain?(pick<.5?S_REFLECTIVE_GLASS:S_MIRROR_STAINLESS):
+            ribbon || fsz.y>26.?S_FACADE_OFFICE_FAR:
+            fsz.y<13. && vPos.y-fp.y<1. && pick<.6?S_FACADE_RETAIL_FAR:S_FACADE_APARTMENT_FAR;
+          if (uSurfaceSheets>0 && surfaceReady(farSlot)) {
+            float hf=0.;
+            far=realSurface(surfaceTap(farSlot,fp,fdx,fdy),farSlot,tint,1.,0.,hf);
+            float glassy=1.-smoothstep(.04,.16,lum(far));
+            f0Base=mix(f0Base,curtain?.11:.06,(1.-detailVis)*(curtain?1.:glassy));
+            rough=mix(rough,mix(.8,.08,curtain?1.:glassy),1.-detailVis);
+          }
+#endif
+          albedo=mix(far,albedo,detailVis);
+        }
+      }
+    } else if (kind==15) {
+      vec4 g2=texelFetch(uG2,ipx,0);
+      vec2 faceUV=g2.xy, faceSize=g2.zw;
+      float nose=smoothstep(.06,.02,min(faceSize.x*.5-abs(faceUV.x),faceSize.y*.5-abs(faceUV.y)))*step(.6,an.y);
+#ifndef NO_SURFACES
+      if (real) {
+        vec3 ground=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH);
+        if (nose>.01 && surfaceReady(S_RUBBER_STAIR)) {
+          float h5=0.;
+          ground=mix(ground,realSurface(surfaceTap(S_RUBBER_STAIR,uvW,sdx,sdy),S_RUBBER_STAIR,vec3(.05),1.,.006,h5),nose);
+        }
+        albedo=ground; rough=mix(.82,.9,nose); relief=1.;
+      } else
+#endif
+      {
+        albedo=tint*(.92+(det(uvW*.31).r-.5)*.14)*mix(1.,.55,nose);
+        rough=mix(.82,.9,nose);
+      }
+    } else if (kind==13) {
+#ifndef NO_SURFACES
+      if (real) {
+        vec4 stex=lowMeta==0?surfaceTri(slot,vPos,ng,sdpx,sdpy):surfaceTap(slot,uvW,sdx,sdy);
+        bool nat=slot==S_BARK || slot==S_SOIL || slot==S_MULCH;
+        vec3 b=realSurface(stex,slot,tint,1.,nat?.02:.012,surfH);
+        if (!nat) b=mix(b,b*.66,wallBase*.6*float(vertical));
+        albedo=b; rough=nat?.9:.78; relief=1.;
+      } else
+#endif
+      {
+        vec2 bricks=uvW/vec2(.69,.296);
+        bricks.x+=mod(floor(bricks.y),2.)*.5;
+        vec2 b=fract(bricks), id=floor(bricks);
+        vec2 jd=min(b,1.-b)*vec2(.69,.296);
+        float mortar=1.-smoothstep(.006,.016+px*.5,min(jd.x,jd.y));
+        vec4 d2=det(uvW*1.7+id*.13);
+        vec3 c=tint*(.84+hash12(id)*.24+(d2.r-.5)*.18)*mix(vec3(1.),vec3(1.04,.97,.92),hash12(id+7.)*.5);
+        c=mix(c,vec3(.52,.50,.46)*(.9+d2.a*.2),mortar*.85);
+        albedo=mix(c,c*.66,wallBase*.6*float(vertical));
+        rough=mix(.74+d2.r*.12,.92,mortar);
+        ao=1.-mortar*.45;
+      }
+    } else if (kind==23) {
+      vec2 uv2=texelFetch(uG2,ipx,0).xy;
+      float rib=sin(uv2.y*85.+sin(uv2.x*37.7)*.86);
+      float nacre=pow(1.-max(0.,dot(ng,V)),2.2);
+      float pores=det(uv2*vec2(3.,2.)).g;
+      vec3 interference=mix(vec3(.10,.22,.40),vec3(.53,.24,.38),.5+.5*sin(uv2.x*18.85+uv2.y*8.));
+      albedo=mix(tint*(.85+pores*.22+rib*.07),toLinear(interference),.32*nacre);
+      rough=.26+.08*pores; clear=.8; metal=.1;
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTri(slot,vPos,ng,sdpx,sdpy),slot,albedo,.8,.006,surfH); relief=.5;}
+#endif
+    } else if (kind==26) {
+      albedo=tint*.95; rough=.09; clear=.9; emit=tint*.05;
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,albedo,.35,.002,surfH); relief=.3;}
+#endif
+    } else if (kind==29) {
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.012,surfH); rough=.78; relief=1.;}
+      else
+#endif
+      {
+        vec4 g2=texelFetch(uG2,ipx,0);
+        vec2 g=g2.xy, faceSize=g2.zw;
+        vec2 along=faceSize.x>=faceSize.y?g:g.yx;
+        float row=floor(along.y/.115);
+        float pid=hash12(vec2(row,floor(along.x/1.3+row*.37)));
+        float fibre=det(vec2(along.x*.32,along.y*3.9+pid*3.)).r;
+        float rings=.5+.5*sin(along.y*41.+fibre*10.+pid*6.);
+        float seam=1.-smoothstep(.003,.008+px*.5,min(fract(along.y/.115),1.-fract(along.y/.115))*.115);
+        vec3 timber=tint*(.74+pid*.32)*(.84+rings*.2)*(.92+det(along*1.7).a*.16);
+        albedo=mix(timber,timber*.32,seam);
+        rough=.74+fibre*.12;
+        ao=1.-seam*.5;
+        vec3 ty=an.y<.99?vec3(0.,1.,0.):vec3(0.,0.,1.);
+        n=normalize(n+ty*(rings-.5)*.025*(1.-seam));
+      }
+    }
+    surfH*=relief*(1.-smoothstep(.004,.03,px));
+    vec2 surfSlope=vec2(dFdx(surfH),dFdy(surfH));
+    if (relief>0. && px<.03 && !discEdge) {
+      vec3 r1=cross(sdpy,ng), r2=cross(ng,sdpx);
+      float area=dot(sdpx,r1);
+      n=normalize(abs(area)*n-sign(area)*(surfSlope.x*r1+surfSlope.y*r2));
+    }
+  }
+
+  // Liquid ink on paintable outdoor floors, roads, markings, and stairs.
+  float inked=0.;
+  if ((kind==1 || kind==5 || kind==15 || kind==22) && ng.y>.48 && (kind==15 || vPos.y>-.055) &&
+      xz.x>=uInkActiveBox.x && xz.x<=uInkActiveBox.y && xz.y>=uInkActiveBox.z && xz.y<=uInkActiveBox.w) {
+    vec2 inkUV=(xz/uInkBounds+1.)*.5;
+    if (all(greaterThan(inkUV,vec2(0))) && all(lessThan(inkUV,vec2(1)))) {
+      float fLayer=float(lowMeta);
+      vec4 inkProbe=texture(uInk,vec3(inkUV,fLayer));
+      if (inkProbe.r+inkProbe.g>.002) {
+        ivec2 size=textureSize(uInk,0).xy;
+        vec2 grid=inkUV*vec2(size)-.5;
+        ivec2 pixel=ivec2(floor(grid));
+        vec2 part=fract(grid);
+        part=part*part*(3.-2.*part);
+        float clearance=kind==15 || lowMeta==4?.207:${f(FILM_HEIGHT_TOLERANCE)};
+        vec4 a=filmCell(pixel,size,lowMeta,vPos.y,clearance);
+        vec4 b=filmCell(pixel+ivec2(1,0),size,lowMeta,vPos.y,clearance);
+        vec4 c=filmCell(pixel+ivec2(0,1),size,lowMeta,vPos.y,clearance);
+        vec4 d=filmCell(pixel+ivec2(1,1),size,lowMeta,vPos.y,clearance);
+        vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
+        float bossMask=mix(mix(step(1.35,a.r+a.g),step(1.35,b.r+b.g),part.x),mix(step(1.35,c.r+c.g),step(1.35,d.r+d.g),part.x),part.y);
+        float coverage=mix(mix(min(1.,a.r+a.g),min(1.,b.r+b.g),part.x),mix(min(1.,c.r+c.g),min(1.,d.r+d.g),part.x),part.y);
+        if (coverage>.08) {
+          vec4 iDet=det(xz*.83);
+          float thr=.5+(iDet.r*.6+iDet.a*.4-.5)*.38;
+          float aa=max(px*.85,.015);
+          float mask=smoothstep(thr-aa,thr+aa,coverage);
+          if (mask>.003) {
+            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014), bossCol=vec3(.014,.010,.020);
+            float thick=st.b;
+            // Glossy liquid ink meniscus rim + Beer-Lambert optical saturation depth
+            float meniscus=smoothstep(.03,.38,mask)*(1.-smoothstep(.38,.88,mask));
+            vec3 teamInk=(st.r>=st.g?cyan:amber)*mix(1.05,.84,thick);
+            teamInk=max(mix(vec3(lum(teamInk)),teamInk,1.+thick*.18),vec3(0.));
+            vec3 ink=mix(teamInk,bossCol*(1.05-thick*.15),smoothstep(.3,.7,bossMask));
+            vec3 coord=vec3(inkUV,fLayer);
+            float e0=texture(uInk,coord+vec3(uInkTexel.x,0.,0.)).b;
+            float s0=texture(uInk,coord+vec3(0.,uInkTexel.y,0.)).b;
+            vec2 liquid=-vec2(e0-thick,s0-thick)*(1.62+meniscus*.88);
+            if (isFull) {
+              vec4 wDet=det(xz*1.7+vec2(uClock*.02,0.));
+              liquid+=vec2(wDet.r-.5,wDet.b-.5)*.05+vec2(smoothstep(.07,.02,wDet.g)*.15*(1.-thick));
+              ao=mix(ao,1.,mask*.6);
+            }
+            clear=max(clear,mix(.36,.70,bossMask)*mask+meniscus*.42);
+            albedo=mix(albedo,ink,mask);
+            rough=mix(rough,mix(.15,.055,bossMask)+length(liquid)*.16,mask);
+            metal=mix(metal,0.,mask);
+            emit=mix(emit,mix(ink*.05,vec3(.042,.006,.014),bossMask),mask);
+            f0Base=mix(f0Base,mix(.045,.075,bossMask),mask);
+            n=normalize(mix(n,normalize(ng+vec3(liquid.x,0.,liquid.y)),mask));
+            inked=mask;
+          }
+        }
+      }
+    }
+  }
+
+  // Exact street wetness parity with physical capillary shoreline halo & water IOR.
+  if (!isFull && kind!=22) {
+    float wetEnv=max(uWetLevel,uBossRage*.58);
+    if (wetEnv>.002 && ng.y>.42 && kind!=0 && kind!=9) {
+      float pNoise=det(uvW*.17+vec2(.13,.41)).r+.26*wetEnv;
+      float puddle=smoothstep(.44,.76,pNoise)*wetEnv;
+      float dampHalo=smoothstep(.28,.50,pNoise)*(1.-puddle)*wetEnv;
+      albedo=mix(albedo,albedo*.60,sat(puddle*.70+dampHalo*.42));
+      rough=mix(rough,mix(.12,.042,clamp(uRaytrace+puddle*.4,0.,1.)),puddle*(kind==1?.88:.58));
+      f0Base=mix(f0Base,.024,puddle*.65);
+      clear=max(clear,puddle*.42);
+    }
+  } else if (uWetLevel>.02 || uRaytrace>.5) {
+    float upWet=smoothstep(.65,.95,ng.y)*sat(1.-inked);
+    if (upWet>.002) {
+      float pNoise=det(xz*.11).r;
+      float puddle=smoothstep(.42,.66,pNoise);
+      float dampHalo=smoothstep(.28,.48,pNoise)*(1.-puddle);
+      float wetAmt=sat(uWetLevel*upWet*(.45+.55*puddle)+(uRaytrace>.5?upWet*puddle*.22:0.));
+      rough=mix(rough,.058,wetAmt);
+      clear=max(clear,wetAmt*.60);
+      f0Base=mix(f0Base,.024,wetAmt*puddle*.7);
+      albedo=mix(albedo,albedo*.70,sat(wetAmt*.66+uWetLevel*upWet*dampHalo*.34));
+    }
+  }
+
+  // Physically based outdoor lighting with Kulla-Conty multi-scattering energy conservation.
+  float nv=max(dot(n,V),1e-4), nl=dot(n,uSun);
+  vec3 R=reflect(-V,n), direct=vec3(0.);
+  vec3 f0=mix(vec3(f0Base),albedo,metal);
+  vec3 diffC=albedo*(1.-metal);
+  vec2 brdfAB=envBRDF_AB(rough,nv);
+  float Ess=brdfAB.x+brdfAB.y, Ems=max(1.-Ess,0.);
+  vec3 FssEss=f0*brdfAB.x+brdfAB.y;
+  vec3 Favg=f0+(1.-f0)*.047619;
+  vec3 FmsEms=(FssEss*Favg/(1.-Favg*Ems))*Ems;
+  if (nl>.001 || trans>0.) {
+    float sh=sunShadow(vPos,ng);
+    if (sh>.001) {
+      vec3 sun=uSunColor*sh;
+      float wrap=trans>0.?sat((nl+.4)/1.4):nl;
+      direct=diffC*(1./PI)*sun*wrap;
+      if (nl>.001) {
+        vec3 h=normalize(uSun+V);
+        float nh=max(dot(n,h),0.), vh5=pow5(1.-max(dot(V,h),0.));
+        float mr=max(rough,.03), a=max(mr*mr,.0016);
+        vec3 F=f0+(1.-f0)*vh5;
+        vec3 msDirect=1.+f0*(1./max(Ess,.15)-1.);
+        direct+=sun*(ggxD(nh,a)*visSmith(nv,nl,a)*F*msDirect*nl);
+        if (clear>0.) {
+          float ac=.0025;
+          direct+=sun*(ggxD(nh,ac)*visSmith(nv,nl,ac)*(.04+.96*vh5)*nl*clear);
+        }
+      }
+      if (trans>0.) direct+=diffC*trans*sun*pow(sat(dot(-V,uSun)),3.)*.9*sat(1.-nl);
+    }
+  }
+  vec3 irr=shDiffuse(n)+vec3(.36,.34,.30)*(sat(-n.y)*.2);
+  if (uBossRage>.005) irr=mix(irr,irr*vec3(1.12,.52,.58)+vec3(.04,.005,.01),uBossRage*.55);
+  float so=ao>=.999?1.:sat(pow(nv+ao,exp2(-16.*rough-1.))-1.+ao);
+  vec3 ambient;
+  if (rough>.72 && metal<.01 && clear<=0.) {
+    vec3 spec=(R.y<0.?mix(1.,.55,sat(-R.y*4.)):1.)*(FssEss+FmsEms)*so;
+    ambient=irr*(diffC*ao+spec);
+  } else {
+    vec3 spec=(rough>.72 && metal<.01)?irr:envSpec(R,rough);
+    if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
+    bool hasPlanar=isFull && uReflectOn && ng.y>.49 && abs(vPos.y)<.08;
+    bool usedPlanar=false;
+    vec3 planar=vec3(0.);
+    if (hasPlanar && rough<.45) {
+      planar=texture(uReflection,gl_FragCoord.xy/uViewport+n.xz*.035).rgb;
+      usedPlanar=true;
+      float w=(1.-smoothstep(.08,.40,rough))*mix(1.,.55,inked);
+      spec=mix(spec,planar,w);
+    }
+    ambient=diffC*irr*ao+(spec*FssEss+irr*FmsEms)*so;
+    if (clear>0.) {
+      vec3 cspec=hasPlanar?(usedPlanar?planar:texture(uReflection,gl_FragCoord.xy/uViewport+n.xz*.02).rgb):envSpec(R,.05);
+      ambient+=cspec*(.04+.96*pow5(1.-nv))*clear*so;
+    }
+  }
+  if (sheen>0.) {float s1=1.-nv, s2=s1*s1; ambient+=albedo*sheen*(s2*s2)*irr*.9;}
+  vec3 col=direct+ambient+emit;
+
+  float dy=vPos.y-uEye.y;
+  float integral=abs(dy)>.01?(uFogParams.z-exp(-uFogParams.x*vPos.y))/(uFogParams.x*dy):uFogParams.z;
+  float fogAmt=1.-exp(-uFogParams.y*dist*max(integral,0.));
+  if (uFogParams.w>0.) fogAmt=max(fogAmt,smoothstep(uFogParams.w*.6,uFogParams.w*.97,dist));
+  if (fogAmt>.002) col=mix(col,aerialFog(dir),fogAmt);
+  frag=vec4(col,sat(lum(ambient)/(lum(col)+1e-4))*(1.-fogAmt));
+}`;
+
+// Fullscreen ray-interpolating vertex shader: eliminates per-pixel uInvVP mat4 multiplies
+// by reconstructing exact world positions via uEye + vRay * (uDepthAB.x / (uDepthAB.y - rawD)).
+export const DEFERRED_RAY_VERTEX=`#version 300 es
+precision highp float;
+uniform vec3 uForward;
+uniform vec3 uRight;
+uniform vec3 uUp;
+uniform vec2 uField;
+out vec2 vUV;
+out vec3 vRay;
+void main(){
+  vec2 p=vec2(float((gl_VertexID<<1)&2),float(gl_VertexID&2));
+  vUV=p;
+  vec2 s=p*2.-1.;
+  vRay=uForward+uRight*(s.x*uField.x)+uUp*(s.y*uField.y);
+  gl_Position=vec4(s,1.,1.);
+}`;
+
+// Stencil-dispatched (stencil==1) ultra-lean Deferred Outdoor Arch PBR shader (~81% of screen).
+// Supports #define NO_SURFACES 1 when procedural mode is active to strip all SurfaceTable/dFdx/dFdy code.
+export const DEFERRED_ARCH_FRAGMENT=`#version 300 es
+#define FAST_SLOT 1
+precision highp float;
+precision highp sampler2DArray;
+precision highp sampler2DShadow;
+${COMMON}
+in vec2 vUV;
+in vec3 vRay;
+uniform highp sampler2D uGDepth;
+uniform sampler2D uG0;
+uniform sampler2D uG1;
+uniform vec2 uDepthAB;
+uniform vec3 uEye;
+uniform float uPixelStep;
+uniform vec3 uSun;
+uniform vec3 uSunColor;
+uniform bool uShadowOn;
+uniform int uCascades;
+uniform sampler2DShadow uShadow0;
+uniform sampler2DShadow uShadow1;
+uniform mat4 uShadowM0;
+uniform mat4 uShadowM1;
+uniform vec4 uShadowTexel;
+uniform sampler2DArray uInk;
+uniform vec2 uInkTexel;
+uniform vec2 uInkBounds;
+uniform sampler2D uEnv;
+uniform float uEnvLod;
+uniform sampler2D uDetail;
+uniform vec4 uFogParams;
+uniform float uRaytrace;
+uniform float uWetLevel;
+uniform float uBossRage;
+uniform float uRainLevel;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
+out vec4 frag;
+#ifndef NO_SURFACES
+${SURFACE_HIGH}
+#endif
+vec4 det(vec2 p){return texture(uDetail,p);}
+vec3 envSpec(vec3 r,float rough){return envDecode(textureLod(uEnv,envUV(r),clamp(sqrt(rough)*uEnvLod,0.,uEnvLod)));}
+vec3 shDiffuse(vec3 n){float t=clamp(.5-n.y*.7071068,0.,1.);return max(mix(uSH0,uSH1,t)+uSH2*n.x+uSH3*n.z+uSH4*(t*(1.-t)),vec3(0.));}
+vec3 fogEnv(vec3 d){return max(uFog0+uFog1*d.y+uFog2*d.x+uFog3*d.z,vec3(0.));}
+float ggxD(float nh,float a){float a2=a*a;float d=nh*nh*(a2-1.)+1.;return a2/max(PI*d*d,1e-6);}
+float visSmith(float nv,float nl,float a){float k=a*.5;return .25/max((nv*(1.-k)+k)*(nl*(1.-k)+k),1e-4);}
+vec3 specGGX(vec3 n,vec3 v,vec3 l,vec3 f0,float rough,float nv,float nl){
+  vec3 h=normalize(l+v);
+  float nh=max(dot(n,h),0.), a=max(rough*rough,.0016);
+  vec3 F=f0+(1.-f0)*pow5(1.-max(dot(v,h),0.));
+  return ggxD(nh,a)*visSmith(nv,nl,a)*F*nl;
+}
+vec3 envBRDF(vec3 f0,float rough,float nv){
+  const vec4 c0=vec4(-1.,-.0275,-.572,.022);
+  const vec4 c1=vec4(1.,.0425,1.04,-.04);
+  vec4 r=rough*c0+c1;
+  float a004=min(r.x*r.x,exp2(-9.28*nv))*r.x+r.y;
+  vec2 ab=vec2(-1.04,1.04)*a004+r.zw;
+  return f0*ab.x+ab.y;
+}
+float shadowTap(sampler2DShadow s,vec3 c,float texel){
+  int chk=(int(gl_FragCoord.x)^int(gl_FragCoord.y))&1;
+  vec2 d=(chk==0?vec2(.62,.44):vec2(-.44,.62))*(texel*1.22);
+  return (texture(s,vec3(c.xy+d,c.z))+texture(s,vec3(c.xy-d,c.z)))*.5;
+}
+float sunShadow(vec3 p,vec3 ng){
+  if (!uShadowOn) return 1.;
+  float slope=1.-sat(dot(ng,uSun));
+  vec3 c0=(uShadowM0*vec4(p+ng*uShadowTexel.z*(1.2+slope*1.6),1.)).xyz;
+  vec2 e0=min(c0.xy,1.-c0.xy);
+  float inner=min(e0.x,e0.y);
+  float s0=1.;
+  if (inner>0. && c0.z<1.) s0=shadowTap(uShadow0,vec3(c0.xy,c0.z-.00022),uShadowTexel.x);
+  if (uCascades<2) return inner>0.?s0:1.;
+  float blend=smoothstep(.0,.08,inner);
+  if (blend>=1.) return s0;
+  vec3 c1=(uShadowM1*vec4(p+ng*uShadowTexel.w*(1.2+slope*1.6),1.)).xyz;
+  vec2 e1=min(c1.xy,1.-c1.xy);
+  float s1=1.;
+  if (min(e1.x,e1.y)>0. && c1.z<1.) s1=texture(uShadow1,vec3(c1.xy,c1.z-.00045));
+  s1=mix(1.,s1,smoothstep(0.,.06,min(e1.x,e1.y)));
+  return mix(s1,s0,blend);
+}
+vec4 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
+  vec4 cell=texelFetch(uInk,ivec3(clamp(pixel,ivec2(0),size-1),layer),0);
+  float bed=${f(FILM_HEIGHT_ORIGIN)}+(round(cell.a*255.)-1.)*${f(FILM_HEIGHT_STEP)};
+  bool match=cell.a>0. && abs(height-bed)<tolerance;
+  return vec4(match?cell.rgb:vec3(0.),cell.a<=0. || match?1.:0.);
+}
+void main(){
+  ivec2 ipx=ivec2(gl_FragCoord.xy);
+  float rawD=texelFetch(uGDepth,ipx,0).r;
+  float zView=uDepthAB.x/(uDepthAB.y-rawD);
+  vec3 vPos=uEye+vRay*zView;
+  float invRL=inversesqrt(dot(vRay,vRay));
+  float dist=zView/invRL;
+  vec3 dir=vRay*invRL;
+  vec3 V=-dir;
+  vec4 g0=texelFetch(uG0,ipx,0);
+  vec4 g1=texelFetch(uG1,ipx,0);
+  int kind=int(g0.a*255.+.5);
+  vec3 ng=octDec(g1.rg);
+  vec3 tint=toLinear(g0.rgb);
+  vec3 an=abs(ng);
+  vec2 uvW=an.y>.6?vPos.xz:(an.x>an.z?vPos.zy:vPos.xy);
+#ifdef NO_SURFACES
+  float px=dist*uPixelStep;
+#else
+  vec3 sdpxRaw=dFdx(vPos), sdpyRaw=dFdy(vPos);
+  float maxStep=max(dist*uPixelStep*5.,0.008), maxStep2=maxStep*maxStep;
+  float ldx2=dot(sdpxRaw,sdpxRaw), ldy2=dot(sdpyRaw,sdpyRaw);
+  bool discEdge=(ldx2>maxStep2 || ldy2>maxStep2);
+  vec3 sdpx=ldx2>maxStep2?sdpxRaw*(maxStep*inversesqrt(ldx2)):sdpxRaw;
+  vec3 sdpy=ldy2>maxStep2?sdpyRaw*(maxStep*inversesqrt(ldy2)):sdpyRaw;
+  float px=max(length(sdpx),length(sdpy));
+  vec2 sdx=an.y>.6?sdpx.xz:(an.x>an.z?sdpx.zy:sdpx.xy);
+  vec2 sdy=an.y>.6?sdpy.xz:(an.x>an.z?sdpy.zy:sdpy.xy);
+  int slot=uSurfaceSheets>0?(int(g1.b*255.+.5)-1):-1;
+  bool real=surfaceReady(slot);
+#endif
+  if (kind==3) {
+    vec3 col=tint*3.2;
+#ifndef NO_SURFACES
+    if (real) {
+      vec4 stex=surfaceTap(slot,uvW,sdx,sdy);
+      col*=mix(vec3(1.),toLinear(stex.rgb)/max(toLinear(surfaceMean(slot)),vec3(.05)),.75);
+    }
+#endif
+    float dy=vPos.y-uEye.y;
+    float integral=abs(dy)>.01?(uFogParams.z-exp(-uFogParams.x*vPos.y))/(uFogParams.x*dy):uFogParams.z;
+    float fogAmt=1.-exp(-uFogParams.y*dist*max(integral,0.));
+    if (uFogParams.w>0.) fogAmt=max(fogAmt,smoothstep(uFogParams.w*.6,uFogParams.w*.97,dist));
+    if (fogAmt>.002) {
+      vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+      vec3 fogCol=mix(fogEnv(fdir)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
+      col=mix(col,fogCol,fogAmt);
+    }
+    frag=vec4(col,0.);
+    return;
+  }
+  bool vertical=an.y<.45;
+  float wallBase=vertical && vPos.y<1.65 && (kind==2 || kind==4 || kind==13 || kind==19)?
+    1.-smoothstep(0.,.95+det(uvW*.043).r*.6,vPos.y):0.;
+  vec3 albedo=tint, emit=vec3(0.), n=ng;
+  float rough=.86, metal=0., f0Base=.04, clear=0., sheen=0., trans=0.;
+#ifndef NO_SURFACES
+  float surfH=0., relief=0.;
+#endif
+  if (kind==1) {
+    float oil=smoothstep(.62,.8,det(uvW*.09+.7).r)*.18;
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH)*(1.-oil); relief=1.;}
+    else
+#endif
+    albedo=tint*(.92+(det(uvW*.31).r-.5)*.14)*(1.-oil);
+    rough=.82-oil*.25;
+  } else if (kind==4) {
+    vec4 d2=det(uvW*3.1);
+    float sat0=max(max(tint.r,tint.g),tint.b)-min(min(tint.r,tint.g),tint.b);
+    float galvanized=step(sat0,.035)*step(.12,lum(tint));
+    metal=galvanized;
+    vec3 baseCol=mix(tint,vec3(.56,.57,.58)*(.85+d2.g*.3),galvanized*.8);
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,baseCol,1.,.004,surfH); relief=1.;}
+    else
+#endif
+    albedo=baseCol*(.94+(d2.r-.5)*.12);
+    rough=mix(.38+d2.r*.14,.34+d2.g*.2,galvanized);
+    albedo=mix(albedo,albedo*.6,wallBase*.4*float(vertical));
+  } else if (kind==2 || kind==19) {
+#ifndef NO_SURFACES
+    if (real) {
+      albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH); relief=1.;
+      albedo=mix(albedo,albedo*vec3(.62,.60,.52),wallBase*.55*float(vertical)); rough=.88;
+    } else
+#endif
+    {
+      float g=det(uvW*.29).r;
+      albedo=tint*(.92+(g-.5)*.16);
+      if (vertical) albedo=mix(albedo,albedo*vec3(.62,.60,.52),wallBase*.55);
+    }
+  } else if (kind==20) {
+    clear=.75;
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,.6,.002,surfH); rough=.33; relief=.4;}
+    else
+#endif
+    {float peel=det(uvW*9.).r; albedo=tint*(.97+peel*.04); rough=.30+peel*.06;}
+  } else if (kind==21) {
+    sheen=.18; f0Base=.035;
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.003,surfH); rough=.72; relief=.5;}
+    else
+#endif
+    {vec4 d2=det(uvW*4.); albedo=tint*(.9+d2.r*.14)+vec3(.012)*sat(ng.y); rough=.68+d2.a*.1;}
+  } else if (kind==18 || kind==30 || kind==31) {
+    rough=.88; sheen=.55; f0Base=.03;
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.003,surfH); relief=.5;}
+    else
+#endif
+    albedo=tint*(.9+det(uvW*2.).r*.12);
+  } else if (kind==9) {
+    albedo=tint*.92; rough=.07; clear=1.; trans=.35; emit=tint*.22;
+  } else if (kind==0) {
+    vec4 d2=det(uvW*2.3);
+    float worn=an.y>.6?smoothstep(.55,.75,det(uvW*.6).r*.6+d2.r*.5):0.;
+    albedo=mix(tint*(.95+d2.a*.08),tint*.55+vec3(.05),worn*.7);
+    rough=.62+worn*.2;
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,albedo,.7,.003,surfH); relief=.5;}
+#endif
+  } else if (kind==13) {
+#ifndef NO_SURFACES
+    if (real) {
+      albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.012,surfH); relief=1.;
+      bool nat=slot==S_BARK || slot==S_SOIL || slot==S_MULCH;
+      if (!nat) albedo=mix(albedo,albedo*.66,wallBase*.6*float(vertical));
+      rough=nat?.9:.78;
+    } else
+#endif
+    {
+      vec2 bricks=uvW/vec2(.69,.296);
+      bricks.x+=mod(floor(bricks.y),2.)*.5;
+      vec2 b=fract(bricks), id=floor(bricks);
+      vec2 jd=min(b,1.-b)*vec2(.69,.296);
+      float mortar=1.-smoothstep(.006,.016+px*.5,min(jd.x,jd.y));
+      albedo=mix(tint*(.84+hash12(id)*.24),vec3(.52,.50,.46),mortar*.85);
+      albedo=mix(albedo,albedo*.66,wallBase*.6*float(vertical));
+      rough=mix(.78,.92,mortar);
+    }
+  } else {
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH); relief=1.; rough=.78;}
+    else
+#endif
+    {
+      float g=det(uvW*.29).r;
+      albedo=tint*(.92+(g-.5)*.16);
+      if (vertical) albedo=mix(albedo,albedo*vec3(.62,.60,.52),wallBase*.55);
+    }
+  }
+#ifndef NO_SURFACES
+  surfH*=relief*(1.-smoothstep(.004,.03,px));
+  vec2 surfSlope=vec2(dFdx(surfH),dFdy(surfH));
+  if (relief>0. && px<.03 && !discEdge) {
+    vec3 r1=cross(sdpy,ng), r2=cross(ng,sdpx);
+    float area=dot(sdpx,r1);
+    n=normalize(abs(area)*n-sign(area)*(surfSlope.x*r1+surfSlope.y*r2));
+  }
+#endif
+  if (kind==1 && ng.y>.48 && vPos.y>-.055) {
+    vec2 inkUV=(vPos.xz/uInkBounds+1.)*.5;
+    if (all(greaterThan(inkUV,vec2(0))) && all(lessThan(inkUV,vec2(1)))) {
+      int lowMeta=int(g1.a*255.+.5)&15;
+      float fLayer=float(lowMeta);
+      vec4 inkProbe=texture(uInk,vec3(inkUV,fLayer));
+      if (inkProbe.r+inkProbe.g>.002) {
+        ivec2 size=textureSize(uInk,0).xy;
+        vec2 grid=inkUV*vec2(size)-.5;
+        ivec2 pixel=ivec2(floor(grid));
+        vec2 part=fract(grid);
+        part=part*part*(3.-2.*part);
+        float clearance=lowMeta==4?.207:${f(FILM_HEIGHT_TOLERANCE)};
+        vec4 a=filmCell(pixel,size,lowMeta,vPos.y,clearance);
+        vec4 b=filmCell(pixel+ivec2(1,0),size,lowMeta,vPos.y,clearance);
+        vec4 c=filmCell(pixel+ivec2(0,1),size,lowMeta,vPos.y,clearance);
+        vec4 d=filmCell(pixel+ivec2(1,1),size,lowMeta,vPos.y,clearance);
+        vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
+        float bossMask=mix(mix(step(1.35,a.r+a.g),step(1.35,b.r+b.g),part.x),mix(step(1.35,c.r+c.g),step(1.35,d.r+d.g),part.x),part.y);
+        float coverage=mix(mix(min(1.,a.r+a.g),min(1.,b.r+b.g),part.x),mix(min(1.,c.r+c.g),min(1.,d.r+d.g),part.x),part.y);
+        if (coverage>.08) {
+          vec4 iDet=det(vPos.xz*.83);
+          float thr=.5+(iDet.r*.6+iDet.a*.4-.5)*.38;
+          float aa=max(px*.85,.015);
+          float mask=smoothstep(thr-aa,thr+aa,coverage);
+          if (mask>.003) {
+            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014), bossCol=vec3(.014,.010,.020);
+            float thick=st.b;
+            vec3 teamInk=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 ink=mix(teamInk,bossCol*(1.05-thick*.15),smoothstep(.3,.7,bossMask));
+            vec3 coord=vec3(inkUV,fLayer);
+            float e0=texture(uInk,coord+vec3(uInkTexel.x,0.,0.)).b;
+            float s0=texture(uInk,coord+vec3(0.,uInkTexel.y,0.)).b;
+            vec2 liquid=-vec2(e0-thick,s0-thick)*1.62;
+            albedo=mix(albedo,ink,mask);
+            rough=mix(rough,mix(.21,.065,bossMask)+length(liquid)*.18,mask);
+            metal=mix(metal,0.,mask);
+            emit=mix(emit,mix(ink*.05,vec3(.042,.006,.014),bossMask),mask);
+            f0Base=mix(f0Base,mix(.045,.075,bossMask),mask);
+            n=normalize(mix(n,normalize(ng+vec3(liquid.x,0.,liquid.y)),mask));
+          }
+        }
+      }
+    }
+  }
+  float wetEnv=max(uWetLevel,uBossRage*.58);
+  if (wetEnv>.002 && ng.y>.42 && kind!=0 && kind!=9) {
+    float pNoise=det(uvW*.17+vec2(.13,.41)).r;
+    float puddle=smoothstep(.44,.76,pNoise+.26*wetEnv)*wetEnv;
+    albedo=mix(albedo,albedo*.62,puddle*.68);
+    rough=mix(rough,mix(.14,.045,clamp(uRaytrace+puddle*.4,0.,1.)),puddle*(kind==1?.86:.56));
+    f0Base=mix(f0Base,.055,puddle*.65);
+  }
+  float nv=max(dot(n,V),1e-4), nl=dot(n,uSun);
+  vec3 R=reflect(-V,n), direct=vec3(0.);
+  vec3 f0=mix(vec3(f0Base),albedo,metal);
+  vec3 diffC=albedo*(1.-metal);
+  if (nl>.001 || trans>0.) {
+    float sh=sunShadow(vPos,ng);
+    if (sh>.001) {
+      vec3 sun=uSunColor*sh;
+      float wrap=trans>0.?sat((nl+.4)/1.4):nl;
+      direct=diffC*(1./PI)*sun*wrap;
+      if (nl>.001) {
+        direct+=sun*specGGX(n,V,uSun,f0,max(rough,.03),nv,nl);
+        if (clear>0.) direct+=sun*specGGX(n,V,uSun,vec3(.04),.05,nv,nl)*clear;
+      }
+      if (trans>0.) direct+=diffC*trans*sun*pow(sat(dot(-V,uSun)),3.)*.9*sat(1.-nl);
+    }
+  }
+  vec3 irr=shDiffuse(n)+vec3(.36,.34,.30)*(sat(-n.y)*.2);
+  if (uBossRage>.005) irr=mix(irr,irr*vec3(1.12,.52,.58)+vec3(.04,.005,.01),uBossRage*.55);
+  vec3 spec=(rough>.72 && metal<.01)?irr:envSpec(R,rough);
+  if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
+  vec3 ambient=diffC*irr+spec*envBRDF(f0,rough,nv);
+  if (clear>0.) ambient+=envSpec(R,.05)*(.04+.96*pow5(1.-nv))*clear;
+  if (sheen>0.) {float s1=1.-nv, s2=s1*s1; ambient+=albedo*sheen*(s2*s2)*irr*.9;}
+  vec3 col=direct+ambient+emit;
+  float dy=vPos.y-uEye.y;
+  float integral=abs(dy)>.01?(uFogParams.z-exp(-uFogParams.x*vPos.y))/(uFogParams.x*dy):uFogParams.z;
+  float fogAmt=1.-exp(-uFogParams.y*dist*max(integral,0.));
+  if (uFogParams.w>0.) fogAmt=max(fogAmt,smoothstep(uFogParams.w*.6,uFogParams.w*.97,dist));
+  if (fogAmt>.002) {
+    vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+    vec3 fogCol=mix(fogEnv(fdir)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
+    col=mix(col,fogCol,fogAmt);
+  }
+  frag=vec4(col,sat(lum(ambient)/(lum(col)+1e-4))*(1.-fogAmt));
+}`;
+
+// Stencil-dispatched (stencil==2) Deferred Outdoor Full PBR shader (~19% of screen: roads, facades, windows, wood, boss).
+export const DEFERRED_FULL_FRAGMENT=`#version 300 es
+#define FAST_SLOT 1
+precision highp float;
+precision highp sampler2DArray;
+precision highp sampler2DShadow;
+${COMMON}
+in vec2 vUV;
+in vec3 vRay;
+uniform highp sampler2D uGDepth;
+uniform sampler2D uG0;
+uniform sampler2D uG1;
+uniform highp sampler2D uG2;
+uniform vec2 uDepthAB;
+uniform vec3 uEye;
+uniform float uPixelStep;
+uniform vec3 uSun;
+uniform vec3 uSunColor;
+uniform bool uShadowOn;
+uniform int uCascades;
+uniform sampler2DShadow uShadow0;
+uniform sampler2DShadow uShadow1;
+uniform mat4 uShadowM0;
+uniform mat4 uShadowM1;
+uniform vec4 uShadowTexel;
+uniform sampler2DArray uInk;
+uniform vec2 uInkTexel;
+uniform vec2 uInkBounds;
+uniform sampler2D uEnv;
+uniform float uEnvLod;
+uniform sampler2D uDetail;
+uniform sampler2D uReflection;
+uniform bool uReflectOn;
+uniform vec2 uViewport;
+uniform float uClock;
+uniform vec4 uFogParams;
+uniform float uRaytrace;
+uniform float uWetLevel;
+uniform float uBossRage;
+uniform float uRainLevel;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
+out vec4 frag;
+#ifndef NO_SURFACES
+${SURFACE_HIGH}
+#endif
+vec4 det(vec2 p){return texture(uDetail,p);}
+vec3 envSpec(vec3 r,float rough){return envDecode(textureLod(uEnv,envUV(r),clamp(sqrt(rough)*uEnvLod,0.,uEnvLod)));}
+vec3 shDiffuse(vec3 n){float t=clamp(.5-n.y*.7071068,0.,1.);return max(mix(uSH0,uSH1,t)+uSH2*n.x+uSH3*n.z+uSH4*(t*(1.-t)),vec3(0.));}
+vec3 fogEnv(vec3 d){return max(uFog0+uFog1*d.y+uFog2*d.x+uFog3*d.z,vec3(0.));}
+float ggxD(float nh,float a){float a2=a*a;float d=nh*nh*(a2-1.)+1.;return a2/max(PI*d*d,1e-6);}
+float visSmith(float nv,float nl,float a){float k=a*.5;return .25/max((nv*(1.-k)+k)*(nl*(1.-k)+k),1e-4);}
+vec3 specGGX(vec3 n,vec3 v,vec3 l,vec3 f0,float rough,float nv,float nl){
+  vec3 h=normalize(l+v);
+  float nh=max(dot(n,h),0.), a=max(rough*rough,.0016);
+  vec3 F=f0+(1.-f0)*pow5(1.-max(dot(v,h),0.));
+  return ggxD(nh,a)*visSmith(nv,nl,a)*F*nl;
+}
+vec3 envBRDF(vec3 f0,float rough,float nv){
+  const vec4 c0=vec4(-1.,-.0275,-.572,.022);
+  const vec4 c1=vec4(1.,.0425,1.04,-.04);
+  vec4 r=rough*c0+c1;
+  float a004=min(r.x*r.x,exp2(-9.28*nv))*r.x+r.y;
+  vec2 ab=vec2(-1.04,1.04)*a004+r.zw;
+  return f0*ab.x+ab.y;
+}
+float shadowTap(sampler2DShadow s,vec3 c,float texel){
+  int chk=(int(gl_FragCoord.x)^int(gl_FragCoord.y))&1;
+  vec2 d=(chk==0?vec2(.62,.44):vec2(-.44,.62))*(texel*1.22);
+  return (texture(s,vec3(c.xy+d,c.z))+texture(s,vec3(c.xy-d,c.z)))*.5;
+}
+float sunShadow(vec3 p,vec3 ng){
+  if (!uShadowOn) return 1.;
+  float slope=1.-sat(dot(ng,uSun));
+  vec3 c0=(uShadowM0*vec4(p+ng*uShadowTexel.z*(1.2+slope*1.6),1.)).xyz;
+  vec2 e0=min(c0.xy,1.-c0.xy);
+  float inner=min(e0.x,e0.y);
+  float s0=1.;
+  if (inner>0. && c0.z<1.) s0=shadowTap(uShadow0,vec3(c0.xy,c0.z-.00022),uShadowTexel.x);
+  if (uCascades<2) return inner>0.?s0:1.;
+  float blend=smoothstep(.0,.08,inner);
+  if (blend>=1.) return s0;
+  vec3 c1=(uShadowM1*vec4(p+ng*uShadowTexel.w*(1.2+slope*1.6),1.)).xyz;
+  vec2 e1=min(c1.xy,1.-c1.xy);
+  float s1=1.;
+  if (min(e1.x,e1.y)>0. && c1.z<1.) s1=texture(uShadow1,vec3(c1.xy,c1.z-.00045));
+  s1=mix(1.,s1,smoothstep(0.,.06,min(e1.x,e1.y)));
+  return mix(s1,s0,blend);
+}
+vec4 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
+  vec4 cell=texelFetch(uInk,ivec3(clamp(pixel,ivec2(0),size-1),layer),0);
+  float bed=${f(FILM_HEIGHT_ORIGIN)}+(round(cell.a*255.)-1.)*${f(FILM_HEIGHT_STEP)};
+  bool match=cell.a>0. && abs(height-bed)<tolerance;
+  return vec4(match?cell.rgb:vec3(0.),cell.a<=0. || match?1.:0.);
+}
+vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth,float px){
+  vec3 o=vec3(uv-.5,0.);
+  vec3 ray=vec3(viewT.xy,max(viewT.z,.05)/depth);
+  vec2 safe=sign(ray.xy+1e-5)*max(abs(ray.xy),vec2(1e-4));
+  vec2 side=(sign(safe)*.5-o.xy)/safe;
+  float back=1./ray.z, t=min(back,min(side.x,side.y));
+  vec3 hit=o+ray*t;
+  float floorHit=step(side.y,min(back,side.x))*step(ray.y,0.);
+  float ceilHit=step(side.y,min(back,side.x))*step(0.,ray.y);
+  float backHit=step(back,min(side.x,side.y));
+  vec3 wallC=mix(vec3(.55,.52,.46),vec3(.42,.47,.48),seed);
+  vec3 col=wallC*mix(.74,.9,backHit);
+  col=mix(col,vec3(.22,.18,.15)*(1.+seed*.4),floorHit);
+  col=mix(col,vec3(.72,.71,.66),ceilHit);
+  float furniture=backHit*step(abs(hit.x+.18-seed*.3),.22)*step(hit.y,-.12);
+  col=mix(col,vec3(.18,.17,.16),furniture*.85);
+#ifndef NO_SURFACES
+  if (uSurfaceSheets>0 && px<.045) {
+    float texels=.5/uSurfaceEdge.x, metres=1.5;
+    int floorSlot=seed<.33?S_TATAMI:seed<.66?S_WOOD_FLOORING:S_CARPET_TILE;
+    int wallSlot=fract(seed*7.31)<.5?S_VINYL_WALLPAPER:S_GYPSUM_PAINTED;
+    if (floorHit>.5 && surfaceReady(floorSlot)) {
+      float lod=log2(max(px*2.5*texels/S_METERS[floorSlot],1.));
+      vec3 c=toLinear(surfaceLod(floorSlot,hit.xz*metres,lod).rgb);
+      col=c*(.9+seed*.2);
+    } else if (ceilHit<.5 && surfaceReady(wallSlot)) {
+      float lod=log2(max(px*2.*texels/S_METERS[wallSlot],1.));
+      vec2 wp=(backHit>.5?hit.xy:vec2(hit.z,hit.y))*metres;
+      vec3 c=toLinear(surfaceLod(wallSlot,wp,lod).rgb);
+      col*=c/max(toLinear(surfaceMean(wallSlot)),vec3(.02));
+    }
+  }
+#endif
+  float shelf=backHit*step(.18,hit.x)*step(hit.x,.42)*step(abs(fract(hit.y*3.)-.5),.06);
+  col=mix(col,vec3(.30,.26,.21),shelf);
+  float lamp=ceilHit*smoothstep(.16,.05,length(hit.xz-vec2(0.,.4*depth)));
+  vec3 light=mix(vec3(.30,.32,.33),vec3(1.,.82,.58)*1.6,lightOn);
+  return col*light+vec3(1.,.86,.62)*lamp*lightOn*4.;
+}
+void main(){
+  ivec2 ipx=ivec2(gl_FragCoord.xy);
+  float rawD=texelFetch(uGDepth,ipx,0).r;
+  float zView=uDepthAB.x/(uDepthAB.y-rawD);
+  vec3 vPos=uEye+vRay*zView;
+  vec3 sdpxRaw=dFdx(vPos), sdpyRaw=dFdy(vPos);
+  float invRL=inversesqrt(dot(vRay,vRay));
+  float dist=zView/invRL;
+  vec3 dir=vRay*invRL;
+  vec3 V=-dir;
+  vec4 g0=texelFetch(uG0,ipx,0);
+  vec4 g1=texelFetch(uG1,ipx,0);
+  int kind=int(g0.a*255.+.5);
+  vec3 ng=octDec(g1.rg);
+  int lowMeta=int(g1.a*255.+.5)&15;
+  vec3 tint=toLinear(g0.rgb);
+  vec3 an=abs(ng);
+  vec2 xz=vPos.xz;
+  vec2 uvW=an.y>.6?xz:(an.x>an.z?vPos.zy:vPos.xy);
+  float maxStep=max(dist*uPixelStep*5.,0.008), maxStep2=maxStep*maxStep;
+  float ldx2=dot(sdpxRaw,sdpxRaw), ldy2=dot(sdpyRaw,sdpyRaw);
+  bool discEdge=(ldx2>maxStep2 || ldy2>maxStep2);
+  vec3 sdpx=ldx2>maxStep2?sdpxRaw*(maxStep*inversesqrt(ldx2)):sdpxRaw;
+  vec3 sdpy=ldy2>maxStep2?sdpyRaw*(maxStep*inversesqrt(ldy2)):sdpyRaw;
+  float px=max(length(sdpx),length(sdpy));
+#ifndef NO_SURFACES
+  vec2 sdx=an.y>.6?sdpx.xz:(an.x>an.z?sdpx.zy:sdpx.xy);
+  vec2 sdy=an.y>.6?sdpy.xz:(an.x>an.z?sdpy.zy:sdpy.xy);
+  int slot=uSurfaceSheets>0?(int(g1.b*255.+.5)-1):-1;
+  bool real=surfaceReady(slot);
+#endif
+  if (kind==25) {
+    vec2 uv2=texelFetch(uG2,ipx,0).xy;
+    float rim=pow(1.-max(0.,dot(ng,V)),2.5);
+    float veins=sin(uv2.x*32.+uv2.y*21.-uClock*19.+det(uv2*1.3).r*9.);
+    float streak=smoothstep(.42,.96,veins)*.55+rim*.46;
+    vec3 liquid=tint*(1.2+.5*max(dot(ng,uSun),0.)+.25*veins);
+    vec3 col=mix(liquid,vec3(2.6,2.3,2.6),sat(streak))*1.4;
+    frag=vec4(col,0.);
+    return;
+  }
+  bool vertical=an.y<.45;
+  float wallBase=vertical && vPos.y<1.65 && (kind==10 || kind==13)?
+    1.-smoothstep(0.,.95+det(uvW*.043).r*.6,vPos.y):0.;
+  vec3 albedo=tint, emit=vec3(0.), n=ng;
+  float rough=.6, metal=0., ao=1., f0Base=.04, clear=0., surfH=0., relief=0.;
+  if (kind==5) {
+    vec4 d1=det(uvW*.23);
+    float crackZone=smoothstep(.58,.70,det(uvW*.031+.4).r);
+    float tar=crackZone>.005?smoothstep(.84,.97,det(uvW*.083+.2).b)*crackZone*.85:0.;
+    float puddle=smoothstep(.56,.70,det(xz*.045+.11).r*.75+d1.r*.35);
+    float wet=sat(puddle*1.6);
+    vec3 asphalt;
+#ifndef NO_SURFACES
+    if (real) {
+      vec4 stex=surfaceTap(slot,uvW,sdx,sdy);
+      float h1=0., h2=0., aged=smoothstep(.38,.62,sfNoise(xz*.026+1.7));
+      vec3 fresh=realSurface(stex,S_ASPHALT,tint*.70,1.,.008,h1), old=fresh;
+      if (aged>.01 && surfaceReady(S_ASPHALT_WORN)) old=realSurface(surfaceTap(S_ASPHALT_WORN,uvW+vec2(9.,23.),sdx,sdy),S_ASPHALT_WORN,tint*.70,1.,.008,h2);
+      else h2=h1;
+      asphalt=mix(fresh,old,aged);
+      surfH=mix(h1,h2,aged);
+      relief=1.-wet;
+      rough=mix(.82,.06,puddle);
+    } else
+#endif
+    {
+      vec4 d2=det(uvW*1.9), d3=det(uvW*7.1);
+      float stones=smoothstep(.30,.08,d3.g), patchy=smoothstep(.45,.62,d1.r);
+      asphalt=tint*.70*(.86+(d2.r-.5)*.24+stones*.32+(d3.a-.5)*.18)*mix(1.,.86,patchy);
+      rough=mix(.86-stones*.12,.06,puddle);
+      surfH=-d3.g*.0045;
+      relief=1.-wet;
+    }
+    asphalt=mix(asphalt,vec3(.018,.019,.02),tar);
+    albedo=asphalt*mix(1.,.45,wet);
+    ao=1.-tar*.3;
+    if (puddle>.01) {
+      float rip=sin(xz.x*5.1+xz.y*2.3+uClock*1.3)*sin(xz.y*4.7-xz.x*1.1-uClock*1.1);
+      n=normalize(mix(n,vec3(rip*.02,1.,rip*.015),puddle));
+    }
+  } else if (kind==10) {
+    vec4 g2=texelFetch(uG2,ipx,0);
+    vec2 fp=g2.xy, fsz=g2.zw;
+    if (an.y>.55) {
+      albedo=tint*.66; rough=.9;
+#ifndef NO_SURFACES
+      if (uSurfaceSheets>0 && surfaceReady(S_ROOF_MEMBRANE)) {
+        albedo=realSurface(surfaceTap(S_ROOF_MEMBRANE,uvW,sdx,sdy),S_ROOF_MEMBRANE,tint*.66,1.,.01,surfH);
+        relief=1.;
+      }
+#endif
+    } else {
+      vec2 rs=vec2(max(1.,floor(fsz.x/6.+.5))/fsz.x,1./5.84);
+      float parapet=step(fsz.y-1.05,fp.y);
+#ifndef NO_SURFACES
+      if (real) {
+        vec3 tx=an.y<.99?normalize(cross(vec3(0.,1.,0.),ng)):vec3(1.,0.,0.);
+        vec2 fdx=vec2(dot(sdpx,tx),sdpx.y), fdy=vec2(dot(sdpy,tx),sdpy.y);
+        float seed=float(lowMeta)/15.;
+        float cell=hash12(floor(fp*rs*vec2(1.,2.))+seed*13.);
+        vec4 t=surfaceTap(slot,fp*rs,fdx*rs,fdy*rs);
+        vec3 c=realSurface(t,slot,tint,1.,0.,surfH)*(.96+cell*.08);
+        float glass=smoothstep(.02,.07,t.b-t.r)*smoothstep(.62,.3,t.b)*(1.-parapet);
+        albedo=mix(c,tint*.86,parapet);
+        rough=mix(.82,.1,glass);
+        f0Base=mix(.04,.06,glass);
+      } else
+#endif
+      {
+        float storey=fract(fp.y/2.92);
+        float win=step(.25,storey)*step(storey,.8)*step(.12,fract(fp.x*rs.x*2.))*step(fract(fp.x*rs.x*2.),.88);
+        albedo=mix(tint*.92,vec3(.05,.06,.07),win*(1.-parapet));
+        rough=mix(.85,.12,win);
+      }
+      albedo=mix(albedo,albedo*vec3(.72,.70,.64),wallBase*.5);
+    }
+  } else if (kind==8 || kind==6) {
+    vec4 g2=texelFetch(uG2,ipx,0);
+    vec2 fp=g2.xy, faceSize=g2.zw;
+    bool windowPane=kind==8 && vertical && min(faceSize.x,faceSize.y)>.55 && max(faceSize.x,faceSize.y)>.9 && lowMeta==1;
+    if (kind==6 && !vertical) {
+      float rip=sin(xz.x*4.3+xz.y*1.9+uClock*.9)*sin(xz.y*4.7-xz.x*.9-uClock*.82);
+      n=normalize(vec3(rip*.05,1.,cos(xz.x*2.7+xz.y*1.8+uClock*.8)*.04));
+      albedo=tint*.25; rough=.04; f0Base=.02;
+    } else {
+      float dirt=det(uvW*.8).r;
+      albedo=tint*.05; rough=.02+dirt*.05; f0Base=.045;
+#ifndef NO_SURFACES
+      if (real) {
+        vec4 stex=surfaceTap(slot,uvW,sdx,sdy);
+        float smear=sfLum(stex.rgb);
+        rough=mix(rough,.38,smear*.55);
+        albedo=mix(albedo,toLinear(stex.rgb)*.3,smear*.22);
+      }
+#endif
+      vec3 tx=an.y<.99?normalize(cross(vec3(0.,1.,0.),ng)):vec3(1.,0.,0.);
+      vec3 ty=vec3(0.,1.,0.);
+      if (lowMeta==1 && vertical && max(faceSize.x,faceSize.y)>2.6) {
+        vec2 paneSz=vec2(faceSize.x/max(1.,floor(faceSize.x/1.5)),faceSize.y/max(1.,floor(faceSize.y/1.7)));
+        vec2 pg=fp/paneSz, pc=fract(pg), pid=floor(pg);
+        float fr=1.-smoothstep(.025,.045,min(min(pc.x,1.-pc.x)*paneSz.x,min(pc.y,1.-pc.y)*paneSz.y));
+        n=normalize(n+(tx*(hash12(pid)-.5)+ty*(hash12(pid+3.)-.5))*.035);
+        albedo=mix(albedo,vec3(.05,.055,.06),fr);
+        rough=mix(rough+hash12(pid+7.)*.05,.45,fr);
+        f0Base=mix(f0Base,.04,fr);
+      }
+      if (windowPane || kind==6) {
+        vec3 vt=vec3(dot(-V,tx),dot(-V,ty),dot(V,n));
+        vec2 cellSz=kind==6?vec2(1.6,2.7):faceSize;
+        vec2 uv=fp/cellSz;
+        vec2 rid=floor(uv)+floor(vPos.xz*.1);
+        float seed=hash12(rid+floor(vPos.y/3.));
+        float on=step(.62,hash12(rid*1.7+3.))*.35;
+#ifdef SAFE
+        vec3 room=vec3(.2,.21,.2)*(.7+seed*.5);
+#else
+        vec3 room=(px<.12 && dist<65.)?roomBehind(fract(uv),vt,seed,on,kind==6?2.2:1.6,px):mix(vec3(.22,.23,.24),vec3(.62,.52,.38),on)*(.75+seed*.45);
+#endif
+        float fres=.04+.96*pow5(1.-max(dot(n,V),0.));
+        emit=room*(1.-fres)*(kind==6?.22:.34)*(1.-dirt*.3);
+        f0Base=kind==6?.07:f0Base;
+        float blind=kind==6?step(.7,seed)*smoothstep(.0,.02,fract(uv.y)-.6):0.;
+        emit*=1.-blind*.7;
+        albedo=mix(albedo,vec3(.62,.6,.55),blind);
+#if !defined(SAFE) && !defined(NO_SURFACES)
+        if (kind==6 && uSurfaceSheets>0) {
+          if (blind>0. && surfaceReady(S_WINDOW_BLINDS)) albedo=mix(albedo,toLinear(surfaceTap(S_WINDOW_BLINDS,uvW,sdx,sdy).rgb)*.85,blind);
+          float reed=step(.47,seed)*step(seed,.55);
+          if (reed>0. && surfaceReady(S_SUDARE)) {albedo=mix(albedo,toLinear(surfaceTap(S_SUDARE,uvW,sdx,sdy).rgb)*.8,.88); emit*=.3; f0Base=mix(f0Base,.03,.88);}
+          float paper=step(.55,seed)*step(seed,.7);
+          if (paper>0. && surfaceReady(S_SHOJI_PAPER)) {vec3 shoji=toLinear(surfaceTap(S_SHOJI_PAPER,uvW,sdx,sdy).rgb); emit=shoji*mix(.16,.55,on)*(1.-fres); albedo=mix(albedo,shoji*.45,.5);}
+        }
+#endif
+      }
+    }
+  } else if (kind==11) {
+    if (an.y>.55) {
+#ifndef NO_SURFACES
+      if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint*.72,1.,.01,surfH); rough=.9; relief=1.;}
+      else
+#endif
+      {vec4 d1=det(uvW*.4); albedo=tint*.72*(.85+d1.r*.25)*mix(1.,.8,smoothstep(.6,.8,det(uvW*.17+.31).r)); rough=.9;}
+    } else {
+      vec4 g2=texelFetch(uG2,ipx,0);
+      vec2 fp=g2.xy, fsz=g2.zw;
+      vec3 tx=an.y<.99?normalize(cross(vec3(0.,1.,0.),ng)):vec3(1.,0.,0.);
+      vec2 fdx=vec2(dot(sdpx,tx),sdpx.y), fdy=vec2(dot(sdpy,tx),sdpy.y);
+      float facade=fract(dot(g0.rgb,vec3(17.3,7.9,11.1)));
+      bool curtain=facade>.72 && fsz.y>9.;
+      bool ribbon=!curtain && facade>.46;
+      vec2 cellSz=vec2(fsz.x/max(1.,floor(fsz.x/(curtain?1.6:2.2))),3.15);
+      vec2 g=fp/cellSz, cell=fract(g), cid=floor(g);
+      vec2 fw=(abs(fdx)+abs(fdy))/cellSz;
+      vec2 lo=curtain?vec2(.035,.05):ribbon?vec2(.02,.30):vec2(.17,.24);
+      vec2 hiE=curtain?vec2(.965,.95):ribbon?vec2(.98,.82):vec2(.83,.86);
+      vec2 inW=smoothstep(lo-fw,lo+fw,cell)*(1.-smoothstep(hiE-fw,hiE+fw,cell));
+      float win=inW.x*inW.y;
+      float detailVis=1.-smoothstep(.10,.30,max(fw.x,fw.y));
+      vec3 wall=tint;
+      if (win<.995 && detailVis>.01) {
+#ifndef NO_SURFACES
+        if (real) {wall=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.008,surfH); relief=1.-win;}
+        else
+#endif
+        wall=tint*(.9+(det(uvW*1.2).r-.5)*.14);
+        if (detailVis>.25) {
+          float under=smoothstep(lo.y,lo.y-.25,cell.y)*step(lo.x,cell.x)*step(cell.x,hiE.x);
+          if (under>.005) wall*=1.-under*smoothstep(.4,.8,det(vec2(g.x*3.,g.y*.25)).r)*.32;
+          float stain=det(uvW*.17+.31).r;
+          wall=mix(wall,wall*.8,smoothstep(.55,.8,stain)*.5);
+        }
+        float sill=smoothstep(.035,.0,abs(cell.y-lo.y+.03))*step(lo.x-.03,cell.x)*step(cell.x,hiE.x+.03);
+        wall=mix(wall,vec3(.75,.74,.70),sill*.6*detailVis);
+      }
+      albedo=wall; rough=.82;
+      if (win>.002 && detailVis>.005) {
+        vec3 vt=vec3(dot(-V,tx),-V.y,dot(V,n));
+        vec2 recess=vt.xy/max(vt.z,.2)*.08/cellSz;
+        vec2 wuv=(cell-lo)/(hiE-lo);
+        vec2 rev=step(wuv,-recess*4.)+step(1.-recess*4.,wuv);
+        float reveal=sat(max(rev.x,rev.y))*detailVis;
+        float seed=hash12(cid+floor(vPos.xz*.37));
+        float on=step(.7,hash12(cid*3.1+1.7));
+#ifdef SAFE
+        vec3 room=vec3(.18,.2,.21)*(.8+seed*.4);
+#else
+        vec3 room=(detailVis>.30 && dist<75.)?roomBehind(sat(wuv),vt,seed,on,1.4,px):mix(vec3(.22,.23,.24),vec3(.62,.52,.38),on)*(.75+seed*.45);
+#endif
+        float mull=1.-smoothstep(.006,.014,abs(wuv.x-.5));
+        float pane=hash12(cid+.3);
+        vec3 glassTint=curtain?mix(vec3(.025,.04,.05),vec3(.04,.05,.045),pane):vec3(.03);
+        albedo=mix(wall,glassTint,win);
+        rough=mix(.82,.03+pane*.04,win);
+        f0Base=mix(.04,curtain?.11:.075,win);
+        vec3 nWin=normalize(n+(tx*(pane-.5)+vec3(0.,1.,0.)*(hash12(cid+5.)-.5))*.02);
+        n=normalize(mix(n,nWin,win));
+        float fres=.04+.96*pow5(1.-max(dot(n,V),0.));
+        emit=room*win*(1.-fres)*(1.-reveal)*.30*(1.-mull*.8);
+        albedo=mix(albedo,vec3(.42,.43,.42),reveal*win+mull*win*detailVis);
+        rough=mix(rough,.6,reveal*win);
+        ao=1.-reveal*win*.5;
+      }
+      if (detailVis<.99) {
+        vec3 far=mix(wall,vec3(.08,.1,.11),.45);
+#ifndef NO_SURFACES
+        float pick=fract(facade*7.3);
+        int farSlot=curtain?(pick<.5?S_REFLECTIVE_GLASS:S_MIRROR_STAINLESS):
+          ribbon || fsz.y>26.?S_FACADE_OFFICE_FAR:
+          fsz.y<13. && vPos.y-fp.y<1. && pick<.6?S_FACADE_RETAIL_FAR:S_FACADE_APARTMENT_FAR;
+        if (uSurfaceSheets>0 && surfaceReady(farSlot)) {
+          float hf=0.;
+          far=realSurface(surfaceTap(farSlot,fp,fdx,fdy),farSlot,tint,1.,0.,hf);
+          float glassy=1.-smoothstep(.04,.16,lum(far));
+          f0Base=mix(f0Base,curtain?.11:.06,(1.-detailVis)*(curtain?1.:glassy));
+          rough=mix(rough,mix(.8,.08,curtain?1.:glassy),1.-detailVis);
+        }
+#endif
+        albedo=mix(far,albedo,detailVis);
+      }
+    }
+  } else if (kind==15) {
+    vec4 g2=texelFetch(uG2,ipx,0);
+    vec2 faceUV=g2.xy, faceSize=g2.zw;
+    float nose=smoothstep(.06,.02,min(faceSize.x*.5-abs(faceUV.x),faceSize.y*.5-abs(faceUV.y)))*step(.6,an.y);
+#ifndef NO_SURFACES
+    if (real) {
+      vec3 ground=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH);
+      if (nose>.01 && surfaceReady(S_RUBBER_STAIR)) {
+        float h5=0.;
+        ground=mix(ground,realSurface(surfaceTap(S_RUBBER_STAIR,uvW,sdx,sdy),S_RUBBER_STAIR,vec3(.05),1.,.006,h5),nose);
+      }
+      albedo=ground; rough=mix(.82,.9,nose); relief=1.;
+    } else
+#endif
+    {
+      albedo=tint*(.92+(det(uvW*.31).r-.5)*.14)*mix(1.,.55,nose);
+      rough=mix(.82,.9,nose);
+    }
+  } else if (kind==23) {
+    vec2 uv2=texelFetch(uG2,ipx,0).xy;
+    float rib=sin(uv2.y*85.+sin(uv2.x*37.7)*.86);
+    float nacre=pow(1.-max(0.,dot(ng,V)),2.2);
+    float pores=det(uv2*vec2(3.,2.)).g;
+    vec3 interference=mix(vec3(.10,.22,.40),vec3(.53,.24,.38),.5+.5*sin(uv2.x*18.85+uv2.y*8.));
+    albedo=mix(tint*(.85+pores*.22+rib*.07),toLinear(interference),.32*nacre);
+    rough=.26+.08*pores; clear=.8; metal=.1;
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTri(slot,vPos,ng,sdpx,sdpy),slot,albedo,.8,.006,surfH); relief=.5;}
+#endif
+  } else if (kind==29) {
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.012,surfH); rough=.78; relief=1.;}
+    else
+#endif
+    {
+      vec4 g2=texelFetch(uG2,ipx,0);
+      vec2 g=g2.xy, faceSize=g2.zw;
+      vec2 along=faceSize.x>=faceSize.y?g:g.yx;
+      float row=floor(along.y/.115);
+      float pid=hash12(vec2(row,floor(along.x/1.3+row*.37)));
+      float fibre=det(vec2(along.x*.32,along.y*3.9+pid*3.)).r;
+      float rings=.5+.5*sin(along.y*41.+fibre*10.+pid*6.);
+      float seam=1.-smoothstep(.003,.008+px*.5,min(fract(along.y/.115),1.-fract(along.y/.115))*.115);
+      vec3 timber=tint*(.74+pid*.32)*(.84+rings*.2)*(.92+det(along*1.7).a*.16);
+      albedo=mix(timber,timber*.32,seam);
+      rough=.74+fibre*.12;
+      ao=1.-seam*.5;
+      vec3 ty=an.y<.99?vec3(0.,1.,0.):vec3(0.,0.,1.);
+      n=normalize(n+ty*(rings-.5)*.025*(1.-seam));
+    }
+  } else if (kind==13) {
+#ifndef NO_SURFACES
+    if (real) {
+      vec4 stex=lowMeta==0?surfaceTri(slot,vPos,ng,sdpx,sdpy):surfaceTap(slot,uvW,sdx,sdy);
+      bool nat=slot==S_BARK || slot==S_SOIL || slot==S_MULCH;
+      vec3 b=realSurface(stex,slot,tint,1.,nat?.02:.012,surfH);
+      if (!nat) b=mix(b,b*.66,wallBase*.6*float(vertical));
+      albedo=b; rough=nat?.9:.78; relief=1.;
+    } else
+#endif
+    {
+      vec2 bricks=uvW/vec2(.69,.296);
+      bricks.x+=mod(floor(bricks.y),2.)*.5;
+      vec2 b=fract(bricks), id=floor(bricks);
+      vec2 jd=min(b,1.-b)*vec2(.69,.296);
+      float mortar=1.-smoothstep(.006,.016+px*.5,min(jd.x,jd.y));
+      vec4 d2=det(uvW*1.7+id*.13);
+      vec3 c=tint*(.84+hash12(id)*.24+(d2.r-.5)*.18)*mix(vec3(1.),vec3(1.04,.97,.92),hash12(id+7.)*.5);
+      c=mix(c,vec3(.52,.50,.46)*(.9+d2.a*.2),mortar*.85);
+      albedo=mix(c,c*.66,wallBase*.6*float(vertical));
+      rough=mix(.74+d2.r*.12,.92,mortar);
+      ao=1.-mortar*.45;
+    }
+  } else if (kind==26) {
+    albedo=tint*.95; rough=.09; clear=.9; emit=tint*.05;
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,albedo,.35,.002,surfH); relief=.3;}
+#endif
+  }
+  surfH*=relief*(1.-smoothstep(.004,.03,px));
+  vec2 surfSlope=vec2(dFdx(surfH),dFdy(surfH));
+  if (relief>0. && px<.03 && !discEdge) {
+    vec3 r1=cross(sdpy,ng), r2=cross(ng,sdpx);
+    float area=dot(sdpx,r1);
+    n=normalize(abs(area)*n-sign(area)*(surfSlope.x*r1+surfSlope.y*r2));
+  }
+  float inked=0.;
+  if ((kind==5 || kind==15) && ng.y>.48 && (kind==15 || vPos.y>-.055)) {
+    vec2 inkUV=(xz/uInkBounds+1.)*.5;
+    if (all(greaterThan(inkUV,vec2(0))) && all(lessThan(inkUV,vec2(1)))) {
+      float fLayer=float(lowMeta);
+      vec4 inkProbe=texture(uInk,vec3(inkUV,fLayer));
+      if (inkProbe.r+inkProbe.g>.002) {
+        ivec2 size=textureSize(uInk,0).xy;
+        vec2 grid=inkUV*vec2(size)-.5;
+        ivec2 pixel=ivec2(floor(grid));
+        vec2 part=fract(grid);
+        part=part*part*(3.-2.*part);
+        float clearance=kind==15 || lowMeta==4?.207:${f(FILM_HEIGHT_TOLERANCE)};
+        vec4 a=filmCell(pixel,size,lowMeta,vPos.y,clearance);
+        vec4 b=filmCell(pixel+ivec2(1,0),size,lowMeta,vPos.y,clearance);
+        vec4 c=filmCell(pixel+ivec2(0,1),size,lowMeta,vPos.y,clearance);
+        vec4 d=filmCell(pixel+ivec2(1,1),size,lowMeta,vPos.y,clearance);
+        vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
+        float bossMask=mix(mix(step(1.35,a.r+a.g),step(1.35,b.r+b.g),part.x),mix(step(1.35,c.r+c.g),step(1.35,d.r+d.g),part.x),part.y);
+        float coverage=mix(mix(min(1.,a.r+a.g),min(1.,b.r+b.g),part.x),mix(min(1.,c.r+c.g),min(1.,d.r+d.g),part.x),part.y);
+        if (coverage>.08) {
+          vec4 iDet=det(xz*.83);
+          float thr=.5+(iDet.r*.6+iDet.a*.4-.5)*.38;
+          float aa=max(px*.85,.015);
+          float mask=smoothstep(thr-aa,thr+aa,coverage);
+          if (mask>.003) {
+            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014), bossCol=vec3(.014,.010,.020);
+            float thick=st.b;
+            vec3 teamInk=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 ink=mix(teamInk,bossCol*(1.05-thick*.15),smoothstep(.3,.7,bossMask));
+            vec3 coord=vec3(inkUV,fLayer);
+            float e0=texture(uInk,coord+vec3(uInkTexel.x,0.,0.)).b;
+            float s0=texture(uInk,coord+vec3(0.,uInkTexel.y,0.)).b;
+            vec2 liquid=-vec2(e0-thick,s0-thick)*1.62;
+            vec4 wDet=det(xz*1.7+vec2(uClock*.02,0.));
+            liquid+=vec2(wDet.r-.5,wDet.b-.5)*.05+vec2(smoothstep(.07,.02,wDet.g)*.15*(1.-thick));
+            clear=mix(clear,mix(.32,.65,bossMask),mask);
+            ao=mix(ao,1.,mask*.6);
+            albedo=mix(albedo,ink,mask);
+            rough=mix(rough,mix(.21,.065,bossMask)+length(liquid)*.18,mask);
+            metal=mix(metal,0.,mask);
+            emit=mix(emit,mix(ink*.05,vec3(.042,.006,.014),bossMask),mask);
+            f0Base=mix(f0Base,mix(.045,.075,bossMask),mask);
+            n=normalize(mix(n,normalize(ng+vec3(liquid.x,0.,liquid.y)),mask));
+            inked=mask;
+          }
+        }
+      }
+    }
+  }
+  if (uWetLevel>.02 || uRaytrace>.5) {
+    float upWet=smoothstep(.65,.95,ng.y)*sat(1.-inked);
+    if (upWet>.002) {
+      float puddle=smoothstep(.42,.66,det(xz*.11).r);
+      float wetAmt=sat(uWetLevel*upWet*(.45+.55*puddle)+(uRaytrace>.5?upWet*puddle*.22:0.));
+      rough=mix(rough,.065,wetAmt);
+      clear=max(clear,wetAmt*.58);
+      f0Base=max(f0Base,.045*wetAmt);
+      albedo=mix(albedo,albedo*.72,wetAmt*.65);
+    }
+  }
+  float nv=max(dot(n,V),1e-4), nl=dot(n,uSun);
+  vec3 R=reflect(-V,n), direct=vec3(0.);
+  vec3 f0=mix(vec3(f0Base),albedo,metal);
+  vec3 diffC=albedo*(1.-metal);
+  if (nl>.001) {
+    float sh=sunShadow(vPos,ng);
+    if (sh>.001) {
+      vec3 sun=uSunColor*sh;
+      direct=diffC*(1./PI)*sun*nl+sun*specGGX(n,V,uSun,f0,max(rough,.03),nv,nl);
+      if (clear>0.) direct+=sun*specGGX(n,V,uSun,vec3(.04),.05,nv,nl)*clear;
+    }
+  }
+  vec3 irr=shDiffuse(n)+vec3(.36,.34,.30)*(sat(-n.y)*.2);
+  if (uBossRage>.005) irr=mix(irr,irr*vec3(1.12,.52,.58)+vec3(.04,.005,.01),uBossRage*.55);
+  vec3 spec=(rough>.72 && metal<.01)?irr:envSpec(R,rough);
+  if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
+  bool hasPlanar=uReflectOn && ng.y>.49 && abs(vPos.y)<.08;
+  bool usedPlanar=false;
+  vec3 planar=vec3(0.);
+  if (hasPlanar && rough<.45) {
+    planar=texture(uReflection,gl_FragCoord.xy/uViewport+n.xz*.035).rgb;
+    usedPlanar=true;
+    float w=(1.-smoothstep(.08,.40,rough))*mix(1.,.55,inked);
+    spec=mix(spec,planar,w);
+  }
+  float so=ao>=.999?1.:sat(pow(nv+ao,exp2(-16.*rough-1.))-1.+ao);
+  vec3 ambient=diffC*irr*ao+spec*envBRDF(f0,rough,nv)*so;
+  if (clear>0.) {
+    vec3 cspec=hasPlanar?(usedPlanar?planar:texture(uReflection,gl_FragCoord.xy/uViewport+n.xz*.02).rgb):envSpec(R,.05);
+    ambient+=cspec*(.04+.96*pow5(1.-nv))*clear*so;
+  }
+  vec3 col=direct+ambient+emit;
+  float dy=vPos.y-uEye.y;
+  float integral=abs(dy)>.01?(uFogParams.z-exp(-uFogParams.x*vPos.y))/(uFogParams.x*dy):uFogParams.z;
+  float fogAmt=1.-exp(-uFogParams.y*dist*max(integral,0.));
+  if (uFogParams.w>0.) fogAmt=max(fogAmt,smoothstep(uFogParams.w*.6,uFogParams.w*.97,dist));
+  if (fogAmt>.002) {
+    vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+    vec3 fogCol=mix(fogEnv(fdir)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
+    col=mix(col,fogCol,fogAmt);
+  }
+  frag=vec4(col,sat(lum(ambient)/(lum(col)+1e-4))*(1.-fogAmt));
+}`;
+
+// Dedicated ultra-lean Stage 4 transparent shader (only kinds 7, 12, 16, 17, 24, 28 — ~95 lines vs 1,100).
+export const SCENE_ALPHA_VERTEX=`#version 300 es
+precision highp float;
+invariant gl_Position;
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec2 aUV;
+layout(location=4) in vec4 a0;
+layout(location=5) in vec4 a1;
+layout(location=6) in vec4 a2;
+layout(location=7) in vec4 a3;
+layout(location=8) in vec4 aTint;
+layout(location=9) in vec4 aExtra;
+uniform mat4 uVP;
+uniform float uDrawOffset;
+uniform bool uMergeStairs;
+out vec3 vPos;
+out vec3 vNormal;
+out vec2 vUV;
+flat out vec4 vTint;
+flat out vec4 vExtra;
+void main(){
+  mat3 m=mat3(a0.xyz,a1.xyz,a2.xyz);
+  vec4 p=vec4(m*aPos+a3.xyz,1.);
+  vPos=p.xyz;
+  vNormal=normalize(a0.xyz*(aNormal.x/max(dot(a0.xyz,a0.xyz),1e-12))
+                   +a1.xyz*(aNormal.y/max(dot(a1.xyz,a1.xyz),1e-12))
+                   +a2.xyz*(aNormal.z/max(dot(a2.xyz,a2.xyz),1e-12)));
+  vUV=aUV;
+  vTint=aTint;
+  vExtra=aExtra;
+  p.x+=uDrawOffset;
+  gl_Position=uMergeStairs && aExtra.z>.5?vec4(2.,2.,2.,1.):uVP*p;
+}`;
+
+export const SCENE_ALPHA_FRAGMENT=`#version 300 es
+precision highp float;
+precision highp sampler2DShadow;
+${COMMON}
+in vec3 vPos;
+in vec3 vNormal;
+in vec2 vUV;
+flat in vec4 vTint;
+flat in vec4 vExtra;
+uniform vec3 uEye;
+uniform vec3 uSun;
+uniform vec3 uSunColor;
+uniform bool uShadowOn;
+uniform int uCascades;
+uniform sampler2DShadow uShadow0;
+uniform sampler2DShadow uShadow1;
+uniform mat4 uShadowM0;
+uniform mat4 uShadowM1;
+uniform vec4 uShadowTexel;
+uniform sampler2D uAtlas;
+uniform vec2 uAtlasGrid;
+uniform sampler2D uEnv;
+uniform float uEnvLod;
+uniform sampler2D uDetail;
+uniform float uClock;
+uniform vec4 uFogParams;
+uniform float uBossRage;
+uniform float uRainLevel;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
+out vec4 frag;
+vec3 envSpec(vec3 r,float rough){return envDecode(textureLod(uEnv,envUV(r),clamp(sqrt(rough)*uEnvLod,0.,uEnvLod)));}
+vec3 shDiffuse(vec3 n){float t=clamp(.5-n.y*.7071068,0.,1.);return max(mix(uSH0,uSH1,t)+uSH2*n.x+uSH3*n.z+uSH4*(t*(1.-t)),vec3(0.));}
+vec3 fogEnv(vec3 d){return max(uFog0+uFog1*d.y+uFog2*d.x+uFog3*d.z,vec3(0.));}
+float ggxD(float nh,float a){float a2=a*a;float d=nh*nh*(a2-1.)+1.;return a2/max(PI*d*d,1e-6);}
+float visSmith(float nv,float nl,float a){float k=a*.5;return .25/max((nv*(1.-k)+k)*(nl*(1.-k)+k),1e-4);}
+vec3 specGGX(vec3 n,vec3 v,vec3 l,vec3 f0,float rough){
+  vec3 h=normalize(l+v);
+  float nl=max(dot(n,l),0.), nv=max(dot(n,v),1e-4), nh=max(dot(n,h),0.), a=max(rough*rough,.0016);
+  vec3 F=f0+(1.-f0)*pow5(1.-max(dot(v,h),0.));
+  return ggxD(nh,a)*visSmith(nv,nl,a)*F*nl;
+}
+float sunShadow(vec3 p,vec3 ng){
+  if (!uShadowOn) return 1.;
+  float slope=1.-sat(dot(ng,uSun));
+  vec3 c0=(uShadowM0*vec4(p+ng*uShadowTexel.z*(1.2+slope*1.6),1.)).xyz;
+  vec2 e0=min(c0.xy,1.-c0.xy);
+  float inner=min(e0.x,e0.y), s0=1.;
+  if (inner>0. && c0.z<1.) {
+    int chk=(int(gl_FragCoord.x)^int(gl_FragCoord.y))&1;
+    vec2 d=(chk==0?vec2(.62,.44):vec2(-.44,.62))*(uShadowTexel.x*1.22);
+    s0=(texture(uShadow0,vec3(c0.xy+d,c0.z-.00022))+texture(uShadow0,vec3(c0.xy-d,c0.z-.00022)))*.5;
+  }
+  if (uCascades<2) return inner>0.?s0:1.;
+  float blend=smoothstep(.0,.08,inner);
+  if (blend>=1.) return s0;
+  vec3 c1=(uShadowM1*vec4(p+ng*uShadowTexel.w*(1.2+slope*1.6),1.)).xyz;
+  vec2 e1=min(c1.xy,1.-c1.xy);
+  float s1=1.;
+  if (min(e1.x,e1.y)>0. && c1.z<1.) s1=texture(uShadow1,vec3(c1.xy,c1.z-.00045));
+  s1=mix(1.,s1,smoothstep(0.,.06,min(e1.x,e1.y)));
+  return mix(s1,s0,blend);
+}
+void main(){
+  int kind=int(vTint.a+.5);
+  if (kind==28) {
+    float r=length(vUV-.5)*2.;
+    frag=vec4(0.,0.,0.,pow(sat(1.-r),1.7)*vExtra.x);
+    return;
+  }
+  vec3 tint=toLinear(vTint.rgb);
+  if (kind==12) {
+    float contour=sin(vUV.y*3.14159)*(.65+.35*sin(vUV.x*21.+uClock*8.));
+    frag=vec4(tint*1.9,max(0.,contour)*(.46*(1.-vExtra.x)));
+    return;
+  }
+  if (kind==24) {
+    float r=vUV.y, u=vUV.x, age=vExtra.x, fade=sat(vExtra.w-1.);
+    float angle=(u>.5?u-1.:u)*6.2831853, halfAngle=vExtra.y*3.14159265;
+    bool sector=halfAngle>.001;
+    if (sector && abs(angle)>halfAngle) discard;
+    float soft=max(.006,fwidth(r)*.78);
+    float rim=1.-smoothstep(.012,.045+soft,abs(r-.961));
+    float seam=sector?smoothstep(halfAngle-.056,halfAngle,abs(angle))*.81:0.;
+    float ticks=step(.67,fract(u*48.))*smoothstep(.78,.89,r)*.48;
+    float phase=sector?sat((angle+halfAngle)/(2.*halfAngle)):r;
+    float wave=1.-smoothstep(.015,.075+soft,abs(phase-age));
+    float fragments=.54+.46*sin(r*57.-uClock*10.+sin(u*50.));
+    float hatching=(1.-smoothstep(.18,.49,abs(fract((vPos.x+vPos.z)*1.62-uClock*.35)-.5)))*.31;
+    vec3 col; float alpha;
+    if (vExtra.w<1.) {
+      float light=max(max(rim,seam),wave*.85);
+      col=mix(tint*1.6,vec3(2.4,2.2,2.1),light*.77);
+      alpha=min(.96,max(rim*.77,seam*.77)+ticks*.18+wave*.30+(.075+hatching*.27+fragments*.053)*(.55+.45*age));
+    } else {
+      float charge=max(wave*.91,rim*.27);
+      float trail=step(phase,age+.045)*(.24+fragments*.22)*max(.11,1.-fade);
+      col=mix(tint*1.5,vec3(2.3,2.,2.),charge*.8);
+      alpha=min(.86,trail+charge*.68)*(1.-fade);
+    }
+    frag=vec4(col,alpha);
+    return;
+  }
+  vec3 ng=normalize(vNormal), V=uEye-vPos;
+  float dist=length(V); V/=max(dist,1e-5);
+  if (kind==16) {
+    if (dot(ng,V)<=0.) discard;
+    float border=1.-smoothstep(.012,.065,min(min(vUV.x,1.-vUV.x),min(vUV.y,1.-vUV.y)));
+    float flow=.5+.5*sin(vUV.x*45.+vUV.y*13.-uClock*5.);
+    float caustic=texture(uDetail,vUV*vec2(1.1,.7)+vec2(0.,uClock*.08)).b;
+    vec3 col=tint*(1.25+border*.9+caustic*.6)+vec3(1.)*pow(1.-abs(dot(ng,V)),3.)*.5;
+    float alpha=(.22+border*.44+flow*.08+caustic*.08)*(1.-vExtra.x*.64);
+    frag=vec4(col,alpha);
+    return;
+  }
+  if (kind==17) {
+    if (dot(ng,V)<=0.) discard;
+    float edge=1.-smoothstep(.01,.035,min(min(vUV.x,1.-vUV.x),min(vUV.y,1.-vUV.y)));
+    float nv=abs(dot(ng,V));
+    vec3 an=abs(ng);
+    vec2 uvW=an.y>.6?vPos.xz:(an.x>an.z?vPos.zy:vPos.xy);
+    float smudge=texture(uDetail,uvW*.6).r;
+    vec3 refl=envSpec(reflect(-V,ng),.02+smudge*.06);
+    float F=.04+.96*pow5(1.-nv);
+    vec3 col=refl*F+tint*.05+uSunColor*specGGX(ng,V,uSun,vec3(.04),.03);
+    float alpha=sat(.10+F*.85+edge*.18+smudge*.04);
+    frag=vec4(col/max(alpha,.05),alpha);
+    return;
+  }
+  float alphaOut=1.;
+  vec3 albedo=tint;
+  if (kind==7) {
+    if (dot(ng,V)<=0.) discard;
+    float index=vExtra.x;
+    vec2 tile=vec2(mod(index,uAtlasGrid.x),floor(index/uAtlasGrid.x));
+    vec2 uv=(tile+vec2(mix(.01,.99,vUV.x),mix(.02,.98,1.-vUV.y)))/uAtlasGrid;
+    alphaOut=texture(uAtlas,uv).a;
+    if (alphaOut<.012) discard;
+    albedo=tint*.92;
+  }
+  float nl=max(dot(ng,uSun),0.), nv=max(dot(ng,V),1e-4);
+  vec3 direct=vec3(0.);
+  if (nl>.001) {
+    float sh=sunShadow(vPos,ng);
+    if (sh>.001) direct=uSunColor*sh*(albedo*(nl/PI)+specGGX(ng,V,uSun,vec3(.04),.6));
+  }
+  vec3 irr=shDiffuse(ng)+vec3(.36,.34,.30)*(sat(-ng.y)*.2);
+  if (uBossRage>.005) irr=mix(irr,irr*vec3(1.12,.52,.58)+vec3(.04,.005,.01),uBossRage*.55);
+  vec3 R=reflect(-V,ng);
+  vec3 spec=envSpec(R,.6);
+  if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
+  const vec4 c0=vec4(-1.,-.0275,-.572,.022), c1=vec4(1.,.0425,1.04,-.04);
+  vec4 r=.6*c0+c1;
+  float a004=min(r.x*r.x,exp2(-9.28*nv))*r.x+r.y;
+  vec2 ab=vec2(-1.04,1.04)*a004+r.zw;
+  vec3 col=direct+albedo*irr+spec*(vec3(.04)*ab.x+ab.y);
+  vec3 dir=-V;
+  float dy=vPos.y-uEye.y;
+  float integral=abs(dy)>.01?(uFogParams.z-exp(-uFogParams.x*vPos.y))/(uFogParams.x*dy):uFogParams.z;
+  float fogAmt=1.-exp(-uFogParams.y*dist*max(integral,0.));
+  if (uFogParams.w>0.) fogAmt=max(fogAmt,smoothstep(uFogParams.w*.6,uFogParams.w*.97,dist));
+  if (fogAmt>.002) {
+    vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+    vec3 fogCol=mix(fogEnv(fdir)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
+    col=mix(col,fogCol,fogAmt);
+  }
+  frag=vec4(col,alphaOut);
+}`;
+
+// Dedicated lean Stage 2 outdoor cutout & decal shader (kinds 14 foliage, 22 road paint, 27 outer disk, 26/9 splats).
+export const SCENE_CUTOUT_FRAGMENT=`#version 300 es
+#define FAST_SLOT 1
+precision highp float;
+precision highp sampler2DArray;
+precision highp sampler2DShadow;
+${COMMON}
+in vec3 vPos;
+in vec3 vNormal;
+in vec3 vShadow0;
+flat in vec4 vTint;
+flat in vec4 vSlots;
+uniform vec3 uEye;
+uniform vec3 uSun;
+uniform vec3 uSunColor;
+uniform bool uShadowOn;
+uniform int uCascades;
+uniform sampler2DShadow uShadow0;
+uniform sampler2DShadow uShadow1;
+uniform mat4 uShadowM1;
+uniform vec4 uShadowTexel;
+uniform sampler2DArray uInk;
+uniform vec2 uInkTexel;
+uniform vec2 uInkBounds;
+uniform vec4 uInkActiveBox;
+uniform sampler2D uEnv;
+uniform float uEnvLod;
+uniform sampler2D uDetail;
+uniform float uClock;
+uniform vec4 uFogParams;
+uniform float uRaytrace;
+uniform float uWetLevel;
+uniform float uBossRage;
+uniform float uRainLevel;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
+out vec4 frag;
+#ifndef NO_SURFACES
+${SURFACE_HIGH}
+#endif
+vec4 det(vec2 p){return texture(uDetail,p);}
+vec3 envSpec(vec3 r,float rough){return envDecode(textureLod(uEnv,envUV(r),clamp(sqrt(rough)*uEnvLod,0.,uEnvLod)));}
+vec3 shDiffuse(vec3 n){float t=clamp(.5-n.y*.7071068,0.,1.);return max(mix(uSH0,uSH1,t)+uSH2*n.x+uSH3*n.z+uSH4*(t*(1.-t)),vec3(0.));}
+vec3 fogEnv(vec3 d){return max(uFog0+uFog1*d.y+uFog2*d.x+uFog3*d.z,vec3(0.));}
+float ggxD(float nh,float a){float a2=a*a;float d=nh*nh*(a2-1.)+1.;return a2/max(PI*d*d,1e-6);}
+float visSmith(float nv,float nl,float a){float k=a*.5;return .25/max((nv*(1.-k)+k)*(nl*(1.-k)+k),1e-4);}
+vec3 specGGX(vec3 n,vec3 v,vec3 l,vec3 f0,float rough,float nv,float nl){
+  vec3 h=normalize(l+v);
+  float nh=max(dot(n,h),0.), a=max(rough*rough,.0016);
+  vec3 F=f0+(1.-f0)*pow5(1.-max(dot(v,h),0.));
+  return ggxD(nh,a)*visSmith(nv,nl,a)*F*nl;
+}
+vec3 envBRDF(vec3 f0,float rough,float nv){
+  const vec4 c0=vec4(-1.,-.0275,-.572,.022);
+  const vec4 c1=vec4(1.,.0425,1.04,-.04);
+  vec4 r=rough*c0+c1;
+  float a004=min(r.x*r.x,exp2(-9.28*nv))*r.x+r.y;
+  vec2 ab=vec2(-1.04,1.04)*a004+r.zw;
+  return f0*ab.x+ab.y;
+}
+float sunShadow(vec3 p,vec3 ng){
+  if (!uShadowOn) return 1.;
+  vec3 c0=vShadow0;
+  vec2 e0=min(c0.xy,1.-c0.xy);
+  float inner=min(e0.x,e0.y), s0=1.;
+  if (inner>0. && c0.z<1.) {
+    int chk=(int(gl_FragCoord.x)^int(gl_FragCoord.y))&1;
+    vec2 d=(chk==0?vec2(.62,.44):vec2(-.44,.62))*(uShadowTexel.x*1.22);
+    s0=(texture(uShadow0,vec3(c0.xy+d,c0.z-.00022))+texture(uShadow0,vec3(c0.xy-d,c0.z-.00022)))*.5;
+  }
+  if (uCascades<2) return inner>0.?s0:1.;
+  float blend=smoothstep(.0,.08,inner);
+  if (blend>=1.) return s0;
+  float slope1=1.-sat(dot(ng,uSun));
+  vec3 c1=(uShadowM1*vec4(p+ng*uShadowTexel.w*(1.2+slope1*1.6),1.)).xyz;
+  vec2 e1=min(c1.xy,1.-c1.xy);
+  float s1=1.;
+  if (min(e1.x,e1.y)>0. && c1.z<1.) s1=texture(uShadow1,vec3(c1.xy,c1.z-.00045));
+  s1=mix(1.,s1,smoothstep(0.,.06,min(e1.x,e1.y)));
+  return mix(s1,s0,blend);
+}
+vec4 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
+  vec4 cell=texelFetch(uInk,ivec3(clamp(pixel,ivec2(0),size-1),layer),0);
+  float bed=${f(FILM_HEIGHT_ORIGIN)}+(round(cell.a*255.)-1.)*${f(FILM_HEIGHT_STEP)};
+  bool match=cell.a>0. && abs(height-bed)<tolerance;
+  return vec4(match?cell.rgb:vec3(0.),cell.a<=0. || match?1.:0.);
+}
+void main(){
+  vec3 ng=normalize(vNormal);
+  int kind=int(vTint.a+.5);
+  if (kind==22 && ng.y<.5) discard;
+  vec2 xz=vPos.xz;
+  if (kind==27 && dot(xz,xz)>${CITY_RADIUS**2}.0) discard;
+  vec3 V=uEye-vPos;
+  float dist=length(V); V/=max(dist,1e-5);
+  vec3 tint=toLinear(vTint.rgb), an=abs(ng);
+  vec2 uvW=an.y>.6?xz:(an.x>an.z?vPos.zy:vPos.xy);
+  vec3 sdpx=dFdx(vPos), sdpy=dFdy(vPos);
+  float px=max(length(sdpx),length(sdpy));
+#ifndef NO_SURFACES
+  vec2 sdx=an.y>.6?sdpx.xz:(an.x>an.z?sdpx.zy:sdpx.xy), sdy=an.y>.6?sdpy.xz:(an.x>an.z?sdpy.zy:sdpy.xy);
+  int slot=uSurfaceSheets>0?int(floor((ng.y>.6?vSlots.x:ng.y<-.6?vSlots.z:vSlots.y)+.5)):-1;
+  bool real=surfaceReady(slot);
+  float surfH=0., relief=0.;
+#endif
+  vec3 albedo=tint, emit=vec3(0.), n=ng;
+  float rough=.6, ao=1., f0Base=.04, clear=0., trans=0.;
+  if (kind==14) {
+    vec3 tw=pow(an,vec3(3.));
+    tw/=tw.x+tw.y+tw.z;
+    vec3 q=vPos*.16;
+    vec4 cX=det(q.zy), cY=det(q.xz+.31), cZ=det(q.xy+.67);
+    float clumps=cX.g*tw.x+cY.g*tw.y+cZ.g*tw.z;
+    float leaves=cX.a*tw.x+cY.a*tw.y+cZ.a*tw.z;
+    float rim=1.-abs(dot(ng,V));
+    if (rim>.42 && clumps>mix(.98,.40,(rim-.42)/.58)) discard;
+    float hgt=-clumps*.34+leaves*.05;
+    vec3 r1=cross(sdpy,ng), r2=cross(ng,sdpx);
+    float dt=dot(sdpx,r1);
+    n=normalize(abs(dt)*ng-sign(dt)*(dFdx(hgt)*r1+dFdy(hgt)*r2));
+    float tone=det(xz*.05+vPos.y*.03).r;
+    vec3 hue=tint*mix(vec3(.70,.84,.52),vec3(1.10,1.08,.68),tone)*(.78+leaves*.44);
+    albedo=hue*mix(1.,.5,smoothstep(.35,.85,clumps));
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTri(slot,vPos,ng,sdpx,sdpy),slot,albedo,1.,.02,surfH); relief=.6;}
+#endif
+    rough=.6; f0Base=.03;
+    ao=mix(.34,1.,sat(1.-clumps*.95+ng.y*.22));
+    trans=.6;
+  } else if (kind==22 || kind==0) {
+    vec4 d2=det(uvW*2.3);
+    float worn=an.y>.6?smoothstep(.55,.75,det(uvW*.6).r*.6+d2.r*.5):0.;
+    albedo=mix(tint*(.95+d2.a*.08),tint*.55+vec3(.05),worn*.7);
+    rough=.62+worn*.2;
+    if (an.y>.6 && px<.015) {
+      float bead=step(.985,det(uvW*31.).a)*(1.-worn);
+      f0Base=mix(.04,.4,bead); rough=mix(rough,.2,bead);
+    }
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,albedo,kind==22?1.:.7,.003,surfH); relief=.5;}
+#endif
+  } else if (kind==27) {
+#ifndef NO_SURFACES
+    if (real) {
+      vec3 ground=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,tint,1.,.010,surfH);
+      float h2=0., h3=0., h4=0., cover=0.;
+      float stain=det(uvW*.17+.31).r;
+      float wornW=smoothstep(.42,.58,sfNoise(xz*.019+5.3));
+      if (wornW>.01 && surfaceReady(S_ASPHALT_WORN)) ground=mix(ground,realSurface(surfaceTap(S_ASPHALT_WORN,uvW+vec2(31.,17.),sdx,sdy),S_ASPHALT_WORN,tint*.82,1.,.010,h2),wornW);
+      int patchSlot=outerPatch(xz,cover);
+      if (cover>0. && surfaceReady(patchSlot)) {ground=mix(ground,realSurface(surfaceTap(patchSlot,uvW,sdx,sdy),patchSlot,tint,1.,.014,h3),cover); surfH=mix(surfH,h3,cover);}
+      float mossW=smoothstep(.6,.8,stain)*.55;
+      if (mossW>.01 && surfaceReady(S_MOSS)) ground=mix(ground,realSurface(surfaceTap(S_MOSS,uvW*1.3,sdx*1.3,sdy*1.3),S_MOSS,tint,1.,.01,h4),mossW);
+      albedo=ground; rough=.82; relief=1.;
+    } else
+#endif
+    {
+      vec4 d1=det(uvW*.31), d2=det(uvW*1.37), d3=det(uvW*5.3);
+      float pores=smoothstep(.16,.04,d2.g)*.5, aggregate=smoothstep(.62,.8,d3.g)*.10;
+      float tone=.90+(d1.r-.5)*.16+(d3.a-.5)*.07-pores*.12+aggregate;
+      float oil=smoothstep(.62,.8,det(uvW*.09+.7).r)*.22;
+      albedo=tint*tone*(1.-oil)*mix(vec3(1.),vec3(.86,.95,.78),smoothstep(.55,.75,det(uvW*.17+.31).r)*.6);
+      rough=.78+d2.r*.12-oil*.25;
+    }
+  } else if (kind==26) {
+    albedo=tint*.95; rough=.09; clear=.9; emit=tint*.05;
+#ifndef NO_SURFACES
+    if (real) {albedo=realSurface(surfaceTap(slot,uvW,sdx,sdy),slot,albedo,.35,.002,surfH); relief=.3;}
+#endif
+  } else if (kind==9) {
+    albedo=tint*.92; rough=.07; clear=1.; trans=.35; emit=tint*.22;
+  } else {
+    albedo=tint*(.92+(det(uvW*.29).r-.5)*.16); rough=.82;
+  }
+#ifndef NO_SURFACES
+  surfH*=relief*(1.-smoothstep(.004,.03,px));
+  vec2 surfSlope=vec2(dFdx(surfH),dFdy(surfH));
+  if (relief>0. && px<.03) {
+    vec3 r1=cross(sdpy,ng), r2=cross(ng,sdpx);
+    float area=dot(sdpx,r1);
+    n=normalize(abs(area)*n-sign(area)*(surfSlope.x*r1+surfSlope.y*r2));
+  }
+#endif
+  float inked=0.;
+  if (kind==22 && ng.y>.48 && vPos.y>-.055 &&
+      xz.x>=uInkActiveBox.x && xz.x<=uInkActiveBox.y && xz.y>=uInkActiveBox.z && xz.y<=uInkActiveBox.w) {
+    vec2 inkUV=(xz/uInkBounds+1.)*.5;
+    if (all(greaterThan(inkUV,vec2(0))) && all(lessThan(inkUV,vec2(1)))) {
+      vec4 inkProbe=texture(uInk,vec3(inkUV,vSlots.w));
+      if (inkProbe.r+inkProbe.g>.002) {
+        ivec2 size=textureSize(uInk,0).xy;
+        vec2 grid=inkUV*vec2(size)-.5;
+        ivec2 pixel=ivec2(floor(grid));
+        vec2 part=fract(grid); part=part*part*(3.-2.*part);
+        int layer=int(vSlots.w+.5);
+        float clearance=layer==4?.207:${f(FILM_HEIGHT_TOLERANCE)};
+        vec4 a=filmCell(pixel,size,layer,vPos.y,clearance);
+        vec4 b=filmCell(pixel+ivec2(1,0),size,layer,vPos.y,clearance);
+        vec4 c=filmCell(pixel+ivec2(0,1),size,layer,vPos.y,clearance);
+        vec4 d=filmCell(pixel+ivec2(1,1),size,layer,vPos.y,clearance);
+        vec3 st=mix(mix(a.rgb,b.rgb,part.x),mix(c.rgb,d.rgb,part.x),part.y);
+        float bossMask=mix(mix(step(1.35,a.r+a.g),step(1.35,b.r+b.g),part.x),mix(step(1.35,c.r+c.g),step(1.35,d.r+d.g),part.x),part.y);
+        float coverage=mix(mix(min(1.,a.r+a.g),min(1.,b.r+b.g),part.x),mix(min(1.,c.r+c.g),min(1.,d.r+d.g),part.x),part.y);
+        if (coverage>.08) {
+          vec4 iDet=det(xz*.83);
+          float thr=.5+(iDet.r*.6+iDet.a*.4-.5)*.38;
+          float aa=fwidth(coverage)*.9+.015;
+          float mask=smoothstep(thr-aa,thr+aa,coverage);
+          if (mask>.003) {
+            vec3 cyan=vec3(.0,.31,.265), amber=vec3(.72,.095,.014), bossCol=vec3(.014,.010,.020);
+            float thick=st.b;
+            vec3 teamInk=(st.r>=st.g?cyan:amber)*(1.02-thick*.18);
+            vec3 ink=mix(teamInk,bossCol*(1.05-thick*.15),smoothstep(.3,.7,bossMask));
+            vec3 coord=vec3(inkUV,vSlots.w);
+            float e0=texture(uInk,coord+vec3(uInkTexel.x,0.,0.)).b;
+            float s0=texture(uInk,coord+vec3(0.,uInkTexel.y,0.)).b;
+            vec2 liquid=-vec2(e0-thick,s0-thick)*1.62;
+            albedo=mix(albedo,ink,mask);
+            rough=mix(rough,mix(.21,.065,bossMask)+length(liquid)*.18,mask);
+            clear=mix(clear,mix(.32,.65,bossMask),mask);
+            emit=mix(emit,mix(ink*.05,vec3(.042,.006,.014),bossMask),mask);
+            f0Base=mix(f0Base,mix(.045,.075,bossMask),mask);
+            n=normalize(mix(n,normalize(ng+vec3(liquid.x,0.,liquid.y)),mask));
+            inked=mask;
+          }
+        }
+      }
+    }
+  }
+  if ((uWetLevel>.02 || uRaytrace>.5) && kind!=14) {
+    float upWet=smoothstep(.65,.95,ng.y)*sat(1.-inked);
+    if (upWet>.002) {
+      float puddle=smoothstep(.42,.66,det(xz*.11).r);
+      float wetAmt=sat(uWetLevel*upWet*(.45+.55*puddle)+(uRaytrace>.5?upWet*puddle*.22:0.));
+      rough=mix(rough,.065,wetAmt);
+      clear=max(clear,wetAmt*.58);
+      f0Base=max(f0Base,.045*wetAmt);
+      albedo=mix(albedo,albedo*.72,wetAmt*.65);
+    }
+  }
+  float nv=max(dot(n,V),1e-4), nl=dot(n,uSun);
+  vec3 R=reflect(-V,n), direct=vec3(0.);
+  vec3 f0=vec3(f0Base);
+  if (nl>.001 || trans>0.) {
+    float sh=sunShadow(vPos,ng);
+    if (sh>.001) {
+      vec3 sun=uSunColor*sh;
+      float wrap=trans>0.?sat((nl+.4)/1.4):nl;
+      direct=albedo*(1./PI)*sun*wrap;
+      if (nl>.001) {
+        direct+=sun*specGGX(n,V,uSun,f0,max(rough,.03),nv,nl);
+        if (clear>0.) direct+=sun*specGGX(n,V,uSun,vec3(.04),.05,nv,nl)*clear;
+      }
+      if (trans>0.) direct+=albedo*trans*sun*pow(sat(dot(-V,uSun)),3.)*.9*sat(1.-nl);
+    }
+  }
+  vec3 irr=shDiffuse(n)+vec3(.36,.34,.30)*(sat(-n.y)*.2);
+  if (uBossRage>.005) irr=mix(irr,irr*vec3(1.12,.52,.58)+vec3(.04,.005,.01),uBossRage*.55);
+  vec3 spec=rough>.72?irr:envSpec(R,rough);
+  if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
+  float so=ao>=.999?1.:sat(pow(nv+ao,exp2(-16.*rough-1.))-1.+ao);
+  vec3 ambient=albedo*irr*ao+spec*envBRDF(f0,rough,nv)*so;
+  if (clear>0.) ambient+=envSpec(R,.05)*(.04+.96*pow5(1.-nv))*clear*so;
+  vec3 col=direct+ambient+emit;
+  vec3 dir=-V;
+  float dy=vPos.y-uEye.y;
+  float integral=abs(dy)>.01?(uFogParams.z-exp(-uFogParams.x*vPos.y))/(uFogParams.x*dy):uFogParams.z;
+  float fogAmt=1.-exp(-uFogParams.y*dist*max(integral,0.));
+  if (uFogParams.w>0.) fogAmt=max(fogAmt,smoothstep(uFogParams.w*.6,uFogParams.w*.97,dist));
+  if (fogAmt>.002) {
+    vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+    vec3 fogCol=mix(fogEnv(fdir)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
+    col=mix(col,fogCol,fogAmt);
+  }
+  frag=vec4(col,sat(lum(ambient)/(lum(col)+1e-4))*(1.-fogAmt));
+}`;
+
+// Single-pass 2-MRT Deferred Mirror lighting + pre-baked sky probe (analytic vRay reconstruction, 1.00x overdraw).
+export const DEFERRED_MIRROR_FRAGMENT=`#version 300 es
+#define FAST_SLOT 1
+precision highp float;
+precision highp sampler2DArray;
+${COMMON}
+in vec2 vUV;
+in vec3 vRay;
+uniform highp sampler2D uMDepth;
+uniform sampler2D uMG0;
+uniform sampler2D uMG1;
+uniform vec2 uDepthAB;
+uniform vec3 uEye;
+uniform vec3 uSun;
+uniform vec3 uSunColor;
+uniform sampler2D uEnv;
+uniform float uMirrorExpH0;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
+#ifndef NO_SURFACES
+${SURFACE_CORE}
+#endif
+out vec4 frag;
+void main(){
+  ivec2 ipx=ivec2(gl_FragCoord.xy);
+  float rawD=texelFetch(uMDepth,ipx,0).r;
+  float invRL=inversesqrt(dot(vRay,vRay));
+  vec3 dir=vRay*invRL;
+  if (rawD>=.99999) {
+    frag=vec4(envDecode(textureLod(uEnv,envUV(dir),0.)),0.);
+    return;
+  }
+  float zView=uDepthAB.x/(uDepthAB.y-rawD);
+  vec3 vPos=uEye+vRay*zView;
+  float dist=zView/invRL;
+  vec3 V=-dir;
+  vec4 g0=texelFetch(uMG0,ipx,0);
+  vec4 g1=texelFetch(uMG1,ipx,0);
+  int kind=int(g0.a*255.+.5);
+  vec3 ng=octDec(g1.rg);
+  vec3 tint=toLinear(g0.rgb);
+  vec3 albedo=tint, emit=vec3(0.);
+  vec3 an=abs(ng);
+  if (kind==3) {
+    emit=tint*3.2; albedo=tint*.4;
+  } else if (kind==25) {
+    frag=vec4(tint*1.8,0.); return;
+  } else if (kind==8 || kind==6) {
+    vec3 R=reflect(-V,ng);
+    float fres=.04+.96*pow5(1.-max(dot(ng,V),0.));
+    vec3 refl=envDecode(textureLod(uEnv,envUV(R),1.));
+    albedo=tint*.18;
+    emit=refl*fres+tint*.10;
+  }
+#ifndef NO_SURFACES
+  else if (uSurfaceSheets>0) {
+    int slot=int(g1.b*255.+.5)-1;
+    if (surfaceReady(slot)) {
+      vec2 uvW=an.y>.6?vPos.xz:(an.x>an.z?vPos.zy:vPos.xy);
+      vec4 t=surfaceLod(slot,uvW,2.);
+      vec3 mean=max(toLinear(surfaceMean(slot)),vec3(.012)), c=toLinear(t.rgb);
+      vec3 tinted=tint*c/mean, natural=c*(lum(tint)/max(lum(mean),.012));
+      albedo=mix(tinted,natural,S_TAKE[slot]);
+    }
+  }
+#endif
+  if (kind==11 && an.y<=.55) albedo=mix(albedo,vec3(.08,.11,.13),.38);
+  else if (kind==5) albedo*=.70;
+  float nl=max(dot(ng,uSun),0.);
+  float shT=clamp(.5-ng.y*.7071068,0.,1.);
+  vec3 irr=max(mix(uSH0,uSH1,shT)+uSH2*ng.x+uSH3*ng.z+uSH4*(shT*(1.-shT)),vec3(0.));
+  vec3 col=albedo*(uSunColor*(nl/PI)+irr)+emit;
+  float dy=vPos.y-uEye.y;
+  float integral=abs(dy)>.01?(uMirrorExpH0-exp(-.022*vPos.y))/(.022*dy):uMirrorExpH0;
+  float fogAmt=1.-exp(-.0021*dist*max(integral,0.));
+  if (fogAmt>.002) {
+    vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
+    vec3 fogCol=max(uFog0+uFog1*fdir.y+uFog2*fdir.x+uFog3*fdir.z,vec3(0.));
+    col=mix(col,fogCol,fogAmt);
+  }
   frag=vec4(col,0.);
 }`;
 
@@ -1238,6 +4191,9 @@ ${COMMON}
 ${SKY}
 in vec3 vPos;
 in vec3 vNormal;
+#ifdef USE_SHADOW0
+in vec3 vShadow0;
+#endif
 in vec2 vUV;
 in vec3 vLocal;
 flat in vec4 vTint;
@@ -1281,6 +4237,15 @@ uniform float uTrainShift;
 uniform float uDrawFar;
 uniform float uRaytrace;
 uniform float uWetLevel;
+uniform vec3 uSH0;
+uniform vec3 uSH1;
+uniform vec3 uSH2;
+uniform vec3 uSH3;
+uniform vec3 uSH4;
+uniform vec3 uFog0;
+uniform vec3 uFog1;
+uniform vec3 uFog2;
+uniform vec3 uFog3;
 out vec4 frag;
 
 ${SURFACE_HIGH}
@@ -1290,7 +4255,8 @@ const float CABIN_LAMPS[${CABIN_LAMPS.length}]=float[${CABIN_LAMPS.length}](${CA
 vec4 det(vec2 p){return texture(uDetail,p);}
 vec3 envAt(vec3 d,float lod){return envDecode(textureLod(uEnv,envUV(d),lod));}
 vec3 envSpec(vec3 r,float rough){return envAt(r,clamp(sqrt(rough)*uEnvLod,0.,uEnvLod));}
-vec3 envDiffuse(vec3 n){return envAt(n,uEnvLod-1.6)*.92;}
+vec3 shDiffuse(vec3 n){float t=clamp(.5-n.y*.7071068,0.,1.);return max(mix(uSH0,uSH1,t)+uSH2*n.x+uSH3*n.z+uSH4*(t*(1.-t)),vec3(0.));}
+vec3 fogEnv(vec3 d){return max(uFog0+uFog1*d.y+uFog2*d.x+uFog3*d.z,vec3(0.));}
 
 float ggxD(float nh,float a){float a2=a*a;float d=nh*nh*(a2-1.)+1.;return a2/max(PI*d*d,1e-6);}
 float visSmith(float nv,float nl,float a){float k=a*.5;return .25/max((nv*(1.-k)+k)*(nl*(1.-k)+k),1e-4);}
@@ -1309,22 +4275,21 @@ vec3 envBRDF(vec3 f0,float rough,float nv){
   return f0*ab.x+ab.y;
 }
 
-// 4-tap Interleaved-Gradient-Noise rotated Poisson hardware PCF: 2.25x fewer
-// shadow taps than a 3x3 grid with smoother penumbras and no grid stepping.
+// 2-tap checkerboard-alternated hardware-bilinear PCF (8 filtered texels, zero cos/sin).
 float shadowTap(sampler2DShadow s,vec3 c,float texel){
   if (uQuality==0) return texture(s,c);
-  float ang=fract(52.9829189*fract(dot(gl_FragCoord.xy,vec2(.06711056,.00583715))))*6.2831853;
-  float ca=cos(ang), sa=sin(ang);
-  mat2 rot=mat2(ca,-sa,sa,ca)*(texel*1.32);
-  return (texture(s,vec3(c.xy+rot*vec2(-.61,-.73),c.z))
-         +texture(s,vec3(c.xy+rot*vec2( .74,-.41),c.z))
-         +texture(s,vec3(c.xy+rot*vec2(-.48, .79),c.z))
-         +texture(s,vec3(c.xy+rot*vec2( .67, .62),c.z)))*.25;
+  int chk=(int(gl_FragCoord.x)^int(gl_FragCoord.y))&1;
+  vec2 d=(chk==0?vec2(.62,.44):vec2(-.44,.62))*(texel*1.22);
+  return (texture(s,vec3(c.xy+d,c.z))+texture(s,vec3(c.xy-d,c.z)))*.5;
 }
 float sunShadow(vec3 p,vec3 ng){
   if (!uShadowOn) return 1.;
+#ifdef USE_SHADOW0
+  vec3 c0=vShadow0;
+#else
   float slope=1.-sat(dot(ng,uSun));
   vec3 c0=(uShadowM0*vec4(p+ng*uShadowTexel.z*(1.2+slope*1.6),1.)).xyz*.5+.5;
+#endif
   vec2 e0=min(c0.xy,1.-c0.xy);
   float inner=min(e0.x,e0.y);
   float s0=1.;
@@ -1332,7 +4297,8 @@ float sunShadow(vec3 p,vec3 ng){
   if (uCascades<2) return inner>0.?s0:1.;
   float blend=smoothstep(.0,.08,inner);
   if (blend>=1.) return s0;
-  vec3 c1=(uShadowM1*vec4(p+ng*uShadowTexel.w*(1.2+slope*1.6),1.)).xyz*.5+.5;
+  float slope1=1.-sat(dot(ng,uSun));
+  vec3 c1=(uShadowM1*vec4(p+ng*uShadowTexel.w*(1.2+slope1*1.6),1.)).xyz*.5+.5;
   vec2 e1=min(c1.xy,1.-c1.xy);
   float s1=1.;
   // Far cascade uses single hardware-bilinear PCF tap (9x cheaper than 3x3).
@@ -1348,6 +4314,7 @@ vec4 filmCell(ivec2 pixel,ivec2 size,int layer,float height,float tolerance){
   return vec4(match?cell.rgb:vec3(0.),cell.a<=0. || match?1.:0.);
 }
 
+#ifndef CUTOUT_ONLY
 // Window interiors: a box room traced behind the glass in local face space.
 vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth,float px){
   vec3 o=vec3(uv-.5,0.);
@@ -1388,6 +4355,7 @@ vec3 roomBehind(vec2 uv,vec3 viewT,float seed,float lightOn,float depth,float px
   vec3 light=mix(vec3(.30,.32,.33),vec3(1.,.82,.58)*1.6,lightOn);
   return col*light+vec3(1.,.86,.62)*lamp*lightOn*4.;
 }
+#endif
 
 struct Mat {vec3 albedo; float rough; float metal; float ao; vec3 emit; float clear; float sheen; float trans; float f0;};
 
@@ -1407,7 +4375,8 @@ void main(){
   vec2 xz=vPos.xz;
   vec3 an=abs(ng);
   vec2 uvW=an.y>.6?xz:(an.x>an.z?vPos.zy:vPos.xy);
-  float px=max(length(dFdx(vPos)),length(dFdy(vPos)));
+  vec3 sdpx=dFdx(vPos), sdpy=dFdy(vPos);
+  float px=max(length(sdpx),length(sdpy));
   bool lite=uQuality==0;
   float zoneInterior=vPos.x>uUnderX*.5?1.:smoothstep(-.4,-3.2,vPos.y);
   bool cabin=vPos.x>uCabinX-640.;
@@ -1415,7 +4384,7 @@ void main(){
   float above=vPos.y-floorY;
 
   // ---------- transparent and unlit effects ----------
-#ifndef OPAQUE_PURE
+#if !defined(OPAQUE_PURE) && !defined(CUTOUT_ONLY)
   if (kind==28) {
     float r=length(vUV-.5)*2.;
     float a=pow(sat(1.-r),1.7)*vExtra.x;
@@ -1450,6 +4419,7 @@ void main(){
     return;
   }
 #endif
+#ifndef CUTOUT_ONLY
   if (kind==25) {
     float rim=pow(1.-max(0.,dot(ng,V)),2.5);
     float veins=sin(vUV.x*32.+vUV.y*21.-uClock*19.+det(vUV*1.3).r*9.);
@@ -1459,7 +4429,8 @@ void main(){
     frag=uHDR?vec4(col,.0):vec4(grade(col*uExposure),1.);
     return;
   }
-#ifndef OPAQUE_PURE
+#endif
+#if !defined(OPAQUE_PURE) && !defined(CUTOUT_ONLY)
   if (kind==17) {
     if (dot(ng,V)<=0.) discard;
     float edge=1.-smoothstep(.01,.035,min(min(vUV.x,1.-vUV.x),min(vUV.y,1.-vUV.y)));
@@ -1535,7 +4506,6 @@ void main(){
   // ---------- real surface textures ----------
   // The texture picked for this surface (surfaces.js). The procedural look
   // below stays as the fallback until its sheet has loaded.
-  vec3 sdpx=dFdx(vPos), sdpy=dFdy(vPos);
   vec2 sdx=an.y>.6?sdpx.xz:(an.x>an.z?sdpx.zy:sdpx.xy), sdy=an.y>.6?sdpy.xz:(an.x>an.z?sdpy.zy:sdpy.xy);
   bool belowGround=vPos.x>uUnderX*.5 && !cabin;
 #ifdef FAST_SLOT
@@ -1548,7 +4518,44 @@ void main(){
   vec4 stex=!real || kind==11?vec4(0.):rounded?surfaceTri(slot,vPos,ng,sdpx,sdpy):surfaceTap(slot,uvW,sdx,sdy);
   float surfH=0., relief=0.;
 
-  if (kind==3) {
+  if (kind==5) {
+    vec4 d1=det(uvW*.23);
+    float crackZone=smoothstep(.58,.70,det(uvW*.031+.4).r);
+    float tar=crackZone>.005?smoothstep(.84,.97,det(uvW*.083+.2).b)*crackZone*.85:0.;
+    float puddle=uMirrorPass?0.:smoothstep(.56,.70,det(xz*.045+.11).r*.75+d1.r*.35);
+    float wet=sat(puddle*1.6);
+    vec3 asphalt;
+    if (real) {
+      // Fresh and worn asphalt alternate in broad stretches along the road.
+      float h1=0., h2=0., aged=smoothstep(.38,.62,sfNoise(xz*.026+1.7));
+      vec3 fresh=realSurface(stex,S_ASPHALT,tint*.70,1.,.008,h1), old=fresh;
+      if (aged>.01 && surfaceReady(S_ASPHALT_WORN)) old=realSurface(surfaceTap(S_ASPHALT_WORN,uvW+vec2(9.,23.),sdx,sdy),S_ASPHALT_WORN,tint*.70,1.,.008,h2);
+      else h2=h1;
+      asphalt=mix(fresh,old,aged);
+      surfH=mix(h1,h2,aged);
+      relief=1.-wet;
+      m.rough=mix(.82,.06,puddle);
+    } else {
+      vec4 d2=det(uvW*1.9);
+      vec4 d3=det(uvW*7.1);
+      float stones=smoothstep(.30,.08,d3.g);
+      float patchy=smoothstep(.45,.62,d1.r);
+      asphalt=tint*.70*(.86+(d2.r-.5)*.24+stones*.32+(d3.a-.5)*.18)*mix(1.,.86,patchy);
+      m.rough=mix(.86-stones*.12,.06,puddle);
+      if (!lite) {
+        surfH=-d3.g*.0045;
+        relief=1.-wet;
+      }
+    }
+    asphalt=mix(asphalt,vec3(.018,.019,.02),tar);
+    m.albedo=asphalt*mix(1.,.45,wet);
+    m.ao=1.-tar*.3;
+    if (!lite && puddle>.01) {
+      float rip=sin(xz.x*5.1+xz.y*2.3+uClock*1.3)*sin(xz.y*4.7-xz.x*1.1-uClock*1.1);
+      n=normalize(mix(n,vec3(rip*.02,1.,rip*.015),puddle));
+    }
+#ifndef FULL_OUTDOOR
+  } else if (kind==3) {
     float along=sat(1.-abs(vLocal.x)*2.);
     float core=.82+.18*smoothstep(0.,.6,along);
     float strength=mix(3.2,11.,zoneInterior);
@@ -1631,43 +4638,6 @@ void main(){
         if (kind==27) m.albedo*=mix(vec3(1.),vec3(.86,.95,.78),smoothstep(.55,.75,det(uvW*.17+.31).r)*.6);
       }
     }
-  } else if (kind==5) {
-    vec4 d1=det(uvW*.23);
-    float crackZone=smoothstep(.58,.70,det(uvW*.031+.4).r);
-    float tar=crackZone>.005?smoothstep(.84,.97,det(uvW*.083+.2).b)*crackZone*.85:0.;
-    float puddle=uMirrorPass?0.:smoothstep(.56,.70,det(xz*.045+.11).r*.75+d1.r*.35);
-    float wet=sat(puddle*1.6);
-    vec3 asphalt;
-    if (real) {
-      // Fresh and worn asphalt alternate in broad stretches along the road.
-      float h1=0., h2=0., aged=smoothstep(.38,.62,sfNoise(xz*.026+1.7));
-      vec3 fresh=realSurface(stex,S_ASPHALT,tint*.70,1.,.008,h1), old=fresh;
-      if (aged>.01 && surfaceReady(S_ASPHALT_WORN)) old=realSurface(surfaceTap(S_ASPHALT_WORN,uvW+vec2(9.,23.),sdx,sdy),S_ASPHALT_WORN,tint*.70,1.,.008,h2);
-      else h2=h1;
-      asphalt=mix(fresh,old,aged);
-      surfH=mix(h1,h2,aged);
-      relief=1.-wet;
-      m.rough=mix(.82,.06,puddle);
-    } else {
-      vec4 d2=det(uvW*1.9);
-      vec4 d3=det(uvW*7.1);
-      float stones=smoothstep(.30,.08,d3.g);
-      float patchy=smoothstep(.45,.62,d1.r);
-      asphalt=tint*.70*(.86+(d2.r-.5)*.24+stones*.32+(d3.a-.5)*.18)*mix(1.,.86,patchy);
-      m.rough=mix(.86-stones*.12,.06,puddle);
-      if (!lite && px<.02) {
-        float h0=d3.g, hx=det(uvW*7.1+vec2(.003,0.)).g, hz=det(uvW*7.1+vec2(0.,.003)).g;
-        vec3 bump=vec3(hx-h0,0.,hz-h0)*1.4*(1.-wet)*(1.-smoothstep(.002,.02,px));
-        n=normalize(n+bump);
-      }
-    }
-    asphalt=mix(asphalt,vec3(.018,.019,.02),tar);
-    m.albedo=asphalt*mix(1.,.45,wet);
-    m.ao=1.-tar*.3;
-    if (!lite && puddle>.01) {
-      float rip=sin(xz.x*5.1+xz.y*2.3+uClock*1.3)*sin(xz.y*4.7-xz.x*1.1-uClock*1.1);
-      n=normalize(mix(n,vec3(rip*.02,1.,rip*.015),puddle));
-    }
   } else if (kind==2 || kind==19) {
     float stain=vertical?det(uvW*.17+.31).r:0.;
     float streak=vertical && stain>.3?smoothstep(.45,.85,det(vec2(uvW.x*1.3,uvW.y*.07)).r)*smoothstep(.3,.7,stain):0.;
@@ -1712,6 +4682,21 @@ void main(){
         n=normalize(n-(t1*(hx-h0)+t2*(hy-h0))*.55*(1.-smoothstep(.002,.02,px)));
       }
     }
+#else
+  } else if (kind==15) {
+    float nose=smoothstep(.06,.02,min(faceSize.x*.5-abs(faceUV.x),faceSize.y*.5-abs(faceUV.y)))*step(.6,an.y);
+    if (real) {
+      vec3 ground=realSurface(stex,slot,tint,1.,.010,surfH);
+      if (nose>.01 && surfaceReady(S_RUBBER_STAIR)) {
+        float h5=0.;
+        ground=mix(ground,realSurface(surfaceTap(S_RUBBER_STAIR,uvW,sdx,sdy),S_RUBBER_STAIR,vec3(.05),1.,.006,h5),nose);
+      }
+      m.albedo=ground; m.rough=mix(.82,.9,nose); relief=1.;
+    } else {
+      m.albedo=tint*(.92+(det(uvW*.31).r-.5)*.14)*mix(1.,.55,nose);
+      m.rough=mix(.82,.9,nose);
+    }
+#endif
   } else if (kind==13) {
     if (real) {
       bool natural=slot==S_BARK || slot==S_SOIL || slot==S_MULCH;
@@ -1743,6 +4728,7 @@ void main(){
         n=normalize(n+(t1*ex+vec3(0,1,0)*ey)*.45*(1.-smoothstep(.003,.03,px)));
       }
     }
+#ifndef FULL_OUTDOOR
   } else if (kind==4) {
     vec4 d2=det(uvW*3.1);
     float sat0=max(max(tint.r,tint.g),tint.b)-min(min(tint.r,tint.g),tint.b);
@@ -1771,6 +4757,8 @@ void main(){
       m.clear=(1.-galvanized)*(1.-wear)*.35;
     }
     m.albedo=mix(m.albedo,m.albedo*.6,wallBase*.4*float(vertical));
+#endif
+#ifndef CUTOUT_ONLY
   } else if (kind==8 || kind==6) {
     bool windowPane=kind==8 && vertical && min(faceSize.x,faceSize.y)>.55 && max(faceSize.x,faceSize.y)>.9 && uShape==1;
     if (kind==6 && !vertical) {
@@ -1969,6 +4957,8 @@ void main(){
       }
       m.albedo=mix(m.albedo,m.albedo*vec3(.72,.70,.64),wallBase*.5);
     }
+#endif
+#ifndef FULL_OUTDOOR
   } else if (kind==14) {
     vec3 tw=pow(abs(ng),vec3(3.));
     tw/=tw.x+tw.y+tw.z;
@@ -2053,6 +5043,8 @@ void main(){
     m.albedo=tint*.92; m.rough=.07; m.clear=1.; m.f0=.04;
     m.trans=.35;
     m.emit=tint*.22;
+#endif
+#ifndef CUTOUT_ONLY
   } else if (kind==23) {
     float rib=sin(vUV.y*85.+sin(vUV.x*37.7)*.86);
     float nacre=pow(1.-max(0.,dot(ng,V)),2.2);
@@ -2064,6 +5056,7 @@ void main(){
       m.albedo=realSurface(stex,slot,m.albedo,.8,.006,surfH);
       relief=.6;
     }
+#endif
   } else if (kind==26) {
     m.albedo=tint*.95; m.rough=.09; m.clear=.9;
     m.emit=tint*.05;
@@ -2071,7 +5064,7 @@ void main(){
       m.albedo=realSurface(stex,slot,m.albedo,.35,.002,surfH);
       relief=.3;
     }
-#ifndef OPAQUE_PURE
+#if !defined(OPAQUE_PURE) && !defined(CUTOUT_ONLY)
   } else if (kind==7) {
     float index=vExtra.x;
     vec2 tile=vec2(mod(index,uAtlasGrid.x),floor(index/uAtlasGrid.x));
@@ -2081,6 +5074,7 @@ void main(){
     if (alphaOut<.012) discard;
     m.albedo=tint*.92; m.rough=.6;
 #endif
+#ifndef FULL_OUTDOOR
   } else if (kind==0 || kind==22) {
     vec4 d2=det(uvW*2.3);
     float worn=an.y>.6?smoothstep(.55,.75,det(uvW*.6).r*.6+d2.r*.5):0.;
@@ -2094,6 +5088,7 @@ void main(){
       m.albedo=realSurface(stex,slot,m.albedo,kind==22?1.:.7,.003,surfH);
       relief=.5;
     }
+#endif
   }
 
   // Relief from the texture's own shading (screen-space bump mapping).
@@ -2176,12 +5171,14 @@ void main(){
   float nv=max(dot(n,V),1e-4);
   if (zoneInterior<.5 && (uWetLevel>.02 || uRaytrace>.5)) {
     float upWet=smoothstep(.65,.95,ng.y)*sat(1.-inked);
-    float puddle=smoothstep(.42,.66,det(xz*.11).r);
-    float wetAmt=sat(uWetLevel*upWet*(.45+.55*puddle)+(uRaytrace>.5?upWet*puddle*.22:0.));
-    m.rough=mix(m.rough,.065,wetAmt);
-    m.clear=max(m.clear,wetAmt*.58);
-    m.f0=max(m.f0,.045*wetAmt);
-    m.albedo=mix(m.albedo,m.albedo*.72,wetAmt*.65);
+    if (upWet>.002) {
+      float puddle=smoothstep(.42,.66,det(xz*.11).r);
+      float wetAmt=sat(uWetLevel*upWet*(.45+.55*puddle)+(uRaytrace>.5?upWet*puddle*.22:0.));
+      m.rough=mix(m.rough,.065,wetAmt);
+      m.clear=max(m.clear,wetAmt*.58);
+      m.f0=max(m.f0,.045*wetAmt);
+      m.albedo=mix(m.albedo,m.albedo*.72,wetAmt*.65);
+    }
   }
   vec3 R=reflect(-V,n);
   vec3 f0=mix(vec3(m.f0),m.albedo,m.metal);
@@ -2204,27 +5201,29 @@ void main(){
       }
       if (m.trans>0.) direct+=diffC*m.trans*sun*pow(sat(dot(-V,uSun)),3.)*.9*sat(1.-nl);
     }
-    vec3 irr=envDiffuse(n);
+    vec3 irr=shDiffuse(n);
     float bounce=sat(-n.y)*.2;
     irr+=vec3(.36,.34,.30)*bounce;
     if (uBossRage>.01) irr=mix(irr,irr*vec3(1.12,.52,.58)+vec3(.04,.005,.01),uBossRage*.55);
     ambient+=diffC*irr*m.ao;
     vec3 spec=(m.rough>.72 && m.metal<.01)?irr:envSpec(R,m.rough);
     if (R.y<0.) spec*=mix(1.,.55,sat(-R.y*4.));
-    if (uReflectOn && !uMirrorPass && ng.y>.49 && abs(vPos.y)<.08 && (m.rough<.45)) {
-      vec2 suv=gl_FragCoord.xy/uViewport+n.xz*.035;
-      vec3 planar=texture(uReflection,suv).rgb;
+    bool hasPlanar=uReflectOn && !uMirrorPass && ng.y>.49 && abs(vPos.y)<.08;
+    bool usedPlanar=false;
+    vec3 planar=vec3(0.);
+    if (hasPlanar && m.rough<.45) {
+      planar=texture(uReflection,gl_FragCoord.xy/uViewport+n.xz*.035).rgb;
+      usedPlanar=true;
       float w=(1.-smoothstep(.08,.40,m.rough))*mix(1.,.55,inked);
       spec=mix(spec,planar,w);
     }
-    float so=sat(pow(nv+m.ao,exp2(-16.*m.rough-1.))-1.+m.ao);
+    float so=m.ao>=.999?1.:sat(pow(nv+m.ao,exp2(-16.*m.rough-1.))-1.+m.ao);
     ambient+=spec*envBRDF(f0,m.rough,nv)*so;
     if (m.clear>0.) {
-      vec3 cspec=envSpec(R,.05);
-      if (uReflectOn && !uMirrorPass && ng.y>.49 && abs(vPos.y)<.08) cspec=texture(uReflection,gl_FragCoord.xy/uViewport+n.xz*.02).rgb;
+      vec3 cspec=hasPlanar?(usedPlanar?planar:texture(uReflection,gl_FragCoord.xy/uViewport+n.xz*.02).rgb):envSpec(R,.05);
       ambient+=cspec*(.04+.96*pow5(1.-nv))*m.clear*so;
     }
-    if (m.sheen>0.) ambient+=m.albedo*m.sheen*pow(1.-nv,4.)*irr*.9;
+    if (m.sheen>0.) {float s1=1.-nv, s2=s1*s1; ambient+=m.albedo*m.sheen*(s2*s2)*irr*.9;}
     direct*=outdoor; ambient*=outdoor;
   }
 #endif
@@ -2328,11 +5327,11 @@ void main(){
       }
       roomEnv+=vec3(1.,.95,.86)*strip*mix(3.,.6,sat(m.rough*2.))*exp(-tt*.04);
     }
-    float so=sat(pow(nv+m.ao,exp2(-16.*m.rough-1.))-1.+m.ao);
+    float so=m.ao>=.999?1.:sat(pow(nv+m.ao,exp2(-16.*m.rough-1.))-1.+m.ao);
     vec3 ispec=roomEnv*envBRDF(f0,m.rough,nv)*so;
     if (m.clear>0.) ispec+=roomEnv*(.04+.96*pow5(1.-nv))*m.clear*so;
     vec3 iamb=diffC*amb*m.ao*(inCabin?1.25:1.)+ispec;
-    if (m.sheen>0.) iamb+=m.albedo*m.sheen*pow(1.-nv,4.)*amb;
+    if (m.sheen>0.) {float s1=1.-nv, s2=s1*s1; iamb+=m.albedo*m.sheen*(s2*s2)*amb;}
     ambient+=iamb*zoneInterior;
   }
 #endif
@@ -2354,7 +5353,7 @@ void main(){
     if (uDrawFar>0.) fogAmt=max(fogAmt,smoothstep(uDrawFar*.6,uDrawFar*.97,dist));
     if (fogAmt>.002) {
       vec3 fdir=normalize(vec3(dir.x,max(dir.y,.035),dir.z));
-      vec3 fogCol=mix(envAt(fdir,4.5)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
+      vec3 fogCol=mix(fogEnv(fdir)+uSunColor*.06*pow(sat(dot(dir,uSun)),8.)*(1.-uRainLevel),vec3(.13,.155,.185),uRainLevel*.55);
       col=mix(col,fogCol,fogAmt*outdoor);
     }
   }
@@ -2390,20 +5389,22 @@ uniform vec4 uProj;
 uniform float uRadius;
 uniform float uIntensity;
 out vec4 frag;
-float lin(float d){float z=d*2.-1.;return 2.*uProj.z*uProj.w/(uProj.w+uProj.z-z*(uProj.w-uProj.z));}
-vec3 viewPos(vec2 uv){float z=lin(textureLod(uDepth,uv,0.).r);return vec3((uv*2.-1.)*uProj.xy*z,-z);}
+float lin(float d){return (uProj.z*uProj.w)/(uProj.w-d*(uProj.w-uProj.z));}
+vec3 viewPosZ(vec2 uv,float z){return vec3((uv*2.-1.)*uProj.xy*z,-z);}
 const float AO_R[6]=float[6](.288675,.5,.645497,.763763,.866025,.957427);
 void main(){
   vec2 uv=gl_FragCoord.xy*uInvSize;
   float raw=textureLod(uDepth,uv,0.).r;
   if (raw>=.99999) {frag=vec4(1.);return;}
-  vec3 P=viewPos(uv);
-  vec3 pr=viewPos(uv+vec2(uInvSize.x,0.)), pl=viewPos(uv-vec2(uInvSize.x,0.));
-  vec3 pt=viewPos(uv+vec2(0.,uInvSize.y)), pb=viewPos(uv-vec2(0.,uInvSize.y));
-  vec3 dx=abs(pr.z-P.z)<abs(P.z-pl.z)?pr-P:P-pl;
-  vec3 dy=abs(pt.z-P.z)<abs(P.z-pb.z)?pt-P:P-pb;
+  float z=lin(raw);
+  vec3 P=viewPosZ(uv,z);
+  float zr=lin(textureLod(uDepth,uv+vec2(uInvSize.x,0.),0.).r);
+  float zl=lin(textureLod(uDepth,uv-vec2(uInvSize.x,0.),0.).r);
+  float zt=lin(textureLod(uDepth,uv+vec2(0.,uInvSize.y),0.).r);
+  float zb=lin(textureLod(uDepth,uv-vec2(0.,uInvSize.y),0.).r);
+  vec3 dx=abs(zr-z)<abs(z-zl)?viewPosZ(uv+vec2(uInvSize.x,0.),zr)-P:P-viewPosZ(uv-vec2(uInvSize.x,0.),zl);
+  vec3 dy=abs(zt-z)<abs(z-zb)?viewPosZ(uv+vec2(0.,uInvSize.y),zt)-P:P-viewPosZ(uv-vec2(0.,uInvSize.y),zb);
   vec3 N=normalize(cross(dx,dy));
-  float z=-P.z;
   float radius=uRadius*mix(1.,2.4,smoothstep(8.,60.,z));
   float sr=min(radius/(z*uProj.y)*.5,.09);
   float invAspect=uProj.y/uProj.x;
@@ -2416,7 +5417,8 @@ void main(){
   for (int i=0;i<6;i++){
     vec2 off=vec2(dir.x*invAspect,dir.y)*(sr*AO_R[i]);
     dir=G*dir;
-    vec3 Q=viewPos(uv+off);
+    vec2 qv=uv+off;
+    vec3 Q=viewPosZ(qv,lin(textureLod(uDepth,qv,0.).r));
     vec3 v=Q-P;
     float vv=dot(v,v);
     float fall=max(0.,1.-vv*invR2);
@@ -2434,7 +5436,7 @@ uniform highp sampler2D uDepth;
 uniform vec2 uStep;
 uniform vec4 uProj;
 out vec4 frag;
-float lin(float d){float z=d*2.-1.;return 2.*uProj.z*uProj.w/(uProj.w+uProj.z-z*(uProj.w-uProj.z));}
+float lin(float d){return (uProj.z*uProj.w)/(uProj.w-d*(uProj.w-uProj.z));}
 void main(){
   vec2 size=vec2(textureSize(uAO,0));
   vec2 uv=gl_FragCoord.xy/size;
@@ -2501,15 +5503,19 @@ void main(){
 }`;
 
 // Composite pass: single-AO fetch + subpixel FXAA + CAS + ULTRA Real-Time Raytracing
-// (hierarchical SSR reflections with binary refinement, contact shadow rays, 1-bounce SSGI & light shafts).
+// (analytic vRay reconstruction, zero-division screen-space linear DDA SSR + binary search,
+// zero-division contact shadows, 1-bounce SSGI & light shafts).
 export const COMPOSITE_FRAGMENT=`#version 300 es
 precision highp float;
 ${COMMON}
 in vec2 vUV;
+#ifndef NO_RAYTRACE
+in vec3 vRay;
+#endif
 uniform sampler2D uColor;
 uniform sampler2D uAO;
 uniform sampler2D uBloom;
-uniform sampler2D uDepth;
+uniform highp sampler2D uDepth;
 uniform vec2 uTexel;
 uniform float uExposure;
 uniform float uBloomStrength;
@@ -2521,35 +5527,41 @@ uniform float uBossRage;
 uniform float uWetLevel;
 uniform float uRainLevel;
 uniform mat4 uVP;
-uniform mat4 uInvVP;
+uniform vec2 uDepthAB;
+uniform vec3 uRayDX;
+uniform vec3 uRayDY;
 uniform vec3 uEye;
 uniform vec3 uSun;
+uniform vec3 uSunUV;
+uniform vec4 uHSun;
 uniform bool uAOOn;
 uniform bool uBloomOn;
 uniform bool uFXAA;
 out vec4 frag;
 float pluma(vec3 c){float l=lum(c)*uExposure;return l/(1.+l);}
-vec3 worldFromDepth(vec2 uv,float d){
-  vec4 w=uInvVP*vec4(uv*2.-1.,d*2.-1.,1.);
-  return w.xyz/max(abs(w.w),1e-5);
-}
+vec4 toH(vec4 c){return vec4((c.xyz+c.w)*.5,c.w);}
 void main(){
   vec2 uv=vUV;
-  vec4 cM=textureLod(uColor,uv,0.);
-  vec3 cN=textureLod(uColor,uv+vec2(0.,-uTexel.y),0.).rgb;
-  vec3 cS=textureLod(uColor,uv+vec2(0., uTexel.y),0.).rgb;
-  vec3 cW=textureLod(uColor,uv+vec2(-uTexel.x,0.),0.).rgb;
-  vec3 cE=textureLod(uColor,uv+vec2( uTexel.x,0.),0.).rgb;
+  ivec2 iSize=textureSize(uColor,0), iMax=iSize-1;
+  vec2 fSize=vec2(iSize);
+  ivec2 ipx=clamp(ivec2(gl_FragCoord.xy),ivec2(0),iMax);
+  int xL=max(ipx.x-1,0), xR=min(ipx.x+1,iMax.x);
+  int yD=max(ipx.y-1,0), yU=min(ipx.y+1,iMax.y);
+  vec4 cM=texelFetch(uColor,ipx,0);
+  vec3 cN=texelFetch(uColor,ivec2(ipx.x,yD),0).rgb;
+  vec3 cS=texelFetch(uColor,ivec2(ipx.x,yU),0).rgb;
+  vec3 cW=texelFetch(uColor,ivec2(xL,ipx.y),0).rgb;
+  vec3 cE=texelFetch(uColor,ivec2(xR,ipx.y),0).rgb;
   vec3 col=cM.rgb;
   if (uFXAA) {
     float lM=pluma(col), lN=pluma(cN), lS=pluma(cS), lW=pluma(cW), lE=pluma(cE);
     float lo=min(lM,min(min(lN,lS),min(lW,lE))), hi=max(lM,max(max(lN,lS),max(lW,lE)));
     float contrast=hi-lo;
     if (contrast>max(.032,hi*.085)) {
-      float lNW=pluma(textureLod(uColor,uv+vec2(-uTexel.x,-uTexel.y),0.).rgb);
-      float lNE=pluma(textureLod(uColor,uv+vec2( uTexel.x,-uTexel.y),0.).rgb);
-      float lSW=pluma(textureLod(uColor,uv+vec2(-uTexel.x, uTexel.y),0.).rgb);
-      float lSE=pluma(textureLod(uColor,uv+vec2( uTexel.x, uTexel.y),0.).rgb);
+      float lNW=pluma(texelFetch(uColor,ivec2(xL,yD),0).rgb);
+      float lNE=pluma(texelFetch(uColor,ivec2(xR,yD),0).rgb);
+      float lSW=pluma(texelFetch(uColor,ivec2(xL,yU),0).rgb);
+      float lSE=pluma(texelFetch(uColor,ivec2(xR,yU),0).rgb);
       vec2 dir=vec2(-((lNW+lNE)-(lSW+lSE)),(lNW+lSW)-(lNE+lSE));
       float reduce=max((lNW+lNE+lSW+lSE)*.03125,.0078125);
       float rcp=1./(min(abs(dir.x),abs(dir.y))+reduce);
@@ -2576,136 +5588,158 @@ void main(){
     col*=mix(1.,ao,sat(cM.a)*uAOStrength);
   }
 
-  // ULTRA Real-Time Raytracing Stage: SSR + Binary Refinement, 1-Bounce SSGI & Micro Contact Shadows.
+  // ULTRA Real-Time Raytracing Stage: Homogeneous Accelerating SSR, CPU-Hoisted Contact Shadows, 1-Bounce SSGI & Light Shafts.
+#ifndef NO_RAYTRACE
   if (uRaytrace>.5) {
-    float zC=textureLod(uDepth,uv,0.).r;
-    vec3 P=worldFromDepth(uv,zC);
-    vec3 V=normalize(uEye-P);
+    float zC=texelFetch(uDepth,ipx,0).r;
+    float invRL=inversesqrt(dot(vRay,vRay));
+    vec3 V=-vRay*invRL;
     if (zC<.99992) {
-      float zL=textureLod(uDepth,uv-vec2(uTexel.x,0.),0.).r;
-      float zR=textureLod(uDepth,uv+vec2(uTexel.x,0.),0.).r;
-      float zD=textureLod(uDepth,uv-vec2(0.,uTexel.y),0.).r;
-      float zU=textureLod(uDepth,uv+vec2(0.,uTexel.y),0.).r;
-      vec3 pL=worldFromDepth(uv-vec2(uTexel.x,0.),zL), pR=worldFromDepth(uv+vec2(uTexel.x,0.),zR);
-      vec3 pD=worldFromDepth(uv-vec2(0.,uTexel.y),zD), pU=worldFromDepth(uv+vec2(0.,uTexel.y),zU);
-      vec3 dX=(abs(zR-zC)<abs(zC-zL))?(pR-P):(P-pL);
-      vec3 dY=(abs(zU-zC)<abs(zC-zD))?(pU-P):(P-pD);
+      float zView=uDepthAB.x/(uDepthAB.y-zC);
+      float camDist=zView/invRL;
+      float zL=texelFetch(uDepth,ivec2(xL,ipx.y),0).r;
+      float zR=texelFetch(uDepth,ivec2(xR,ipx.y),0).r;
+      float zD=texelFetch(uDepth,ivec2(ipx.x,yD),0).r;
+      float zU=texelFetch(uDepth,ivec2(ipx.x,yU),0).r;
+      vec3 pxDX=uRayDX*uTexel.x, pxDY=uRayDY*uTexel.y;
+      bool useR=abs(zR-zC)<abs(zC-zL);
+      float zX=uDepthAB.x/(uDepthAB.y-(useR?zR:zL));
+      vec3 dX=vRay*(useR?(zX-zView):(zView-zX))+pxDX*zX;
+      bool useU=abs(zU-zC)<abs(zC-zD);
+      float zY=uDepthAB.x/(uDepthAB.y-(useU?zU:zD));
+      vec3 dY=vRay*(useU?(zY-zView):(zView-zY))+pxDY*zY;
       vec3 N=normalize(cross(dX,dY));
       if (dot(N,V)<0.) N=-N;
       float ign=hash12(gl_FragCoord.xy+fract(uTime*11.7)*vec2(173.,293.));
+      // Pixel-scaled homogeneous UVZ origin with zero mat4 multiply (clip.w == zView exactly).
+      vec4 hP=vec4(uv*fSize,zC,1.)*zView;
+      vec4 hN=toH(uVP*vec4(N,0.));
+      hN.xy*=fSize;
+      vec2 bMin=fSize*.002, bMax=fSize*.998;
 
-      // 1. Hierarchical 24-Step Screen-Space Raytraced Reflections + 4-Step Binary Search
+      // 1. Adaptive-Budget Homogeneous SSR: crisp 20-step smooth trajectory on glossy/wet surfaces
+      // (reflWeight > 0.09) with exact 1-by-1 steps 1..10, and fast 10-step budget on matte/faint surfaces.
       vec3 R=reflect(-V,N);
-      float camDist=length(uEye-P);
       float ndv=max(dot(N,V),0.);
       float fresnel=mix(.045,.88,pow5(1.-ndv));
       float upFloor=smoothstep(.65,.95,abs(N.y));
       float wetGloss=sat(.22+uWetLevel*.55+uBossRage*.25);
       float reflWeight=sat(fresnel*(upFloor*(.35+wetGloss*.65)+(1.-upFloor)*.38))*smoothstep(140.,18.,camDist);
-      if (reflWeight>.02) {
+      if (reflWeight>.025) {
         vec3 rtHitCol=mix(mix(vec3(.22,.34,.52),vec3(.22,.02,.03),uBossRage),vec3(.04,.02,.03),sat(-R.y*2.));
         float rtAlpha=0.;
         float stepLen=clamp(camDist*.035,.18,1.15);
-        vec3 rayPos=P+N*.05;
-        vec3 prevPos=rayPos;
-        for (int i=1;i<=24;i++) {
-          float stride=stepLen*(1.+float(i)*.10);
-          rayPos+=R*stride*(i==1?.5+ign*.5:1.);
-          vec4 clip=uVP*vec4(rayPos,1.);
-          if (clip.w<=.05) break;
-          vec2 suv=(clip.xy/clip.w)*.5+.5;
-          if (suv.x<=.002 || suv.x>=.998 || suv.y<=.002 || suv.y>=.998) break;
-          float rayD=(clip.z/clip.w)*.5+.5;
-          float sceneD=textureLod(uDepth,suv,0.).r;
-          float diff=rayD-sceneD;
+        vec4 hStep=toH(uVP*vec4(R*stepLen,0.));
+        hStep.xy*=fSize;
+        vec4 hCur=hP+hN*.05;
+        vec4 hPrev=hCur;
+        bool hiRefl=reflWeight>.09;
+        int maxSteps=hiRefl?20:10;
+        int binSteps=hiRefl?3:2;
+        for (int i=1;i<=20;i++) {
+          if (i>maxSteps) break;
+          float sCur=hiRefl
+            ?(i<=10?(1.+float(i)*.10)*(i==1?.5+ign*.5:1.):(2.05+float(i-11)*.25))
+            :(i<=5?(1.+float(i)*.12)*(i==1?.5+ign*.5:1.):(1.80+float(i-6)*.55));
+          hCur=hPrev+hStep*sCur;
+          if (hCur.w<=.05) break;
+          float invW=1./hCur.w;
+          vec2 spx=hCur.xy*invW;
+          if (spx.x<=bMin.x || spx.x>=bMax.x || spx.y<=bMin.y || spx.y>=bMax.y) break;
+          float sceneD=texelFetch(uDepth,ivec2(spx),0).r;
+          float diff=hCur.z*invW-sceneD;
           if (diff>0. && diff<.028 && sceneD<.9999) {
-            // Binary search refinement across hit bracket
-            vec3 lo=prevPos, hi=rayPos;
-            for (int b=0;b<4;b++) {
-              vec3 mid=(lo+hi)*.5;
-              vec4 mc=uVP*vec4(mid,1.);
-              vec2 muv=(mc.xy/mc.w)*.5+.5;
-              float md=(mc.z/mc.w)*.5+.5;
-              float msd=textureLod(uDepth,muv,0.).r;
-              if (md>msd) hi=mid; else lo=mid;
+            vec4 lo=hPrev, hi=hCur;
+            for (int b=0;b<3;b++) {
+              if (b>=binSteps) break;
+              vec4 mid=(lo+hi)*.5;
+              float mInv=1./mid.w;
+              float msd=texelFetch(uDepth,clamp(ivec2(mid.xy*mInv),ivec2(0),iMax),0).r;
+              if (mid.z*mInv>msd) hi=mid; else lo=mid;
             }
-            vec4 fc=uVP*vec4(hi,1.);
-            vec2 fuv=clamp((fc.xy/fc.w)*.5+.5,vec2(.002),vec2(.998));
+            vec2 fuv=clamp((hi.xy/hi.w)*uTexel,vec2(.002),vec2(.998));
             float edgeFade=sat(min(min(fuv.x,1.-fuv.x),min(fuv.y,1.-fuv.y))*12.);
             rtHitCol=textureLod(uColor,fuv,0.).rgb;
             rtAlpha=edgeFade;
             break;
           }
-          prevPos=rayPos;
+          hPrev=hCur;
         }
         col=mix(col,max(col,rtHitCol*1.08),reflWeight*mix(.28,1.,rtAlpha));
       }
 
-      // 2. Micro Screen-Space Raytraced Contact Shadows toward uSun (8 steps)
+      // 2. CPU-Hoisted Homogeneous Micro Contact Shadows with physical blocker-distance penumbra (6 steps)
       if (uInterior<.85 && dot(N,uSun)>.05 && camDist<58.) {
         float cShadow=1.;
-        for (int s=1;s<=8;s++) {
-          float sd=(.07*float(s)+ign*.04);
-          vec3 sp=P+N*.03+uSun*sd;
-          vec4 sc=uVP*vec4(sp,1.);
-          if (sc.w<=.05) break;
-          vec2 suv=(sc.xy/sc.w)*.5+.5;
-          if (suv.x<0. || suv.x>1. || suv.y<0. || suv.y>1.) break;
-          float sRay=(sc.z/sc.w)*.5+.5;
-          float sDepth=textureLod(uDepth,suv,0.).r;
+        vec4 hc=hP+hN*.03+uHSun*(ign*.43);
+        for (int s=1;s<=6;s++) {
+          hc+=uHSun;
+          if (hc.w<=.05) break;
+          float invW=1./hc.w;
+          vec2 spx=hc.xy*invW;
+          if (spx.x<0. || spx.x>=fSize.x || spx.y<0. || spx.y>=fSize.y) break;
+          float sRay=hc.z*invW;
+          float sDepth=texelFetch(uDepth,ivec2(spx),0).r;
           if (sRay>sDepth && (sRay-sDepth)<.0045) {
-            cShadow=min(cShadow,.38);
+            cShadow=mix(.34,.78,float(s-1)*.18);
             break;
           }
         }
-        col*=mix(1.,cShadow,(1.-uInterior)*smoothstep(58.,12.,camDist)*.68);
+        col*=mix(1.,cShadow,(1.-uInterior)*smoothstep(58.,12.,camDist)*.72);
       }
 
-      // 3. 1-Bounce Raytraced Global Illumination (6 Golden-Angle Hemisphere Rays / SSGI)
+      // 3. 1-Bounce Chromatic Raytraced Global Illumination (6 Golden-Angle Hemisphere Rays / SSGI)
       vec3 gi=vec3(0.);
       float giSpan=clamp(camDist*.08,.65,3.2);
+      float a0=ign*6.283;
+      vec2 gRot=vec2(cos(a0),sin(a0));
+      const mat2 GG=mat2(-.73736888,.67549029,-.67549029,-.73736888);
+      float giPxStep=giSpan*(28./6.);
+      ivec2 gMin=ivec2(1), gMax=iMax-1;
       for (int k=0;k<6;k++) {
-        float ang=float(k)*2.39996+ign*6.283;
-        vec2 off=vec2(cos(ang),sin(ang))*(float(k+1)/6.)*giSpan*uTexel*28.;
-        vec2 guv=clamp(uv+off,vec2(.003),vec2(.997));
-        float gd=textureLod(uDepth,guv,0.).r;
+        vec2 offPx=gRot*(float(k+1)*giPxStep);
+        gRot=GG*gRot;
+        ivec2 gpx=clamp(ipx+ivec2(offPx),gMin,gMax);
+        float gd=texelFetch(uDepth,gpx,0).r;
         if (gd<.9998) {
-          vec3 gP=worldFromDepth(guv,gd);
-          vec3 gDir=gP-P;
-          float d2=dot(gDir,gDir)+.25;
-          float align=sat(dot(N,normalize(gDir)));
-          vec3 sampleCol=textureLod(uColor,guv,0.).rgb;
-          gi+=sampleCol*(align/(1.+d2*.22));
+          vec2 dpx=vec2(gpx-ipx);
+          float gz=uDepthAB.x/(uDepthAB.y-gd);
+          vec3 gDir=vRay*(gz-zView)+(pxDX*dpx.x+pxDY*dpx.y)*gz;
+          float ndg=dot(N,gDir);
+          if (ndg>0.) {
+            float len2=dot(gDir,gDir);
+            float align=min(1.,ndg*inversesqrt(max(len2,1e-8)));
+            vec3 sampleCol=texelFetch(uColor,gpx,0).rgb;
+            float sl=lum(sampleCol);
+            vec3 bounceCol=max(mix(vec3(sl),sampleCol,1.22),vec3(0.));
+            gi+=bounceCol*(align/(1.+(len2+.25)*.20));
+          }
         }
       }
-      gi*=.18*(1.-uBossRage*.25);
-      col+=col*gi*.55+gi*.16;
+      gi=min(gi*(.19*(1.-uBossRage*.25)),vec3(1.8));
+      col+=col*gi*.58+gi*.14;
     }
 
-    // 4. Volumetric Sun / Crimson-Storm Light Shafts
-    if (uInterior<.8) {
-      vec3 rDir=normalize(P-uEye);
-      float sunAlign=max(dot(rDir,uSun),0.);
+    // 4. Volumetric Sun / Crimson-Storm Light Shafts (CPU-hoisted sun screen UV)
+    if (uInterior<.8 && uSunUV.z>.05) {
+      float sunAlign=max(dot(-V,uSun),0.);
       if (sunAlign>.35) {
-        vec4 sClip=uVP*vec4(uEye+uSun*120.,1.);
-        if (sClip.w>.05) {
-          vec2 sUV=(sClip.xy/sClip.w)*.5+.5;
-          vec2 delta=(uv-sUV)*.14;
-          float shaft=0.;
-          vec2 tuv=uv;
-          for (int g=0;g<5;g++) {
-            tuv-=delta;
-            if (tuv.x>0. && tuv.x<1. && tuv.y>0. && tuv.y<1.) {
-              float td=textureLod(uDepth,tuv,0.).r;
-              shaft+=step(.999,td);
-            }
+        vec2 delta=(uv-uSunUV.xy)*.14;
+        float shaft=0.;
+        vec2 tuv=uv;
+        for (int g=0;g<5;g++) {
+          tuv-=delta;
+          if (tuv.x>0. && tuv.x<1. && tuv.y>0. && tuv.y<1.) {
+            float td=texelFetch(uDepth,ivec2(tuv*fSize),0).r;
+            shaft+=step(.999,td);
           }
-          vec3 shaftTint=mix(vec3(1.,.90,.72),vec3(.88,.10,.09),uBossRage);
-          col+=shaftTint*(shaft*.045)*pow(sunAlign,5.)*(1.-uInterior);
         }
+        vec3 shaftTint=mix(vec3(1.,.90,.72),vec3(.88,.10,.09),uBossRage);
+        col+=shaftTint*(shaft*.045)*pow(sunAlign,5.)*(1.-uInterior);
       }
     }
   }
+#endif
 
   if (uBloomOn) col+=textureLod(uBloom,uv,0.).rgb*uBloomStrength;
   if (uRainLevel>.01 && uInterior<.8) {
@@ -3034,6 +6068,7 @@ void main(){
   float glow=0.;
   if (kind==3) {col=min(vTint.rgb*1.18+.05,vec3(1.));glow=1.;}
   else if (kind==13) col=vTint.rgb*(.9-.12*step(.9,fract(vPos.y/.296)));
+  else if (kind==9) col=vTint.rgb*.98;
   if (uSurfaceSheets>0) {
     int slot=int(floor((ng.y>.6?vSlots.x:ng.y<-.6?vSlots.z:vSlots.y)+.5));
     if (surfaceReady(slot)) {
@@ -3091,7 +6126,9 @@ void main(){
   vec3 sunLight=mix(daySun,stormSun,uBossRage);
   vec3 light=mix(sunLight,vec3(.74,.73,.70)+.16*ng.y,zoneInterior);
   light=mix(light,vec3(1.),max(glow,inked*.4));
-  frag=vec4(mix(col*light,fogCol,haze),1.);
+  col*=light;
+  if (kind==9) col+=vTint.rgb*.08;
+  frag=vec4(mix(col,fogCol,haze),1.);
 }`;
 
 export const LITE_SKY_FRAGMENT=`#version 300 es
