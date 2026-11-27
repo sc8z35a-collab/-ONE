@@ -12,9 +12,26 @@ const flowKeys=Array.from({length:INK_REGIONS},(_,i)=>'flow'+i);
 export const STORAGE_KEYS=['game',...filmKeys,...flowKeys];
 const SKIP=new Set(['goal','target','enemy','travelLine','travelGoal','travelPath','route','drone','weapon','battle','cloneOf']);
 function fields(value) {
-  return Object.fromEntries(Object.entries(value).filter(([key,v])=>!SKIP.has(key) && (v===null || (typeof v!=='object' && typeof v!=='function'))));
+  const out={};
+  for (const key in value) {
+    if (!Object.hasOwn(value,key) || SKIP.has(key)) continue;
+    const v=value[key];
+    if (v===null || (typeof v!=='object' && typeof v!=='function')) out[key]=v;
+  }
+  return out;
 }
-const clone=value=>structuredClone(value);
+function clone(value) {
+  if (value===null || typeof value!=='object') return value;
+  if (Array.isArray(value)) {
+    const n=value.length, out=new Array(n);
+    for (let i=0;i<n;i++) out[i]=clone(value[i]);
+    return out;
+  }
+  if (ArrayBuffer.isView(value)) return new value.constructor(value);
+  const out={};
+  for (const k in value) if (Object.hasOwn(value,k)) out[k]=clone(value[k]);
+  return out;
+}
 const actor=a=>({...fields(a),lift:clone(a.lift),ride:clone(a.ride),slam:clone(a.slam),attack:clone(a.attack),
   climbNormal:clone(a.climbNormal),lastSeen:clone(a.lastSeen),feet:clone(a.feet),gait:clone(a.gait)});
 const transit=t=>({train:clone(t.train),time:t.time,integrity:t.integrity,alert:t.alert,alertUntil:t.alertUntil,boardedAt:t.boardedAt,
@@ -55,23 +72,107 @@ function restoreHits(b,hits=[]) {
   return new Map(hits.map(([ref,n])=>[fighter(b,ref),n]).filter(([target])=>target));
 }
 
-function encodeFilm(p,layer) {
-  const start=layer*p.layerSize,end=start+p.layerSize;
-  let n=0;
-  const bossArr=p.boss;
-  for (let i=start;i<end;i++) if (p.cyan[i] || p.amber[i] || (bossArr && bossArr[i])) n++;
-  const buffer=new ArrayBuffer(n*16), out=new DataView(buffer);
-  let at=0;
-  for (let i=start;i<end;i++) {
-    const a=p.cyan[i], b=p.amber[i], c=bossArr?bossArr[i]:0;
-    if (!a && !b && !c) continue;
-    out.setUint32(at,i-start,true);
-    out.setFloat32(at+4,a,true);
-    out.setFloat32(at+8,b,true);
-    out.setFloat32(at+12,c,true);
-    at+=16;
+let _scratchBuf=new ArrayBuffer(65536*16);
+let _scratchU32=new Uint32Array(_scratchBuf);
+let _scratchF32=new Float32Array(_scratchBuf);
+function ensureScratch(bytes) {
+  if (bytes<=_scratchBuf.byteLength) return;
+  let cap=_scratchBuf.byteLength;
+  while (cap<bytes) cap*=2;
+  _scratchBuf=new ArrayBuffer(cap);
+  _scratchU32=new Uint32Array(_scratchBuf);
+  _scratchF32=new Float32Array(_scratchBuf);
+}
+
+// Precomputed stair-landing tile masks per (w, h, boundX, boundZ) so encodeFilm
+// catches any direct raw writes to stair landing cells without publish().
+const _stairTileMaskCache=new Map();
+function stairTileMaskFor(p) {
+  const key=p.w+'x'+p.h+':'+p.boundX+':'+p.boundZ;
+  let mask=_stairTileMaskCache.get(key);
+  if (mask) return mask;
+  mask=new Uint32Array(p.wetTileStride);
+  const w=p.w, h=p.h, bx=p.boundX, bz=p.boundZ, twpr=p.tileWordsPerRow;
+  const scaleX=w/(2*bx), scaleZ=h/(2*bz);
+  for (let i=0;i<STAIRS.length;i++) {
+    const st=STAIRS[i];
+    const xA=st.x, xB=st.x+st.dir*14;
+    const minX=Math.min(xA,xB)-2, maxX=Math.max(xA,xB)+2;
+    const ix0=Math.max(0,Math.floor((minX+bx)*scaleX));
+    const ix1=Math.min(w-1,Math.ceil((maxX+bx)*scaleX));
+    const iz0=Math.max(0,Math.floor((st.z-2.5+bz)*scaleZ));
+    const iz1=Math.min(h-1,Math.ceil((st.z+2.5+bz)*scaleZ));
+    const tz0=iz0>>4, tz1=iz1>>4, tx0=ix0>>4, tx1=ix1>>4;
+    for (let tz=tz0;tz<=tz1;tz++) {
+      const rowOff=tz*twpr;
+      for (let tx=tx0;tx<=tx1;tx++) mask[rowOff+(tx>>5)]|=1<<(tx&31);
+    }
   }
-  return buffer;
+  _stairTileMaskCache.set(key,mask);
+  return mask;
+}
+
+// Hierarchical 16x16 Wet-Tile Bitboard Film Encoder: visits ONLY painted tiles
+// (+ tiny stair-landing strips on layers 0 & 2) in exact ascending cell-index order.
+function encodeFilm(p,layer) {
+  const w=p.w, h=p.h, n=p.layerSize, start=layer*n;
+  const cyan=p.cyan, amber=p.amber, bossArr=p.boss;
+  const wetWords=p.wetTileWords;
+  if (!wetWords) {
+    let u32=_scratchU32, f32=_scratchF32, idx=0;
+    for (let k=0;k<n;k++) {
+      const i=start+k, a=cyan[i], b=amber[i], c=bossArr?bossArr[i]:0;
+      if (!a && !b && !c) continue;
+      if ((idx+4)*4>_scratchBuf.byteLength) {ensureScratch((idx+4)*8); u32=_scratchU32; f32=_scratchF32;}
+      u32[idx]=k; f32[idx+1]=a; f32[idx+2]=b; f32[idx+3]=c;
+      idx+=4;
+    }
+    return idx?_scratchBuf.slice(0,idx*4):new ArrayBuffer(0);
+  }
+  const tilesHigh=p.tilesHigh, twpr=p.tileWordsPerRow, layerWordOff=layer*p.wetTileStride;
+  const stairMask=(layer===0 || layer===2)?stairTileMaskFor(p):null;
+  let u32=_scratchU32, f32=_scratchF32, idx=0;
+  for (let tz=0;tz<tilesHigh;tz++) {
+    const rowWordOff=tz*twpr;
+    let any=0;
+    for (let tw=0;tw<twpr;tw++) any|=wetWords[layerWordOff+rowWordOff+tw]|(stairMask?stairMask[rowWordOff+tw]:0);
+    if (any===0) continue;
+    const v0=tz<<4, v1=v0+15<h?v0+15:h-1;
+    for (let v=v0;v<=v1;v++) {
+      const rowCell=v*w;
+      for (let tw=0;tw<twpr;tw++) {
+        let bits=wetWords[layerWordOff+rowWordOff+tw]|(stairMask?stairMask[rowWordOff+tw]:0);
+        if (bits===0) continue;
+        const baseTx=tw<<5;
+        while (bits!==0) {
+          const bit=31-Math.clz32(bits & -bits);
+          bits&=bits-1;
+          const uStart=(baseTx+bit)<<4;
+          const uEnd=uStart+16<w?uStart+16:w;
+          if (bossArr) {
+            for (let u=uStart;u<uEnd;u++) {
+              const m=rowCell+u, i=start+m;
+              const a=cyan[i], b=amber[i], c=bossArr[i];
+              if (a===0 && b===0 && c===0) continue;
+              if ((idx+4)*4>_scratchBuf.byteLength) {ensureScratch((idx+4)*8); u32=_scratchU32; f32=_scratchF32;}
+              u32[idx]=m; f32[idx+1]=a; f32[idx+2]=b; f32[idx+3]=c;
+              idx+=4;
+            }
+          } else {
+            for (let u=uStart;u<uEnd;u++) {
+              const m=rowCell+u, i=start+m;
+              const a=cyan[i], b=amber[i];
+              if (a===0 && b===0) continue;
+              if ((idx+4)*4>_scratchBuf.byteLength) {ensureScratch((idx+4)*8); u32=_scratchU32; f32=_scratchF32;}
+              u32[idx]=m; f32[idx+1]=a; f32[idx+2]=b; f32[idx+3]=0;
+              idx+=4;
+            }
+          }
+        }
+      }
+    }
+  }
+  return idx?_scratchBuf.slice(0,idx*4):new ArrayBuffer(0);
 }
 
 function decodeFilm(p,layer,buffer,field,version) {
@@ -93,20 +194,52 @@ function decodeFilm(p,layer,buffer,field,version) {
   }
 }
 
+// Hierarchical 16x16 Active-Flow-Tile Bitboard Encoder (bit-identical row-major output).
 function encodeCurrent(p,region) {
-  const first=region*p.layerSize, last=first+p.layerSize;
-  let count=0;
-  for (let i=first;i<last;i++) if (p.flowX[i] || p.flowZ[i]) count++;
-  const out=new DataView(new ArrayBuffer(count*12));
-  let at=0;
-  for (let i=first;i<last;i++) {
-    if (!p.flowX[i] && !p.flowZ[i]) continue;
-    out.setUint32(at,i-first,true);
-    out.setFloat32(at+4,p.flowX[i],true);
-    out.setFloat32(at+8,p.flowZ[i],true);
-    at+=12;
+  const w=p.w, h=p.h, n=p.layerSize, first=region*n;
+  const fx=p.flowX, fz=p.flowZ;
+  const flowWords=p.flowTileWords;
+  let u32=_scratchU32, f32=_scratchF32, idx=0;
+  if (!flowWords) {
+    for (let k=0;k<n;k++) {
+      const vx=fx[first+k], vz=fz[first+k];
+      if (!vx && !vz) continue;
+      if ((idx+3)*4>_scratchBuf.byteLength) {ensureScratch((idx+3)*8); u32=_scratchU32; f32=_scratchF32;}
+      u32[idx]=k; f32[idx+1]=vx; f32[idx+2]=vz;
+      idx+=3;
+    }
+    return idx?_scratchBuf.slice(0,idx*4):new ArrayBuffer(0);
   }
-  return out.buffer;
+  const tilesHigh=p.tilesHigh, twpr=p.tileWordsPerRow, regWordOff=region*p.wetTileStride;
+  for (let tz=0;tz<tilesHigh;tz++) {
+    const rowWordOff=regWordOff+tz*twpr;
+    let any=0;
+    for (let tw=0;tw<twpr;tw++) any|=flowWords[rowWordOff+tw];
+    if (any===0) continue;
+    const v0=tz<<4, v1=v0+15<h?v0+15:h-1;
+    for (let v=v0;v<=v1;v++) {
+      const rowCell=v*w;
+      for (let tw=0;tw<twpr;tw++) {
+        let bits=flowWords[rowWordOff+tw];
+        if (bits===0) continue;
+        const baseTx=tw<<5;
+        while (bits!==0) {
+          const bit=31-Math.clz32(bits & -bits);
+          bits&=bits-1;
+          const uStart=(baseTx+bit)<<4;
+          const uEnd=uStart+16<w?uStart+16:w;
+          for (let u=uStart;u<uEnd;u++) {
+            const m=rowCell+u, vx=fx[first+m], vz=fz[first+m];
+            if (vx===0 && vz===0) continue;
+            if ((idx+3)*4>_scratchBuf.byteLength) {ensureScratch((idx+3)*8); u32=_scratchU32; f32=_scratchF32;}
+            u32[idx]=m; f32[idx+1]=vx; f32[idx+2]=vz;
+            idx+=3;
+          }
+        }
+      }
+    }
+  }
+  return idx?_scratchBuf.slice(0,idx*4):new ArrayBuffer(0);
 }
 
 function decodeCurrent(p,region,buffer) {
@@ -117,8 +250,56 @@ function decodeCurrent(p,region,buffer) {
     if (cell>=p.layerSize || p.surface[index]<0) continue;
     p.flowX[index]=data.getFloat32(at+4,true);
     p.flowZ[index]=data.getFloat32(at+8,true);
+    p.markFlowTile?.(index);
     p.wake(index);
   }
+}
+
+function copyVec3(a) {return a?[a[0],a[1],a[2]]:a;}
+function copyDecals(list) {
+  const n=list.length, out=new Array(n);
+  for (let i=0;i<n;i++) {
+    const d=list[i];
+    const item={p:copyVec3(d.p),normal:copyVec3(d.normal),team:d.team,phase:d.phase,radius:d.radius,shape:d.shape,id:d.id};
+    if (d.volume!==undefined) item.volume=d.volume;
+    out[i]=item;
+  }
+  return out;
+}
+function copyDrops(list) {
+  const n=list.length, out=new Array(n);
+  for (let i=0;i<n;i++) {
+    const d=list[i];
+    const item={p:copyVec3(d.p),v:copyVec3(d.v),team:d.team,life:d.life,max:d.max,size:d.size};
+    if (d.wet!==undefined) item.wet=d.wet;
+    if (d.volume!==undefined) item.volume=d.volume;
+    out[i]=item;
+  }
+  return out;
+}
+function copyShots(b,list) {
+  const n=list.length, out=new Array(n);
+  for (let i=0;i<n;i++) {
+    const s=list[i], act=s.actor;
+    const source=reference(b,act);
+    const departed=source?null:{team:act.team,name:act.name,kills:act.kills,painted:act.painted,superCharge:act.superCharge};
+    const item={
+      id:s.id,pos:copyVec3(s.pos),vel:copyVec3(s.vel),age:s.age,power:s.power,
+      source,departed,weapon:s.weapon.id
+    };
+    if (s.life!==undefined) item.life=s.life;
+    if (s.dmg!==undefined) item.dmg=s.dmg;
+    if (s.bend) item.bend=copyVec3(s.bend);
+    if (s.homing) {
+      const h=s.homing;
+      item.homing={turn:h.turn,cone:h.cone,reach:h.reach,target:h.target??null};
+    }
+    if (s.noBreakup) item.noBreakup=true;
+    if (s.dragGamma!==undefined) item.dragGamma=s.dragGamma;
+    if (s.team!==undefined) item.team=s.team;
+    out[i]=item;
+  }
+  return out;
 }
 
 export function checkpointOf(b) {
@@ -138,16 +319,12 @@ export function checkpointOf(b) {
     raiders:{...fields(b.raiders),members:b.raiders.members.map(actor)},
     hazards:b.hazards?b.hazards.checkpoint():null,
     vehicles:b.vehicles?b.vehicles.checkpoint():null,
-    decals:clone(b.decals),drops:clone(b.drops),events:clone(b.events),
+    decals:copyDecals(b.decals),drops:copyDrops(b.drops),events:clone(b.events),
     inkImpacts:b.inkImpacts.map(({target,...impact})=>({...clone(impact),target:reference(b,target)})),
     inkTime:b.paint.time,battleSeed:b.rng.state(),raidSeed:b.raiders.rng.state(),
     subItems:b.subweapons.items.map(({owner,...item})=>({...clone(item),owner:b.actors.indexOf(owner)})),
     drones:b.abilities.drones.map(({owner,...drone})=>({...drone,owner:b.actors.indexOf(owner)})),
-    shots:b.shots.map(({actor,weapon,...shot})=>{
-      const source=reference(b,actor);
-      const departed=source?null:{team:actor.team,name:actor.name,kills:actor.kills,painted:actor.painted,superCharge:actor.superCharge};
-      return {...clone(shot),source,departed,weapon:weapon.id};
-    }),
+    shots:copyShots(b,b.shots),
     stage:b.stage.snapshot(),
     dynamicStage:b.dynamicStage?.snapshot?.() ?? null,
     underBossDepth:b.fluid?.underBossDepth ?? 0,

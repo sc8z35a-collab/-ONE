@@ -3,7 +3,9 @@ import {zoneOf} from './layout.js';
 import {stairLane} from './stairs.js';
 import {bearing,gap} from './npc-combat.js';
 
-const blocked=hit=>hit && hit.t<.96;
+const COVER_OFFSETS=[[0,0],[-.8,0],[-1.7,-.8],[-1.7,.8],[0,1.4],[0,-1.4],[.9,1.8],[.9,-1.8],[-2.4,0]];
+const PEEK_OFFSETS=[.86,1.43];
+const _coverProbe={x:0,y:0,z:0,car:null,apartmentVisits:0};
 
 export class NpcCover {
   constructor(battle,combat) {
@@ -12,24 +14,40 @@ export class NpcCover {
   }
 
   find(a,foe) {
-    const b=this.battle,d=gap(a,foe);
+    const b=this.battle, d=gap(a,foe);
     if (a.giant || a.weapon.roller || a.airborne || d<4.4 || d>27 || stairLane(a.x,a.z)) return null;
-    const ux=(foe.x-a.x)/d,uz=(foe.z-a.z)/d, eye=[foe.x,foe.y+1.19,foe.z];
+    const ux=(foe.x-a.x)/d, uz=(foe.z-a.z)/d;
+    const fx=foe.x, fy=foe.y+1.19, fz=foe.z;
+    const ax=a.x, ay=a.y, az=a.z, myInk=a.team+1;
     let best=null, score=-Infinity;
-    for (const [ahead,side] of [[0,0],[-.8,0],[-1.7,-.8],[-1.7,.8],[0,1.4],[0,-1.4],[.9,1.8],[.9,-1.8],[-2.4,0]]) {
-      const x=a.x+ux*ahead-uz*side,z=a.z+uz*ahead+ux*side;
+    for (let i=0;i<COVER_OFFSETS.length;i++) {
+      const ahead=COVER_OFFSETS[i][0], side=COVER_OFFSETS[i][1];
+      const x=ax+ux*ahead-uz*side, z=az+uz*ahead+ux*side;
+      const floor=b.world.support(x,ay,z);
+      // Cheap-first: test enemy LOS occlusion before running 7-step motion.segment!
+      if (!b.lineBlocked(fx,fy,fz,x,floor.y+.93,z,.96)) continue;
+      // Score upper-bound pruning before segment walk.
+      const hd=Math.sqrt((x-ax)*(x-ax)+(z-az)*(z-az));
+      _coverProbe.x=x; _coverProbe.y=floor.y; _coverProbe.z=z;
+      const ink=b.surfaceInk(_coverProbe,floor);
+      const baseVal=3-hd*.40+(ink===myInk?1.5:ink?-1.3:0);
+      if (baseVal-.86*.53<=score) continue;
       if (!b.motion.segment(a,x,z,.44,1.70)) continue;
-      const floor=b.world.support(x,a.y,z), hide={x,y:floor.y,z};
-      if (!blocked(b.traceShot(eye,[x,floor.y+.93,z],true))) continue;
-      for (const dir of [-1,1]) {
-        for (const offset of [.86,1.43]) {
-          const px=x-uz*dir*offset,pz=z+ux*dir*offset;
-          if (!b.motion.segment({...a,...hide},px,pz,.44,1.70)) continue;
-          const ground=b.world.support(px,floor.y,pz), peek={x:px,y:ground.y,z:pz};
-          if (blocked(b.traceShot([px,ground.y+1.22,pz],eye,true))) continue;
-          const ink=b.surfaceInk(hide,floor);
-          const value=3-gap(a,hide)*.40-offset*.53+(ink===a.team+1?1.5:ink?-1.3:0);
-          if (value>score) {score=value;best={hide,peek,dir};}
+      _coverProbe.car=a.car??null; _coverProbe.apartmentVisits=a.apartmentVisits??0;
+      let hide=null;
+      for (let di=0;di<2;di++) {
+        const dir=di===0?-1:1;
+        for (let oi=0;oi<2;oi++) {
+          const offset=PEEK_OFFSETS[oi];
+          const value=baseVal-offset*.53;
+          if (value<=score) break;
+          const px=x-uz*dir*offset, pz=z+ux*dir*offset;
+          const ground=b.world.support(px,floor.y,pz);
+          if (b.lineBlocked(px,ground.y+1.22,pz,fx,fy,fz,.96)) continue;
+          if (!b.motion.segment(_coverProbe,px,pz,.44,1.70)) continue;
+          if (!hide) hide={x,y:floor.y,z};
+          score=value;
+          best={hide,peek:{x:px,y:ground.y,z:pz},dir};
           break;
         }
       }

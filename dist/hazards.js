@@ -120,11 +120,27 @@ export class Hazards {
   }
 
   targets(atX) {
+    const z=zoneOf(atX);
     const list=[];
-    for (const s of this.snipers) if (s.active && sameLevel(s.x,atX)) list.push(s);
-    for (const d of this.rogueDrones) if (d.active && sameLevel(d.x,atX)) list.push(d);
-    if (this.heli.active && sameLevel(this.heli.x,atX)) list.push(this.heli);
-    if (this.goat.active && sameLevel(this.goat.x,atX)) list.push(this.goat);
+    for (let i=0;i<this.snipers.length;i++) {const s=this.snipers[i]; if (s.active && zoneOf(s.x)===z) list.push(s);}
+    for (let i=0;i<this.rogueDrones.length;i++) {const d=this.rogueDrones[i]; if (d.active && zoneOf(d.x)===z) list.push(d);}
+    if (this.heli.active && zoneOf(this.heli.x)===z) list.push(this.heli);
+    if (this.goat.active && zoneOf(this.goat.x)===z) list.push(this.goat);
+    return list;
+  }
+
+  targetsView(zone) {
+    const clk=this.battle.clock;
+    const cache=this._tCache ?? (this._tCache=[[],[],[],[]]);
+    const stamps=this._tStamps ?? (this._tStamps=[-1,-1,-1,-1]);
+    if (stamps[zone]===clk) return cache[zone];
+    stamps[zone]=clk;
+    const list=cache[zone];
+    list.length=0;
+    for (let i=0;i<this.snipers.length;i++) {const s=this.snipers[i]; if (s.active && zoneOf(s.x)===zone) list.push(s);}
+    for (let i=0;i<this.rogueDrones.length;i++) {const d=this.rogueDrones[i]; if (d.active && zoneOf(d.x)===zone) list.push(d);}
+    if (this.heli.active && zoneOf(this.heli.x)===zone) list.push(this.heli);
+    if (this.goat.active && zoneOf(this.goat.x)===zone) list.push(this.goat);
     return list;
   }
 
@@ -289,7 +305,8 @@ export class Hazards {
     }
     if (this.droneSpawnsLeft>0 && b.elapsed<this.droneRetreatAt-1.8) {
       this.droneSpawnTimer-=dt;
-      const activeCount=this.rogueDrones.filter(d=>d.active).length;
+      let activeCount=0;
+      for (let i=0;i<this.rogueDrones.length;i++) if (this.rogueDrones[i].active) activeCount++;
       if (this.droneSpawnTimer<=0 && activeCount<18) {
         this.droneSpawnTimer=.95;
         const burstCount=Math.min(3,this.droneSpawnsLeft);
@@ -518,12 +535,16 @@ export class Hazards {
       this.rain.washTimer-=.25;
       if (!b.fluid) b.paint.wash(ZONES[0].inkMask,.0095);
       // Gradually dissolve exposed surface wall decals in the rain.
-      if (b.decals.length) {
-        let removed=0;
-        b.decals=b.decals.filter(d=>{
-          if (zoneOf(d.p[0])===0 && removed<4 && this.rng()<.18) {removed++;return false;}
-          return true;
-        });
+      const decals=b.decals;
+      if (decals.length) {
+        let removed=0, w=0;
+        for (let i=0;i<decals.length;i++) {
+          const d=decals[i];
+          if (zoneOf(d.p[0])===0 && removed<4 && this.rng()<.18) {removed++; continue;}
+          if (w!==i) decals[w]=d;
+          w++;
+        }
+        decals.length=w;
       }
     }
   }
@@ -565,14 +586,34 @@ export class Hazards {
       } else {
         b.paint.wash(ZONES[0].inkMask,1.0,back,front);
       }
-      if (b.decals.length) {
-        b.decals=b.decals.filter(d=>!(zoneOf(d.p[0])===0 && d.p[1]<ts.height+.4 && d.p[0]>=back && d.p[0]<=front));
+      const decals=b.decals;
+      if (decals.length) {
+        let w=0;
+        const hLim=ts.height+.4;
+        for (let i=0;i<decals.length;i++) {
+          const d=decals[i], dp=d.p;
+          if (zoneOf(dp[0])===0 && dp[1]<hLim && dp[0]>=back && dp[0]<=front) continue;
+          if (w!==i) decals[w]=d;
+          w++;
+        }
+        decals.length=w;
       }
       // Sweep and drown any surface fighter caught below the wave crest.
-      const victims=[...b.actors,...b.raiders.live()];
-      for (const a of victims) {
+      const xMin=ts.x-ts.width*.5, xMax=ts.x+ts.width*.5, yLim=ts.height-.55;
+      const actors=b.actors;
+      for (let i=0;i<actors.length;i++) {
+        const a=actors[i];
         if (a.down>0 || a.ride || a.lift || zoneOf(a.x)!==0) continue;
-        if (a.x>=ts.x-ts.width*.5 && a.x<=ts.x+ts.width*.5 && a.y<ts.height-.55) {
+        if (a.x>=xMin && a.x<=xMax && a.y<yLim) {
+          b.stepActor(a,5.2*dt,0);
+          b.damage(a,145*dt,null,[a.x,a.y+.9,a.z],'drown');
+        }
+      }
+      const raiders=b.raiders.members;
+      for (let i=0;i<raiders.length;i++) {
+        const a=raiders[i];
+        if (!a.active || a.down>0 || a.ride || a.lift || zoneOf(a.x)!==0) continue;
+        if (a.x>=xMin && a.x<=xMax && a.y<yLim) {
           b.stepActor(a,5.2*dt,0);
           b.damage(a,145*dt,null,[a.x,a.y+.9,a.z],'drown');
         }
@@ -604,17 +645,31 @@ export class Hazards {
     if (uf.depth>.2 && uf.washTimer>=.3) {
       uf.washTimer-=.3;
       b.paint.wash(ZONES[1].inkMask,.14);
-      if (b.decals.length) {
-        b.decals=b.decals.filter(d=>!(zoneOf(d.p[0])===1 && d.p[1]<waterY+.2));
+      const decals=b.decals;
+      if (decals.length) {
+        let w=0;
+        const wLim=waterY+.2;
+        for (let i=0;i<decals.length;i++) {
+          const d=decals[i], dp=d.p;
+          if (zoneOf(dp[0])===1 && dp[1]<wLim) continue;
+          if (w!==i) decals[w]=d;
+          w++;
+        }
+        decals.length=w;
       }
     }
     if (uf.depth>.45) {
-      const victims=[...b.actors,...b.raiders.live()];
-      for (const a of victims) {
+      const actors=b.actors;
+      for (let i=0;i<actors.length;i++) {
+        const a=actors[i];
         if (a.down>0 || a.ride || a.lift || zoneOf(a.x)!==1) continue;
-        if (a.y+1.15<waterY) {
-          b.damage(a,70*dt,null,[a.x,a.y+.9,a.z],'drown');
-        }
+        if (a.y+1.15<waterY) b.damage(a,70*dt,null,[a.x,a.y+.9,a.z],'drown');
+      }
+      const raiders=b.raiders.members;
+      for (let i=0;i<raiders.length;i++) {
+        const a=raiders[i];
+        if (!a.active || a.down>0 || a.ride || a.lift || zoneOf(a.x)!==1) continue;
+        if (a.y+1.15<waterY) b.damage(a,70*dt,null,[a.x,a.y+.9,a.z],'drown');
       }
     }
   }
@@ -1337,20 +1392,42 @@ export class Hazards {
   checkpoint() {
     const {weapon:_gw,...goatData}=this.goat;
     const {weapon:_hw,...heliData}=this.heli;
+    const gCast=goatData.cast;
+    let castCopy=null;
+    if (gCast) {
+      castCopy={...gCast};
+      if (gCast.points) castCopy.points=gCast.points.map(p=>[p[0],p[1],p[2]]);
+      if (gCast.meteors) castCopy.meteors=gCast.meteors.map(m=>({...m}));
+      if (gCast.bolts) castCopy.bolts=gCast.bolts.map(p=>[p[0],p[1],p[2]]);
+      if (gCast.waves) castCopy.waves=gCast.waves.slice();
+    }
+    goatData.cast=castCopy;
+    const snipers=new Array(this.snipers.length);
+    for (let i=0;i<this.snipers.length;i++) {
+      const {weapon:_w,...s}=this.snipers[i];
+      if (s.targetPos) s.targetPos=[s.targetPos[0],s.targetPos[1],s.targetPos[2]];
+      snipers[i]=s;
+    }
+    const rogueDrones=new Array(this.rogueDrones.length);
+    for (let i=0;i<this.rogueDrones.length;i++) {
+      const {weapon:_w,...d}=this.rogueDrones[i];
+      rogueDrones[i]=d;
+    }
+    const missiles=new Array(this.missiles.length);
+    for (let i=0;i<this.missiles.length;i++) missiles[i]={...this.missiles[i]};
     return {
       seed:this.rng.state(),sniperWave:this.sniperWave,droneWave:this.droneWave,heliWave:this.heliWave,trainBossCount:this.trainBossCount,
       droneSpawnsLeft:this.droneSpawnsLeft,droneSpawnTimer:this.droneSpawnTimer,
       nextSniper:this.nextSniper,sniperRetreatAt:this.sniperRetreatAt,
       nextDrone:this.nextDrone,droneRetreatAt:this.droneRetreatAt,
-      nextHeli:this.nextHeli,heli:structuredClone(heliData),missiles:structuredClone(this.missiles),
+      nextHeli:this.nextHeli,heli:{...heliData},missiles,
       nextRain:this.nextRain,rain:{...this.rain},
       nextTsunami:this.nextTsunami,tsunami:{...this.tsunami},
       underFlood:{...this.underFlood},
       nextTrainBoss:this.nextTrainBoss,trainBoss:{...this.trainBoss},
-      nextGoat:this.nextGoat,goat:structuredClone(goatData),
+      nextGoat:this.nextGoat,goat:goatData,
       alert:this.alert,alertUntil:this.alertUntil,
-      snipers:this.snipers.map(({weapon:_w,...s})=>structuredClone(s)),
-      rogueDrones:this.rogueDrones.map(({weapon:_w,...d})=>structuredClone(d))
+      snipers,rogueDrones
     };
   }
 
@@ -1733,9 +1810,7 @@ export class Hazards {
         const cycle=(now*(3.2+(i%3)*.35)+f1*3.7+f2*5.1)%1;
         const ry=18*(1-cycle);
         if (hasFrustum && !r.inFrustum(rx,ry,rz,2.4)) continue;
-        _hzA[0]=rx; _hzA[1]=ry; _hzA[2]=rz;
-        _hzB[0]=rx+.34; _hzB[1]=ry+2.45; _hzB[2]=rz+.14;
-        r.beam(_hzA,_hzB,.034,.030,0xbcdcf0,3,_hzDyn);
+        r.add('box',rx+.17,ry+1.225,rz+.07,.034,2.477438,.030,0xbcdcf0,3,_hzRainOpts);
         if (cycle>.90 && (i&1)===0) {
           _hzDynLabel.label=(cycle-.90)/.10;
           r.add('ripple',rx,.04,rz,1.2,.02,1.2,0x9fd2f0,12,_hzDynLabel);
@@ -1750,9 +1825,7 @@ export class Hazards {
         const cycle=(now*3.45+f1*4.3+f2*6.7)%1;
         const ry=18*(1-cycle);
         if (hasFrustum && !r.inFrustum(rx,ry,rz,2.0)) continue;
-        _hzA[0]=rx; _hzA[1]=ry; _hzA[2]=rz;
-        _hzB[0]=rx-.12; _hzB[1]=ry+1.75; _hzB[2]=rz+.08;
-        r.beam(_hzA,_hzB,.036,.032,0x0b070e,2,_hzDyn);
+        r.add('box',rx-.06,ry+.875,rz+.04,.036,1.755933,.032,0x0b070e,2,_hzBossRainOpts);
         if (cycle>.90) {
           _hzDynLabel.label=(cycle-.90)/.10;
           r.add('ripple',rx,.05,rz,1.15,.03,1.15,0x1a0b15,12,_hzDynLabel);
@@ -1886,6 +1959,15 @@ const _hzDynYaw={dynamic:true,yaw:0};
 const _hzDynYP={dynamic:true,yaw:0,pitch:0};
 const _hzDynLabel={dynamic:true,label:0};
 const _hzDynCurtain={dynamic:true,yaw:Math.PI/2,label:.82};
+function _makeBeamOpts(dx,dy,dz) {
+  const len=Math.sqrt(dx*dx+dy*dy+dz*dz), invL=1/len;
+  const yx=dx*invL, yy=dy*invL, yz=dz*invL;
+  const l=Math.sqrt(yy*yy+yx*yx), inv=1/l;
+  const xx=yy*inv, xy=-yx*inv, xz=0;
+  return {dynamic:true,basis:[[xx,xy,xz],[yx,yy,yz],[xy*yz-xz*yy,xz*yx-xx*yz,xx*yy-xy*yx]]};
+}
+const _hzRainOpts=_makeBeamOpts(.34,2.45,.14);
+const _hzBossRainOpts=_makeBeamOpts(-.12,1.75,.08);
 const _hzA=[0,0,0], _hzB=[0,0,0], _hzC=[0,0,0];
 const _hzPts6=[[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]];
 const _hzPts4=[[0,0,0],[0,0,0],[0,0,0],[0,0,0]];

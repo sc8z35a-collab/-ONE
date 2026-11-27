@@ -1,9 +1,29 @@
-import {castShapeInto,makeShape} from './collision.js';
+import {castAABoxAny,castShapeInto,makeShape} from './collision.js';
 import {DestructionPhysics} from './destruction.js';
 import {sameLevel,UNDER_X,UNDER_Y,zoneOf} from './layout.js';
-import {add,clamp,scale,sub,TAU} from './render.js';
+import {Renderer,STRIDE,add,clamp,packInstance,scale,sub,TAU} from './render.js';
 
 const _stageHit={t:0,nx:0,ny:0,nz:0,shape:null};
+const _SHAPE_IDS={box:1,ramp:2,bevel:3,soft:4};
+const _SYMMETRIC=new Set(['box','bevel','cylinder','taper','cone','orb','soft','limb','mantle','ring']);
+
+function recordPackedTemplate(fn) {
+  const buckets=new Map();
+  const rec={
+    add(type,x,y,z,w,h,d,tint,kind=0,opts={}) {
+      let arr=buckets.get(type);
+      if (!arr) {arr=[];buckets.set(type,arr);}
+      const o=arr.length;
+      arr.length=o+STRIDE;
+      packInstance(arr,o,x,y,z,w,h,d,tint,kind,opts,_SHAPE_IDS[type]??0,_SYMMETRIC.has(type));
+    },
+    beam(...args) {Renderer.prototype.beam.call(this,...args);}
+  };
+  fn(rec);
+  const out=[];
+  for (const [type,arr] of buckets) out.push([type,new Float32Array(arr)]);
+  return out;
+}
 
 // Planked timber (rendered as wood grain, not masonry).
 const WOOD=29;
@@ -53,7 +73,7 @@ export function prepareStageObjects(definitions) {
   return definitions.map((o,i)=>{
     const {type,x,y,z,w,h,d,yaw}=o;
     const shape=makeShape(type==='glass'?'glass':'box',x,y,z,w,h,d,type==='glass'?17:2,{yaw});
-    return {...o,style:BLOCKS[type],shape,zone:zoneOf(x),_idx:i};
+    return {...o,style:BLOCKS[type],shape,zone:zoneOf(x),_idx:i,_rad:.5*Math.sqrt(w*w+h*h+d*d)+.15};
   });
 }
 
@@ -66,14 +86,24 @@ export class StageObjects {
     this.parts=world.stageParts;
     this.byId=new Map();
     this.byZone=[[],[],[],[]];
+    this.zoneBounds=[null,null,null,null];
     this.broken=new Uint8Array(this.parts.length);
     this.brokenCount=0;
     for (let i=0;i<this.parts.length;i++) {
       const part=this.parts[i];
       if (part._idx===undefined) part._idx=i;
+      if (part._rad===undefined) part._rad=.5*Math.sqrt(part.w*part.w+part.h*part.h+part.d*part.d)+.15;
       const z=part.zone ?? zoneOf(part.x);
       this.byId.set(part.id,part);
       this.byZone[z].push(part);
+      const s=part.shape;
+      let zb=this.zoneBounds[z];
+      if (!zb) this.zoneBounds[z]={minX:s.minX,minY:s.minY,minZ:s.minZ,maxX:s.maxX,maxY:s.maxY,maxZ:s.maxZ};
+      else {
+        if (s.minX<zb.minX) zb.minX=s.minX; if (s.maxX>zb.maxX) zb.maxX=s.maxX;
+        if (s.minY<zb.minY) zb.minY=s.minY; if (s.maxY>zb.maxY) zb.maxY=s.maxY;
+        if (s.minZ<zb.minZ) zb.minZ=s.minZ; if (s.maxZ>zb.maxZ) zb.maxZ=s.maxZ;
+      }
     }
     this.damage=new Map();
     this.destruction=new DestructionPhysics(world);
@@ -139,15 +169,18 @@ export class StageObjects {
   }
 
   trace(start,end,clearance=0,limit=1) {
-    const list=this.byZone[zoneOf(start[0])];
+    const z=zoneOf(start[0]);
+    const list=this.byZone[z];
     if (!list.length) return undefined;
     const sx=start[0], sy=start[1], sz=start[2];
     const ex=end[0], ey=end[1], ez=end[2];
-    const dx=ex-sx, dy=ey-sy, dz=ez-sz;
     const c=clearance || 0, pad=c*1.733+1e-8;
     const rx0=(sx<ex?sx:ex)-pad, rx1=(sx>ex?sx:ex)+pad;
     const ry0=(sy<ey?sy:ey)-pad, ry1=(sy>ey?sy:ey)+pad;
     const rz0=(sz<ez?sz:ez)-pad, rz1=(sz>ez?sz:ez)+pad;
+    const zb=this.zoneBounds[z];
+    if (zb && (ry1<zb.minY || ry0>zb.maxY || rx1<zb.minX || rx0>zb.maxX || rz1<zb.minZ || rz0>zb.maxZ)) return undefined;
+    const dx=ex-sx, dy=ey-sy, dz=ez-sz;
     let bestT=limit ?? 1, bestObj=null, bnx=0, bny=0, bnz=0, bShape=null;
     const hasBroken=this.brokenCount>0, broken=this.broken;
     for (let i=0;i<list.length;i++) {
@@ -170,6 +203,34 @@ export class StageObjects {
       shape:bShape,
       stageObject:bestObj
     };
+  }
+
+  traceAny(sx,sy,sz,ex,ey,ez,limit=1) {
+    const z=zoneOf(sx);
+    const list=this.byZone[z];
+    if (!list.length) return false;
+    const rx0=sx<ex?sx:ex, rx1=sx>ex?sx:ex;
+    const ry0=sy<ey?sy:ey, ry1=sy>ey?sy:ey;
+    const rz0=sz<ez?sz:ez, rz1=sz>ez?sz:ez;
+    const zb=this.zoneBounds[z];
+    if (zb && (ry1<zb.minY || ry0>zb.maxY || rx1<zb.minX || rx0>zb.maxX || rz1<zb.minZ || rz0>zb.maxZ)) return false;
+    const dx=ex-sx, dy=ey-sy, dz=ez-sz;
+    const invDx=(dx>1e-7 || dx<-1e-7)?1/dx:0;
+    const invDy=(dy>1e-7 || dy<-1e-7)?1/dy:0;
+    const invDz=(dz>1e-7 || dz<-1e-7)?1/dz:0;
+    const hasBroken=this.brokenCount>0, broken=this.broken;
+    for (let i=0;i<list.length;i++) {
+      const o=list[i];
+      if (hasBroken && broken[o._idx]) continue;
+      const s=o.shape;
+      if (ry1<s.minY || ry0>s.maxY || rx1<s.minX || rx0>s.maxX || rz1<s.minZ || rz0>s.maxZ) continue;
+      if (s.isAA) {
+        if (castAABoxAny(s,sx,sy,sz,invDx,invDy,invDz,limit)) return true;
+      } else if (castShapeInto(s,sx,sy,sz,dx,dy,dz,limit,0,_stageHit)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   blocked(x,y,z,radius,height) {
@@ -222,27 +283,38 @@ export class StageObjects {
   }
 
   damageArea(battle,actor,x,y,z,radius,amount) {
-    const from=[x,y+.32,z];
-    for (const o of this.parts) {
-      if (!sameLevel(o.x,x) || !this.intact(o)) continue;
-      const distance=Math.hypot(o.x-x,o.y-y,o.z-z);
-      if (distance>radius) continue;
+    const from=[x,y+.32,z], r2=radius*radius;
+    const list=this.byZone[zoneOf(x)];
+    for (let i=0;i<list.length;i++) {
+      const o=list[i];
+      if (!this.intact(o)) continue;
+      const ox=o.x-x, oy=o.y-y, oz=o.z-z, d2=ox*ox+oy*oy+oz*oz;
+      if (d2>r2) continue;
       const hit=battle.traceShot(from,[o.x,o.y,o.z],true);
       if (hit?.stageObject!==o) continue;
-      this.strike(o,amount*(1-.47*distance/radius),battle.clock,actor.team);
+      this.strike(o,amount*(1-.47*Math.sqrt(d2)/radius),battle.clock,actor.team);
     }
     this.destruction?.applySplashDamage(x,y,z,radius,amount,actor.team,Math.max(10,amount*.35));
   }
 
   draw(renderer,viewX,clock,viewZ=this._lastViewZ) {
     this._lastViewZ=viewZ;
-    for (const o of this.parts) {
-      if (!sameLevel(o.x,viewX)) continue;
-      const state=this.damage.get(o.id);
+    const list=this.byZone[zoneOf(viewX)];
+    const canPack=typeof renderer.addPacked==='function';
+    const hasDamage=this.damage.size>0;
+    for (let i=0;i<list.length;i++) {
+      const o=list[i];
+      const state=hasDamage?this.damage.get(o.id):undefined;
       if (state?.hp===0) {
         const age=clock-state.at;
         if (age>=0 && age<SHARDS) drawFragments(renderer,o,state,age);
-      } else drawObject(renderer,o,state);
+      } else if (!state && canPack) {
+        let tpl=o._packed;
+        if (!tpl) tpl=o._packed=recordPackedTemplate(rec=>drawObject(rec,o,undefined));
+        for (let k=0;k<tpl.length;k++) renderer.addPacked(tpl[k][0],tpl[k][1],o.x,o.y,o.z,o._rad);
+      } else {
+        drawObject(renderer,o,state);
+      }
     }
     this.destruction?.draw(renderer,viewX,viewZ);
   }

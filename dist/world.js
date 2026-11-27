@@ -1,6 +1,6 @@
 import {TAU,add,clamp,scale,sub,mix} from './render.js';
 
-import {BOUNDS,METRO,RAIL,UNDER_X,UNDER_Y,ZONES,cityExit,floorBounds,inCity,isUnder,localX,railEnd,sameLevel,zoneOf} from './layout.js';
+import {BOUNDS,CITY_RADIUS,METRO,RAIL,UNDER_X,UNDER_Y,ZONES,cityExit,floorBounds,inCity,isUnder,localX,railEnd,sameLevel,zoneOf} from './layout.js';
 import {buildRail,buildUnderground,railLoopSites} from './levels.js';
 import {buildMetro,buildCabin} from './metro-stage.js';
 import {buildStairs,cutStairOpenings,stairAt,stairCrossing,stairFloor,stairFloorY} from './stairs.js';
@@ -76,45 +76,228 @@ export function rayBox(start,delta,box) {
   return {t:_rayBoxHit.t,normal};
 }
 
+let _WORLD_BLUEPRINT=null;
+let _NEXT_BLUEPRINT_ID=1;
+
+function cloneOpts(opts) {
+  if (!opts) return undefined;
+  const b=opts.basis;
+  if (b) {
+    return {
+      ...opts,
+      basis:[[b[0][0],b[0][1],b[0][2]],[b[1][0],b[1][1],b[1][2]],[b[2][0],b[2][1],b[2][2]]]
+    };
+  }
+  for (const _ in opts) return {...opts};
+  return undefined;
+}
+
+function buildWorldBlueprint() {
+  const addZone=[], addType=[], addX=[], addY=[], addZ=[], addW=[], addH=[], addD=[], addTint=[], addKind=[], addOpts=[];
+  const labels=[];
+  const rec={
+    zone:0,
+    add(type,x,y,z,w,h,d,tint,kind,opts) {
+      addZone.push(this.zone);
+      addType.push(type);
+      addX.push(x); addY.push(y); addZ.push(z);
+      addW.push(w); addH.push(h); addD.push(d);
+      addTint.push(Array.isArray(tint)?[tint[0],tint[1],tint[2]]:(tint??0));
+      addKind.push(kind===undefined?0:kind);
+      addOpts.push(cloneOpts(opts));
+    },
+    label(name,x,y,z,w,h,tint,yaw,pitch,opts) {
+      labels.push([this.zone,name,x,y,z,w,h,Array.isArray(tint)?[tint[0],tint[1],tint[2]]:tint,yaw,pitch,cloneOpts(opts)]);
+    },
+    beam() {},
+    seal() {}
+  };
+  const bp=Object.create(World.prototype);
+  bp.geometry=new Geometry();
+  bp.r=bp.geometry.track(rec);
+  bp.solids=[];
+  bp.slabs=[];
+  bp.towerSites=[APPROACH_LOT];
+  bp.homes=[];
+  bp.elevated=[];
+  bp.objects=[];
+  bp.vehicleDefs=[];
+  bp.destructibles=[];
+  bp._destructibleIds=new Set();
+  bp.rng=randomGenerator(784301);
+  bp.build();
+  buildRail(bp);
+  buildStairs(bp,0);
+  bp.sealAlleys();
+  rec.zone=1;
+  buildUnderground(bp);
+  buildMetro(bp);
+  buildStairs(bp,1);
+  rec.zone=2;
+  buildCabin(bp,METRO);
+  rec.zone=3;
+  buildCabin(bp,RAIL);
+  rec.zone=0;
+  bp.stageParts=prepareStageObjects(bp.objects);
+  bp.indexSolids();
+  const solidIndex=new Map();
+  for (let i=0;i<bp.solids.length;i++) solidIndex.set(bp.solids[i],i);
+  const destructibleTemplates=bp.destructibles.map(def=>{
+    const solidIndices=def.solids?def.solids.map(s=>solidIndex.get(s)??-1):null;
+    const obstacleIndices=def.obstacles?def.obstacles.map(s=>solidIndex.get(s)??-1):null;
+    return {def,solidIndices,obstacleIndices};
+  });
+  return {
+    id:_NEXT_BLUEPRINT_ID++,
+    geometry:bp.geometry,
+    solids:bp.solids,
+    boxes:bp._boxes,
+    grid0:bp.grid0,
+    grid1:bp.grid1,
+    collisionGrid:bp.collisionGrid,
+    slabs:bp.slabs,
+    zoneSlabs:bp.zoneSlabs,
+    slabBounds:bp.slabBounds,
+    zoneMaxFloorY:bp.zoneMaxFloorY,
+    towerSites:bp.towerSites,
+    homes:bp.homes,
+    elevated:bp.elevated,
+    elevatedList:bp.elevatedList,
+    elevX0:bp.elevX0, elevX1:bp.elevX1, elevZ0:bp.elevZ0, elevZ1:bp.elevZ1,
+    objects:bp.objects,
+    vehicleDefs:bp.vehicleDefs,
+    stageParts:bp.stageParts,
+    destructibleTemplates,
+    rngState:bp.rng.state(),
+    addCount:addType.length,
+    addZone:Uint8Array.from(addZone),
+    addType,
+    addX:Float64Array.from(addX),
+    addY:Float64Array.from(addY),
+    addZ:Float64Array.from(addZ),
+    addW:Float64Array.from(addW),
+    addH:Float64Array.from(addH),
+    addD:Float64Array.from(addD),
+    addTint,
+    addKind:Uint8Array.from(addKind),
+    addOpts,
+    labels
+  };
+}
+
 export class World {
   constructor(renderer,scene=null) {
+    if (!scene) {
+      if (!_WORLD_BLUEPRINT) _WORLD_BLUEPRINT=buildWorldBlueprint();
+      this._initFromBlueprint(_WORLD_BLUEPRINT,renderer);
+      return;
+    }
+    this._blueprintId=0;
+    this._solidsVersion=0;
+    this._solidDisabled=null;
+    this._solidSeen=null;
+    this._boxes=null;
     this.geometry=new Geometry();
     this.r=this.geometry.track(renderer);
-    this.solids=scene?.solids ?? [];
-    this.slabs=scene?.slabs ?? [];
+    this.solids=scene.solids ?? [];
+    this.slabs=scene.slabs ?? [];
     this.towerSites=[APPROACH_LOT];
-    this.homes=scene?.homes ?? [];
-    this.elevated=scene?.elevated ?? [];
-    this.objects=scene?.objects ?? [];
-    this.vehicleDefs=scene?.vehicles ?? [];
+    this.homes=scene.homes ?? [];
+    this.elevated=scene.elevated ?? [];
+    this.objects=scene.objects ?? [];
+    this.vehicleDefs=scene.vehicles ?? [];
     this.destructibles=[];
+    this._destructibleIds=new Set();
     this.rng=randomGenerator(784301);
-    if (scene) {
-      this.loadParts(this.r,scene.parts);
-    } else {
-      this.build();
-      buildRail(this);
-      buildStairs(this,0);
-      this.sealAlleys();
-      renderer.zone=1;
-      buildUnderground(this);
-      buildMetro(this);
-      buildStairs(this,1);
-      renderer.zone=2;
-      buildCabin(this,METRO);
-      renderer.zone=3;
-      buildCabin(this,RAIL);
-    }
+    this.loadParts(this.r,scene.parts);
     renderer.zone=0;
     this.stageParts=prepareStageObjects(this.objects);
     this.indexSolids();
-    if (scene) this.buildBakedDestructibles();
+    this.buildBakedDestructibles();
+    renderer.seal();
+    this.r=renderer;
+  }
+
+  _initFromBlueprint(bp,renderer) {
+    this._blueprintId=bp.id;
+    this._solidsVersion=0;
+    this.geometry=Geometry.fromBlueprint(bp.geometry);
+    const nSolids=bp.solids.length;
+    const solids=new Array(nSolids);
+    const srcSolids=bp.solids;
+    for (let i=0;i<nSolids;i++) {
+      const s=srcSolids[i];
+      solids[i]={min:s.min,max:s.max,ray:s.ray,paintLayer:s.paintLayer,_idx:i};
+    }
+    this.solids=solids;
+    this._boxes=bp.boxes;
+    this._solidBoxes=null;
+    this._solidDisabled=null;
+    this._solidSeen=new Int32Array(nSolids);
+    this._traceSeq=0;
+    this.grid0=bp.grid0;
+    this.grid1=bp.grid1;
+    this.collisionGrid=bp.collisionGrid;
+    this.slabs=bp.slabs;
+    this.zoneSlabs=bp.zoneSlabs;
+    this.slabBounds=bp.slabBounds;
+    this.zoneMaxFloorY=bp.zoneMaxFloorY;
+    this.towerSites=bp.towerSites;
+    this.homes=bp.homes;
+    this.elevated=bp.elevated;
+    this.elevatedList=bp.elevatedList;
+    this.elevX0=bp.elevX0; this.elevX1=bp.elevX1; this.elevZ0=bp.elevZ0; this.elevZ1=bp.elevZ1;
+    this.objects=bp.objects;
+    this.vehicleDefs=bp.vehicleDefs;
+    this.stageParts=bp.stageParts;
+    const dTpl=bp.destructibleTemplates, dLen=dTpl.length;
+    const destructibles=new Array(dLen);
+    for (let i=0;i<dLen;i++) {
+      const {def,solidIndices,obstacleIndices}=dTpl[i];
+      const copy={...def};
+      if (solidIndices) {
+        const arr=new Array(solidIndices.length);
+        for (let j=0;j<solidIndices.length;j++) arr[j]=solidIndices[j]>=0?solids[solidIndices[j]]:def.solids[j];
+        copy.solids=arr;
+      }
+      if (obstacleIndices) {
+        const arr=new Array(obstacleIndices.length);
+        for (let j=0;j<obstacleIndices.length;j++) arr[j]=obstacleIndices[j]>=0?solids[obstacleIndices[j]]:def.obstacles[j];
+        copy.obstacles=arr;
+      }
+      destructibles[i]=copy;
+    }
+    this.destructibles=destructibles;
+    this._destructibleIds=null;
+    this.rng=randomGenerator(bp.rngState);
+    const n=bp.addCount;
+    const addZone=bp.addZone, addType=bp.addType, addX=bp.addX, addY=bp.addY, addZ=bp.addZ;
+    const addW=bp.addW, addH=bp.addH, addD=bp.addD, addTint=bp.addTint, addKind=bp.addKind, addOpts=bp.addOpts;
+    let curZone=-1;
+    for (let i=0;i<n;i++) {
+      const z=addZone[i];
+      if (z!==curZone) {renderer.zone=z; curZone=z;}
+      renderer.add(addType[i],addX[i],addY[i],addZ[i],addW[i],addH[i],addD[i],addTint[i],addKind[i],addOpts[i]);
+    }
+    const labels=bp.labels;
+    for (let i=0;i<labels.length;i++) {
+      const l=labels[i];
+      if (l[0]!==curZone) {renderer.zone=l[0]; curZone=l[0];}
+      renderer.label(l[1],l[2],l[3],l[4],l[5],l[6],l[7],l[8],l[9],l[10]);
+    }
+    renderer.zone=0;
     renderer.seal();
     this.r=renderer;
   }
 
   registerDestructible(def) {
-    if (!def || this.destructibles.some(d=>d.id===def.id)) return def;
+    if (!def) return def;
+    if (!this._destructibleIds) {
+      this._destructibleIds=new Set();
+      for (let i=0;i<this.destructibles.length;i++) this._destructibleIds.add(this.destructibles[i].id);
+    }
+    if (this._destructibleIds.has(def.id)) return def;
+    this._destructibleIds.add(def.id);
     this.destructibles.push(def);
     return def;
   }
@@ -161,28 +344,71 @@ export class World {
 
   // Neighbouring buildings with a narrow gap between them get an infill wall,
   // so nobody (squid form included) can slip into an alley the camera cannot
-  // follow. Wider passages stay open.
+  // follow. Wider passages stay open. Uses O(N log N) spatial hashing & sweep.
   sealAlleys(maxGap=2.6,inset=.12) {
-    const ground=this.solids.filter(b=>zoneOf(b.min[0])===0);
-    // A building's full height: the tallest solid stacked over its footprint.
-    const height=b=>{
-      const x=(b.min[0]+b.max[0])/2, z=(b.min[2]+b.max[2])/2;
+    const solids=this.solids;
+    const cellMap=new Map();
+    const rawBuildings=[];
+    const CELL_S=16, INV_S=1/CELL_S;
+    for (let i=0;i<solids.length;i++) {
+      const b=solids[i];
+      if (zoneOf(b.min[0])!==0) continue;
+      const x0=b.min[0], x1=b.max[0], z0=b.min[2], z1=b.max[2];
+      const cx0=Math.floor(x0*INV_S), cx1=Math.floor(x1*INV_S);
+      const cz0=Math.floor(z0*INV_S), cz1=Math.floor(z1*INV_S);
+      for (let cz=cz0;cz<=cz1;cz++) {
+        for (let cx=cx0;cx<=cx1;cx++) {
+          const key=cz*1024+cx;
+          let list=cellMap.get(key);
+          if (!list) {list=[];cellMap.set(key,list);}
+          list.push(b);
+        }
+      }
+      if (b.min[1]<.5 && b.max[1]>2.4 && x1-x0>1.2 && z1-z0>1.2) rawBuildings.push(b);
+    }
+    // Preserve exact height() stacking semantics via O(1) cell lookup (iterates solids in insertion order).
+    const buildings=[];
+    for (let i=0;i<rawBuildings.length;i++) {
+      const b=rawBuildings[i];
+      const x=(b.min[0]+b.max[0])*.5, z=(b.min[2]+b.max[2])*.5;
       let top=b.max[1];
-      for (const c of ground) if (x>c.min[0] && x<c.max[0] && z>c.min[2] && z<c.max[2] && c.min[1]<=top+.3) top=Math.max(top,c.max[1]);
-      return top;
-    };
-    const buildings=ground.filter(b=>b.min[1]<.5 && b.max[1]>2.4 && b.max[0]-b.min[0]>1.2 && b.max[2]-b.min[2]>1.2)
-      .map(b=>Object.assign(Object.create(null),{min:b.min,max:[b.max[0],height(b),b.max[2]]}));
+      const list=cellMap.get(Math.floor(z*INV_S)*1024+Math.floor(x*INV_S));
+      if (list) {
+        for (let j=0;j<list.length;j++) {
+          const c=list[j];
+          if (x>c.min[0] && x<c.max[0] && z>c.min[2] && z<c.max[2] && c.min[1]<=top+.3) {
+            if (c.max[1]>top) top=c.max[1];
+          }
+        }
+      }
+      buildings.push({min:b.min,max:[b.max[0],top,b.max[2]]});
+    }
     const fills=[];
-    for (let i=0;i<buildings.length;i++) for (let j=i+1;j<buildings.length;j++) {
-      const a=buildings[i], b=buildings[j];
-      for (const k of [0,2]) {
-        const o=2-k, [first,second]=a.max[k]<=b.min[k]?[a,b]:[b,a];
-        const from=first.max[k], to=second.min[k];
-        if (to-from<=.05 || to-from>=maxGap) continue;
-        const lo=Math.max(a.min[o],b.min[o])+inset, hi=Math.min(a.max[o],b.max[o])-inset;
-        if (hi-lo<.6) continue;
-        fills.push({k,from,to,lo,hi,top:Math.min(a.max[1],b.max[1])});
+    // Sweep-and-prune separately along X (k=0) and Z (k=2) in O(B log B).
+    for (let axis=0;axis<2;axis++) {
+      const k=axis===0?0:2, o=2-k;
+      const byMin=buildings.slice().sort((p,q)=>p.min[k]-q.min[k]);
+      const n=byMin.length;
+      for (let i=0;i<n;i++) {
+        const a=byMin[i], from=a.max[k], aLo=a.min[o], aHi=a.max[o], aTop=a.max[1];
+        const maxTo=from+maxGap;
+        // Binary search or scan forward: only buildings with b.min[k] in (from+0.05, from+maxGap) match!
+        // Since byMin is sorted by min[k], start from lower bound where b.min[k] > from + 0.05.
+        let loIdx=i+1, hiIdx=n;
+        const minTo=from+.05;
+        while (loIdx<hiIdx) {
+          const mid=(loIdx+hiIdx)>>1;
+          if (byMin[mid].min[k]<=minTo) loIdx=mid+1;
+          else hiIdx=mid;
+        }
+        for (let j=loIdx;j<n;j++) {
+          const b=byMin[j], to=b.min[k];
+          if (to>=maxTo) break;
+          const lo=(aLo>b.min[o]?aLo:b.min[o])+inset;
+          const hi=(aHi<b.max[o]?aHi:b.max[o])-inset;
+          if (hi-lo<.6) continue;
+          fills.push({k,from,to,lo,hi,top:aTop<b.max[1]?aTop:b.max[1]});
+        }
       }
     }
     // Several solids of one building can face the same gap: merge their fills.
@@ -209,23 +435,22 @@ export class World {
   }
 
   disableSolid(raw) {
+    if (this._boxes) {
+      const idx=raw?._idx;
+      if (idx>=0) {
+        if (!this._solidDisabled) this._solidDisabled=new Uint8Array(this.solids.length);
+        this._solidDisabled[idx]=1;
+        this._solidsVersion++;
+      }
+      return;
+    }
     const box=this._solidBoxes?.get(raw);
-    if (box) box.disabled=true;
+    if (box) {box.disabled=true;this._solidsVersion++;}
   }
 
   disableRegion(zoneIndex,minX,maxX,minY,maxY,minZ,maxZ) {
-    const shapes=this.geometry?.shapes;
-    if (!shapes) return 0;
-    let disabled=0;
-    for (let i=0;i<shapes.length;i++) {
-      const sh=shapes[i];
-      if (sh.disabled || sh.zone!==zoneIndex) continue;
-      if (sh.kind===0 || sh.kind===1 || sh.kind===5 || sh.kind===22 || sh.kind===27) continue;
-      if (sh.px>=minX && sh.px<=maxX && sh.py>=minY && sh.py<=maxY && sh.pz>=minZ && sh.pz<=maxZ) {
-        sh.disabled=true;
-        disabled++;
-      }
-    }
+    const disabled=this.geometry?.disableRegion(zoneIndex,minX,maxX,minY,maxY,minZ,maxZ)??0;
+    if (disabled) this._solidsVersion++;
     return disabled;
   }
 
@@ -234,13 +459,16 @@ export class World {
     this.grid1=new Array(1024);
     this.collisionGrid=new Map();
     this._solidBoxes=new WeakMap();
+    const boxes=new Array(this.solids.length);
+    this._boxes=boxes;
     this._traceSeq=0;
     const grid0=this.grid0, grid1=this.grid1, grid=this.collisionGrid;
     for (let i=0;i<this.solids.length;i++) {
       const raw=this.solids[i];
       const x0=raw.min[0], y0=raw.min[1], z0=raw.min[2];
       const x1=raw.max[0], y1=raw.max[1], z1=raw.max[2];
-      const box={x0,y0,z0,x1,y1,z1,ray:raw.ray,paintLayer:raw.paintLayer,disabled:false,_seen:0};
+      const box={idx:i,x0,y0,z0,x1,y1,z1,ray:raw.ray,paintLayer:raw.paintLayer,disabled:false,_seen:0};
+      boxes[i]=box;
       this._solidBoxes.set(raw,box);
       const cx0=Math.floor(x0*INV_CELL), cx1=Math.floor(x1*INV_CELL);
       const cz0=Math.floor(z0*INV_CELL), cz1=Math.floor(z1*INV_CELL);
@@ -398,10 +626,10 @@ export class World {
     if (y<base.y+.22 && top===base.y && !this.dynamicStage?.active) return base;
     const boxes=this.cellBoxes(Math.floor(x*INV_CELL),Math.floor(z*INV_CELL));
     if (boxes) {
-      const maxY=y+.095;
+      const maxY=y+.095, dis=this._solidDisabled;
       for (let i=0;i<boxes.length;i++) {
         const b=boxes[i];
-        if (b.disabled || b.y1<=top+.12 || b.y1>maxY || x<=b.x0+.05 || x>=b.x1-.05 || z<=b.z0+.05 || z>=b.z1-.05) continue;
+        if ((dis && dis[b.idx]) || b.disabled || b.y1<=top+.12 || b.y1>maxY || x<=b.x0+.05 || x>=b.x1-.05 || z<=b.z0+.05 || z>=b.z1-.05) continue;
         top=b.y1;
       }
     }
@@ -424,7 +652,7 @@ export class World {
     const r2=radius*radius, yLo=y+.025, yHi=y+height-.025;
     const col0=Math.floor((x-radius)*INV_CELL), col1=Math.floor((x+radius)*INV_CELL);
     const row0=Math.floor((z-radius)*INV_CELL), row1=Math.floor((z+radius)*INV_CELL);
-    const grid0=this.grid0, grid1=this.grid1, grid=this.collisionGrid;
+    const grid0=this.grid0, grid1=this.grid1, grid=this.collisionGrid, dis=this._solidDisabled;
     if (col0===col1 && row0===row1) {
       let boxes;
       const ux0=col0+32, uz0=row0+32;
@@ -437,7 +665,7 @@ export class World {
       if (!boxes) return false;
       for (let i=0;i<boxes.length;i++) {
         const b=boxes[i];
-        if (b.disabled || yLo>=b.y1 || yHi<=b.y0) continue;
+        if ((dis && dis[b.idx]) || b.disabled || yLo>=b.y1 || yHi<=b.y0) continue;
         const dx=x<b.x0?x-b.x0:x>b.x1?x-b.x1:0;
         const dz=z<b.z0?z-b.z0:z>b.z1?z-b.z1:0;
         if (dx*dx+dz*dz<r2) return true;
@@ -459,7 +687,7 @@ export class World {
         if (!boxes) continue;
         for (let i=0;i<boxes.length;i++) {
           const b=boxes[i];
-          if (b.disabled || yLo>=b.y1 || yHi<=b.y0) continue;
+          if ((dis && dis[b.idx]) || b.disabled || yLo>=b.y1 || yHi<=b.y0) continue;
           const dx=x<b.x0?x-b.x0:x>b.x1?x-b.x1:0;
           const dz=z<b.z0?z-b.z0:z>b.z1?z-b.z1:0;
           if (dx*dx+dz*dz<r2) return true;
@@ -501,6 +729,7 @@ export class World {
     const multi=minX!==maxX || minZ!==maxZ;
     const mark=multi?++this._traceSeq:0;
     const grid0=this.grid0, grid1=this.grid1, grid=this.collisionGrid;
+    const dis=this._solidDisabled, seen=this._solidSeen;
     for (let z=minZ;z<=maxZ;z++) {
       const uz0=z+32, uz1=z+16;
       const inZ0=(uz0&~63)===0, inZ1=(uz1&~31)===0;
@@ -516,10 +745,15 @@ export class World {
         if (!boxes) continue;
         for (let i=0;i<boxes.length;i++) {
           const box=boxes[i];
-          if (box.disabled || !box.ray || zoneOf(box.x0)!==zone) continue;
+          if ((dis && dis[box.idx]) || box.disabled || !box.ray || zoneOf(box.x0)!==zone) continue;
           if (multi) {
-            if (box._seen===mark) continue;
-            box._seen=mark;
+            if (seen) {
+              if (seen[box.idx]===mark) continue;
+              seen[box.idx]=mark;
+            } else {
+              if (box._seen===mark) continue;
+              box._seen=mark;
+            }
           }
           const limit=bestT<1?bestT:1;
           if (rayBoxInto(sx,sy,sz,dx,dy,dz,box,limit,_rayBoxHit) && _rayBoxHit.t<bestT) {
@@ -533,37 +767,58 @@ export class World {
     }
     const maxFloorY=this.zoneMaxFloorY[zone];
     if (sy<=maxFloorY || ey<=maxFloorY) {
-      const samples=Math.ceil(Math.hypot(dx,dy,dz)/.24);
-      const bounds=ZONES[zone].bounds, bxLim=bounds[0]+2, bzLim=bounds[1]+2, zOrigin=ZONES[zone].x;
-      let lastT=0;
-      for (let i=1;i<=samples;i++) {
-        const t=i/samples;
-        if (lastT>=bestT) break;
-        const px=sx+dx*t, py=sy+dy*t, pz=sz+dz*t;
-        if (zoneOf(px)===zone) {
-          const lx=px-zOrigin;
-          if (lx>-bxLim && lx<bxLim && pz>-bzLim && pz<bzLim && py<=this.floorY(px,pz)) {
-            let low=lastT, high=t;
-            for (let j=0;j<5;j++) {
-              const mid=(low+high)*.5;
-              if (sy+dy*mid<=this.floorY(sx+dx*mid,sz+dz*mid)) high=mid;
-              else low=mid;
+      const baseY=ZONE_FLOORS[zone].y;
+      const sb=this.slabBounds[zone];
+      const rx0=sx<ex?sx:ex, rx1=sx>ex?sx:ex, rz0=sz<ez?sz:ez, rz1=sz>ez?sz:ez;
+      const hitsSlabs=rx1>=sb.x0 && rx0<=sb.x1 && rz1>=sb.z0 && rz0<=sb.z1;
+      const hitsStairs=zone<2 && !(rz1<-15.25 || rz0>15.25 || (rz0>-10.5 && rz1<10.5));
+      if (!hitsSlabs && !hitsStairs && !this.dynamicStage?.active) {
+        // Pure flat-base analytic intersection in O(1) (no 0.24m ray marching).
+        if (sy>baseY && ey<=baseY && dy<-1e-8) {
+          const t=(baseY-sy)/dy;
+          if (t>=0 && t<bestT) {
+            const hx=sx+dx*t, hz=sz+dz*t, lx=hx-ZONES[zone].x;
+            const bounds=ZONES[zone].bounds;
+            if (zoneOf(hx)===zone && lx>-(bounds[0]+2) && lx<bounds[0]+2 && hz>-(bounds[1]+2) && hz<bounds[1]+2) {
+              bestT=t;
+              bestNormal=[0,1,0];
+              bestLayer=ZONE_FLOORS[zone].layer;
             }
-            if (high<bestT) {
-              const hx=sx+dx*high, hz=sz+dz*high;
-              const surface=this.floor(hx,hz);
-              const dgx=this.floorY(hx+.08,hz)-this.floorY(hx-.08,hz);
-              const dgz=this.floorY(hx,hz+.08)-this.floorY(hx,hz-.08);
-              const adx=dgx<0?-dgx:dgx, adz=dgz<0?-dgz:dgz;
-              const vertical=(adx>adz?adx:adz)>.32;
-              bestT=high;
-              bestNormal=vertical?(adx>adz?[-Math.sign(dgx),0,0]:[0,0,-Math.sign(dgz)]):[0,1,0];
-              bestLayer=vertical?undefined:surface.layer;
-            }
-            break;
           }
         }
-        lastT=t;
+      } else {
+        const samples=Math.ceil(Math.sqrt(dx*dx+dy*dy+dz*dz)/.24);
+        const bounds=ZONES[zone].bounds, bxLim=bounds[0]+2, bzLim=bounds[1]+2, zOrigin=ZONES[zone].x;
+        let lastT=0;
+        for (let i=1;i<=samples;i++) {
+          const t=i/samples;
+          if (lastT>=bestT) break;
+          const px=sx+dx*t, py=sy+dy*t, pz=sz+dz*t;
+          if (zoneOf(px)===zone) {
+            const lx=px-zOrigin;
+            if (lx>-bxLim && lx<bxLim && pz>-bzLim && pz<bzLim && py<=this.floorY(px,pz)) {
+              let low=lastT, high=t;
+              for (let j=0;j<5;j++) {
+                const mid=(low+high)*.5;
+                if (sy+dy*mid<=this.floorY(sx+dx*mid,sz+dz*mid)) high=mid;
+                else low=mid;
+              }
+              if (high<bestT) {
+                const hx=sx+dx*high, hz=sz+dz*high;
+                const surface=this.floor(hx,hz);
+                const dgx=this.floorY(hx+.08,hz)-this.floorY(hx-.08,hz);
+                const dgz=this.floorY(hx,hz+.08)-this.floorY(hx,hz-.08);
+                const adx=dgx<0?-dgx:dgx, adz=dgz<0?-dgz:dgz;
+                const vertical=(adx>adz?adx:adz)>.32;
+                bestT=high;
+                bestNormal=vertical?(adx>adz?[-Math.sign(dgx),0,0]:[0,0,-Math.sign(dgz)]):[0,1,0];
+                bestLayer=vertical?undefined:surface.layer;
+              }
+              break;
+            }
+          }
+          lastT=t;
+        }
       }
     }
     if (bestT===Infinity) return null;
@@ -576,10 +831,15 @@ export class World {
 
   traceExact(start,end,clearance=0) {
     const hit=clearance?this.geometry.traceClearance(start,end,clearance):this.geometry.trace(start,end);
-    const edge=zoneOf(start[0])===0?cityExit(start,end,clearance):null;
+    const sx=start[0], sz=start[2], ex=end[0], ez=end[2];
+    let edge=null;
+    if (zoneOf(sx)===0) {
+      const r=CITY_RADIUS-clearance, r2=r*r;
+      if (sx*sx+sz*sz>r2 || ex*ex+ez*ez>r2) edge=cityExit(start,end,clearance);
+    }
     if (edge!==null && (!hit || edge<hit.t)) {
       const position=add(start,scale(sub(end,start),edge));
-      const length=Math.hypot(position[0],position[2])||1;
+      const length=Math.sqrt(position[0]*position[0]+position[2]*position[2])||1;
       return {t:edge,position,normal:[-position[0]/length,0,-position[2]/length],boundary:true};
     }
     if (!hit) return null;
@@ -590,6 +850,16 @@ export class World {
       else if (Math.abs(y-floor.y)<.17 && shape.sx*shape.sz>.24) hit.layer=floor.layer;
     }
     return hit;
+  }
+
+  // Zero-allocation boolean visibility ray test against static world geometry & city boundary.
+  traceExactAny(sx,sy,sz,ex,ey,ez) {
+    if (this.geometry.traceAny(sx,sy,sz,ex,ey,ez)) return true;
+    if (zoneOf(sx)===0) {
+      const r2=CITY_RADIUS*CITY_RADIUS;
+      if (sx*sx+sz*sz>r2 || ex*ex+ez*ez>r2) return cityExit([sx,sy,sz],[ex,ey,ez],0)!==null;
+    }
+    return false;
   }
 
   rail(a,b,tint=STEEL,posts=5) {

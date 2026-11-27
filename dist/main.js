@@ -1002,12 +1002,14 @@ function showTitle() {
 
 const MAP_CYAN32=0xffbed128, MAP_AMBER32=0xff4476f4, MAP_BOSS32=0xff2a1820;
 const MAP_FLOOR32=0xff57523e, MAP_RAISED32=0xff747561, MAP_WALL32=0xff2f2918;
-let mapPixels32=null;
+let mapPixels32=null, lastMapLevel=-1, lastMapPaintVersion=-1;
 
 function mapSetup() {
   const width=mini.width,height=mini.height;
   mapImage=miniCtx.createImageData(width,height);
   mapPixels32=new Uint32Array(mapImage.data.buffer);
+  lastMapLevel=-1;
+  lastMapPaintVersion=-1;
   for (const [level,zone] of ZONES.entries()) {
     const indices=new Int32Array(width*height).fill(-1);
     const colors32=new Uint32Array(width*height);
@@ -1030,10 +1032,15 @@ function drawMap() {
   const view=battle.cameraActor(), level=mapLevel==='auto'?(watchingAerial()?0:zoneOf(view.x)):Number(mapLevel);
   const cabin=level>=2?battle.cabinTrain(view.x):null;
   const {indices,colors32,boundX,boundZ}=mapLayers[level];
-  const out=mapPixels32, owners=paint.owner;
-  for (let i=0,n=indices.length;i<n;i++) {
-    const index=indices[i], owner=index===-1?0:owners[index];
-    out[i]=owner===1?MAP_CYAN32:owner===2?MAP_AMBER32:owner===3?MAP_BOSS32:colors32[i];
+  const ver=paint.version??-2;
+  if (level!==lastMapLevel || ver!==lastMapPaintVersion) {
+    const out=mapPixels32, owners=paint.owner;
+    for (let i=0,n=indices.length;i<n;i++) {
+      const index=indices[i], owner=index===-1?0:owners[index];
+      out[i]=owner===1?MAP_CYAN32:owner===2?MAP_AMBER32:owner===3?MAP_BOSS32:colors32[i];
+    }
+    lastMapLevel=level;
+    lastMapPaintVersion=ver;
   }
   miniCtx.putImageData(mapImage,0,0);
   const outer=level===0 && zoneOf(view.x)===0 && (Math.abs(view.x)>boundX || Math.abs(view.z)>boundZ);

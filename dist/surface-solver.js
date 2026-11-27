@@ -7,6 +7,7 @@ import {CABIN_X,CABIN_Y,UNDER_X,UNDER_Y} from './layout.js';
 import {SURFACES} from './surfaces.js';
 
 const S=Object.fromEntries(SURFACES.map((surface,i)=>[surface.id.toUpperCase(),i]));
+export const SURFACE_SLOT=S;
 
 const f32=Math.fround;
 const fract32=x=>f32(x-Math.floor(x));
@@ -163,7 +164,9 @@ export function surfaceForJS(kind,r,g,b,level,ceiling,sloped,seed,sx,sy,sz,shape
 }
 
 // Writes (slotTop, slotSide, slotBot) into out[o+3], out[o+7], out[o+11] for one packed instance.
-export function writeSurfaceSlots(out,o,shape) {
+// Optional (sxIn, syIn, szIn) lets callers with orthonormal bases pass known axis lengths directly,
+// avoiding 3x Math.sqrt per instance while remaining bit-identical to 3-argument callers.
+export function writeSurfaceSlots(out,o,shape,sxIn,syIn,szIn) {
   const kind=Math.round(out[o+19]);
   // Fast exit for kinds that never map to a surfaceFor slot.
   if (kind===6 || kind===7 || kind===9 || kind===10 || kind===12 || kind===16 || kind===17 || kind===24 || kind===25 || kind===28) {
@@ -186,12 +189,18 @@ export function writeSurfaceSlots(out,o,shape) {
     const s=out[o+12]>CABIN_X-640?S.SEAT_FABRIC:l<.25?S.NEOPRENE:S.SPORT_MESH;
     out[o+3]=s; out[o+7]=s; out[o+11]=s; return;
   }
-  const a0=out[o], a1=out[o+1], a2=out[o+2];
-  const b0=out[o+4], b1=out[o+5], b2=out[o+6];
-  const c0=out[o+8], c1=out[o+9], c2=out[o+10];
-  const sx=Math.sqrt(a0*a0+a1*a1+a2*a2);
-  const sy=Math.sqrt(b0*b0+b1*b1+b2*b2);
-  const sz=Math.sqrt(c0*c0+c1*c1+c2*c2);
+  const a1=out[o+1], b1=out[o+5], c1=out[o+9];
+  let sx, sy, sz;
+  if (sxIn!==undefined) {
+    sx=sxIn; sy=syIn; sz=szIn;
+  } else {
+    const a0=out[o], a2=out[o+2];
+    const b0=out[o+4], b2=out[o+6];
+    const c0=out[o+8], c2=out[o+10];
+    sx=Math.sqrt(a0*a0+a1*a1+a2*a2);
+    sy=Math.sqrt(b0*b0+b1*b1+b2*b2);
+    sz=Math.sqrt(c0*c0+c1*c1+c2*c2);
+  }
   if (kind===14) {
     if (shape===0) {out[o+3]=S.LEAVES; out[o+7]=S.LEAVES; out[o+11]=S.LEAVES; return;}
     const side=sy>1.2?S.GREEN_WALL:S.HEDGE;
@@ -233,6 +242,51 @@ export function writeSurfaceSlots(out,o,shape) {
   const aboveTop=y+halfY-floorY;
   const aboveMid=y-floorY;
   const aboveBot=y-halfY-floorY;
+  if (kind===4) {
+    // Dedicated bit-identical metal fast path (~50% of dynamic vehicle/train/prop instances).
+    const upY=sy>1e-6?Math.abs(b1/sy):1;
+    const slopedTop=shape===2 || (upY>.6 && upY<.995);
+    const knurled=longest<.26 && l<.3;
+    if (knurled && !(slopedTop && aboveTop>3)) {out[o+3]=S.KNURLED_GRIP; out[o+7]=S.KNURLED_GRIP; out[o+11]=S.KNURLED_GRIP; return;}
+    const blue=b>r+.06, red=r>g+.15;
+    let seed=-1;
+    let topS;
+    if (slopedTop && aboveTop>3) {
+      if (blue) topS=S.SOLAR_PANEL;
+      else {
+        seed=instanceSeed(x,y,z);
+        topS=red?(seed<.5?S.KAWARA_TILE:S.STANDING_SEAM_ROOF):
+          seed<.55?S.STANDING_SEAM_ROOF:seed<.85?S.ZINC_SHINGLE:S.COPPER_PATINA;
+      }
+    } else if (knurled) topS=S.KNURLED_GRIP;
+    else if (longest<.8 && chroma>.12) topS=S.ANODIZED_ALUMINUM;
+    else if (aboveTop<.35) topS=shape===0?S.CAST_IRON:S.DRAIN_GRATE;
+    else if (aboveTop>.7 && aboveTop<1.25 && longest<3) topS=S.LAMINATE_COUNTER;
+    else topS=S.DIAMOND_PLATE;
+    out[o+3]=topS;
+    if (knurled) {out[o+7]=S.KNURLED_GRIP; out[o+11]=S.KNURLED_GRIP; return;}
+    if (longest<.8 && chroma>.12) {out[o+7]=S.ANODIZED_ALUMINUM; out[o+11]=S.ANODIZED_ALUMINUM; return;}
+    if (longest<.9 && l<.36 && chroma<.08) {out[o+7]=S.CERAKOTE; out[o+11]=S.CERAKOTE; return;}
+    if (red && chroma>.15 && l<.5) {out[o+7]=S.CORTEN_STEEL; out[o+11]=S.CORTEN_STEEL; return;}
+    if (longest>4.5) {out[o+7]=S.STEEL_GIRDER; out[o+11]=S.STEEL_GIRDER; return;}
+    if (thinnest<.05 && longest>.5) {
+      if (seed<0) seed=instanceSeed(x,y,z);
+      const s=seed<.35?S.PERFORATED_METAL:seed<.7?S.EXPANDED_METAL:S.WOVEN_MESH;
+      out[o+7]=s; out[o+11]=s; return;
+    }
+    const louverDims=thinnest>.4 && longest<2.2;
+    if (louverDims && aboveBot>3) {out[o+7]=S.METAL_LOUVER; out[o+11]=S.METAL_LOUVER; return;}
+    let rest;
+    const warm=r>b+.06;
+    if (warm && l<.4 && chroma<.15 && longest>1) rest=S.BRONZE_PANEL;
+    else if (chroma<.035 && l>.12) {
+      if (seed<0) seed=instanceSeed(x,y,z);
+      rest=seed<.5?S.GALVANIZED:S.BRUSHED_ALUMINUM;
+    } else rest=(g>r+.015 && g>=b-.02)?S.STEEL_PAINTED_GREEN:S.STEEL_PAINTED_GREY;
+    out[o+7]=(louverDims && aboveMid>3)?S.METAL_LOUVER:rest;
+    out[o+11]=rest;
+    return;
+  }
   const seed=instanceSeed(x,y,z);
   const upY=sy>1e-6?Math.abs(b1/sy):1;
   const sloped=shape===2 || (upY>.6 && upY<.995);

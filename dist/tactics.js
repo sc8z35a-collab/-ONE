@@ -6,12 +6,13 @@ import {NpcCombat,bearing,bossOrTentacle,muzzleClear} from './npc-combat.js';
 import {NpcCover} from './npc-cover.js';
 import {NpcSquads} from './npc-squad.js';
 
-const distance=(a,b)=>Math.hypot(a.x-b.x,a.z-b.z);
+const distance=(a,b)=>{const dx=a.x-b.x,dz=a.z-b.z;return Math.sqrt(dx*dx+dz*dz);};
 const stairs=STAIRS.flatMap(stair=>[0,1].map(level=>({kind:'stairs',id:stair.id+level,level,stair,...stairPoint(stair,level)})));
 const stops=[RAIL,METRO].flatMap((line,level)=>[-1,1].map(side=>({
   kind:'station',id:'station'+level+side,level,side,x:line.center+side*line.x,z:line.platformZ
 })));
 const portals=[...stairs,...stops];
+const TRIP_N=portals.length+2;
 const sectors=[
   [[-40,3],[-37,-19],[-32,19],[-24,-2],[-19,8],[-17,-21],[-8,15],[-6,-11],[0,0],[1,-21],
    [5,16],[12,-13],[17,0],[21,12],[24,-19],[34,5],[39,-19],[39,18]],
@@ -28,9 +29,10 @@ export function trainArrival(rail,side,ready) {
 }
 
 function segmentDistance(point,a,b) {
-  const dx=b.x-a.x,dz=b.z-a.z,length=dx*dx+dz*dz;
+  const dx=b.x-a.x, dz=b.z-a.z, length=dx*dx+dz*dz;
   const t=length?clamp(((point.x-a.x)*dx+(point.z-a.z)*dz)/length,0,1):0;
-  return Math.hypot(point.x-a.x-t*dx,point.z-a.z-t*dz);
+  const ex=point.x-a.x-t*dx, ez=point.z-a.z-t*dz;
+  return Math.sqrt(ex*ex+ez*ez);
 }
 
 function role(actor) {
@@ -44,6 +46,14 @@ export class Tactics {
   constructor(battle) {
     this.battle=battle;
     this.contacts=[new Map(),new Map()];
+    this._intelClock=[-1,-1];
+    this._intelCache=[[null,null],[null,null]];
+    this._tripNodes=[null,null,...portals];
+    this._tripCosts=new Float64Array(TRIP_N);
+    this._tripElapsed=new Float64Array(TRIP_N);
+    this._tripVisited=new Uint8Array(TRIP_N);
+    this._tripPaths=new Array(TRIP_N);
+    this._startCache=new Float64Array(TRIP_N);
     this.states=new WeakMap();
     this.combat=new NpcCombat(battle);
     this.cover=new NpcCover(battle,this.combat);
@@ -70,18 +80,33 @@ export class Tactics {
 
   observe(bot,foe,point=foe) {
     if (!point || !foe) return;
-    this.contacts[bot.team]?.set(foe,{x:point.x,y:point.y,z:point.z,until:this.battle.clock+7.5});
+    const team=bot.team;
+    const table=this.contacts[team];
+    if (!table) return;
+    table.set(foe,{x:point.x,y:point.y,z:point.z,until:this.battle.clock+7.5});
+    this._intelClock[team]=-1;
   }
 
   intelligence(actor,level) {
-    const table=this.contacts[actor.team];
-    if (!table) return [];
-    const now=this.battle.clock, result=[];
+    const team=actor.team;
+    const table=this.contacts[team];
+    if (!table || level>1) return [];
+    const now=this.battle.clock;
+    const stamp=now+((this.battle.raiders?.members?.length??0)*1e5)+((this.battle.boss?.active?1:0)*1e8)+(table.size*1e9);
+    if (this._intelClock[team]===stamp && this._intelCache[team][level]) return this._intelCache[team][level];
+    const r0=[], r1=[];
     for (const [key,entry] of table) {
       if (entry.until<now || !valid(key)) table.delete(key);
-      else if (zoneOf(entry.x)===level) result.push({...entry,fresh:(entry.until-now)/7.5});
+      else {
+        const z=zoneOf(entry.x);
+        if (z===0) r0.push({x:entry.x,y:entry.y,z:entry.z,until:entry.until,fresh:(entry.until-now)/7.5});
+        else if (z===1) r1.push({x:entry.x,y:entry.y,z:entry.z,until:entry.until,fresh:(entry.until-now)/7.5});
+      }
     }
-    return result;
+    this._intelClock[team]=now+((this.battle.raiders?.members?.length??0)*1e5)+((this.battle.boss?.active?1:0)*1e8)+(table.size*1e9);
+    this._intelCache[team][0]=r0;
+    this._intelCache[team][1]=r1;
+    return level===0?r0:r1;
   }
 
   pathLength(a,c) {
@@ -113,13 +138,17 @@ export class Tactics {
     const b=this.battle, level=zoneOf(actor.x), targetLevel=zoneOf(goal.x);
     if (level>=2 || targetLevel>=2) return null;
     const a={x:actor.x,z:actor.z,level}, target={x:goal.x,z:goal.z,level:targetLevel};
-    const nodes=[a,target,...portals], n=nodes.length;
-    const costs=new Float64Array(n).fill(Infinity), elapsed=new Float64Array(n), visited=new Uint8Array(n), paths=new Array(n);
-    const knowledge=[this.intelligence(actor,0),this.intelligence(actor,1)];
+    const nodes=this._tripNodes, n=TRIP_N;
+    nodes[0]=a; nodes[1]=target;
+    const costs=this._tripCosts, elapsed=this._tripElapsed, visited=this._tripVisited, paths=this._tripPaths;
+    costs.fill(Infinity); elapsed.fill(0); visited.fill(0);
+    const k0=this.intelligence(actor,0), k1=this.intelligence(actor,1);
     const riskOf=(from,to)=>{
-      const list=knowledge[from.level];
+      const list=from.level===0?k0:k1;
+      const len=list.length;
+      if (!len) return 0;
       let total=0;
-      for (let i=0;i<list.length;i++) {
+      for (let i=0;i<len;i++) {
         const k=list[i], near=segmentDistance(k,from,to);
         if (near<15) total+=(1-near/15)*k.fresh;
       }
@@ -315,8 +344,9 @@ export class Tactics {
       const list=this.sectorMeta[zone], zContacts=contacts[zone];
       for (let i=0;i<list.length;i++) {
         const meta=list[i], p=meta.p, x=meta.lx;
-        const d=Math.hypot(actorLx-x,actorZ-p.z);
-        if (d<4.3 && zone===level) continue;
+        const ddx=actorLx-x, ddz=actorZ-p.z, d2=ddx*ddx+ddz*ddz;
+        if (d2<18.49 && zone===level) continue;
+        const d=Math.sqrt(d2);
         let fresh=0;
         const pts=meta.pts;
         for (let k=0;k<5;k++) {
@@ -326,16 +356,22 @@ export class Tactics {
         }
         let demand=0;
         for (let k=0;k<zContacts.length;k++) {
-          const c=zContacts[k], dc=Math.hypot(c.x-p.x,c.z-p.z);
-          if (dc<15) demand+=(1-dc/15)*c.fresh;
+          const c=zContacts[k], cx=c.x-p.x, cz=c.z-p.z, dc2=cx*cx+cz*cz;
+          if (dc2<225) demand+=(1-Math.sqrt(dc2)/15)*c.fresh;
         }
         let allies=0, claimed=false;
         for (let k=0;k<own.length;k++) {
           const a=own[k];
-          if (sameLevel(a.x,p.x) && Math.hypot(a.x-p.x,a.z-p.z)<8.5) allies++;
+          if (sameLevel(a.x,p.x)) {
+            const ax=a.x-p.x, az=a.z-p.z;
+            if (ax*ax+az*az<72.25) allies++;
+          }
           if (!claimed) {
             const goal=this.states.get(a)?.plan?.goal;
-            if (goal && sameLevel(goal.x,p.x) && Math.hypot(goal.x-p.x,goal.z-p.z)<4.2) claimed=true;
+            if (goal && sameLevel(goal.x,p.x)) {
+              const gx=goal.x-p.x, gz=goal.z-p.z;
+              if (gx*gx+gz*gz<17.64) claimed=true;
+            }
           }
         }
         const flank=kind==='flank'?(zone===1?5.15:0):zone===0?1.4:0;
@@ -344,13 +380,17 @@ export class Tactics {
         score-=Math.abs(x+home*front)*.080+Math.abs(p.z-lane)*.095+d*.032;
         score+=kind==='support'?demand*.62:kind==='flank'?-demand*1.42:demand*.15;
         if (x*home>15 && demand>.4) score+=demand*(kind==='anchor'?3.9:2.6);
-        if (prevGoal && Math.hypot(p.x-prevGoal.x,p.z-prevGoal.z)<4) score-=2.5;
+        if (prevGoal) {
+          const px=p.x-prevGoal.x, pz=p.z-prevGoal.z;
+          if (px*px+pz*pz<16) score-=2.5;
+        }
         ranks.push({p,score});
       }
     }
     ranks.sort((a,c)=>c.score-a.score);
     let best=null,value=-Infinity;
-    const startCache=new Float64Array(portals.length+2).fill(-1);
+    const startCache=this._startCache;
+    startCache.fill(-1);
     const limit=ranks.length<4?ranks.length:4;
     for (let i=0;i<limit;i++) {
       const {p,score}=ranks[i];
@@ -369,22 +409,27 @@ export class Tactics {
     if (b.clock>=s.refillAt || !s.refill) {
       s.refillAt=b.clock+.78;
       let chosen=null,best=-Infinity;
+      const eH=enemy?enemy.y+height(enemy):0;
+      const distAE=enemy?distance(actor,enemy):0;
       for (const [dx,dz] of [[0,0],[-4,0],[4,0],[0,-4],[0,4],[-6,-5],[-6,5],[6,-5],[6,5],[-10,0],[10,0],[0,-8],[0,8]]) {
         const p=nav.nearest({x:actor.x+dx,z:actor.z+dz});
-        if (!p || distance(actor,p)>13.4) continue;
+        if (!p) continue;
+        const dAP=distance(actor,p);
+        if (dAP>13.4) continue;
         const ground=b.world.floor(p.x,p.z);
         const owner=b.paint.get(p.x,p.z,ground.layer);
-        const screened=enemy && b.traceShot([enemy.x,enemy.y+height(enemy),enemy.z],[p.x,ground.y+.62,p.z])?.t<.95;
-        if (enemy && !screened && distance(p,enemy)<7.3) continue;
-        const score=(owner===actor.team+1?7.4:owner?-5:0)+(screened?7:0)-distance(actor,p)*.48+
-          (enemy?clamp((distance(p,enemy)-distance(actor,enemy))*.48,-4,4):0);
+        const screened=enemy && b.traceShot([enemy.x,eH,enemy.z],[p.x,ground.y+.62,p.z])?.t<.95;
+        const dPE=enemy?distance(p,enemy):0;
+        if (enemy && !screened && dPE<7.3) continue;
+        const score=(owner===actor.team+1?7.4:owner?-5:0)+(screened?7:0)-dAP*.48+
+          (enemy?clamp((dPE-distAE)*.48,-4,4):0);
         if (score>best) {best=score;chosen=p;}
       }
       s.refill=chosen;
     }
     actor.intent=ink===actor.team+1?'自インクで立て直す':'遮蔽物へ退避';
     if (s.refill && distance(actor,s.refill)>.72 && b.navigate(actor,s.refill,dt,5.32,ink===actor.team+1)) return true;
-    if (enemy && !b.traceShot([enemy.x,enemy.y+height(enemy),enemy.z],[actor.x,actor.y+.55,actor.z],true)) return false;
+    if (enemy && !b.lineBlocked(enemy.x,enemy.y+height(enemy),enemy.z,actor.x,actor.y+.55,actor.z)) return false;
     b.motion.drive(actor,0,0,dt,{swim:true});
     return true;
   }

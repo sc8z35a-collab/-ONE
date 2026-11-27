@@ -39,6 +39,10 @@ export function limbJoint(root,end,upper,lower,pole) {
   return [rx+ax*along+sx*s,ry+ay*along+sy*s,rz+az*along+sz*s];
 }
 
+const _segProbe={x:0,y:0,z:0,radius:0,height:0};
+const _hopProbe={x:0,y:0,z:0,car:null,apartmentVisits:0};
+const _avoidOut=[0,0];
+
 export class NpcMotion {
   constructor(battle) {
     this.battle=battle;
@@ -106,7 +110,7 @@ export class NpcMotion {
   }
 
   avoid(a,vx,vz) {
-    if (vx*vx+vz*vz<.0225) return [vx,vz];
+    if (vx*vx+vz*vz<.0225) {_avoidOut[0]=vx; _avoidOut[1]=vz; return _avoidOut;}
     const b=this.battle, ax=a.x, ay=a.y, az=a.z, ra=radius(a), level=zoneOf(ax);
     let pushX=0, pushZ=0, slow=1;
     const check=(other,ox)=>{
@@ -118,10 +122,11 @@ export class NpcMotion {
       const denom=ux*ux+uz*uz;
       let t=toward/(denom>.1?denom:.1);
       if (t<0) t=0; else if (t>.43) t=.43;
-      const px=rx-ux*t, pz=rz-uz*t, near=Math.hypot(px,pz);
+      const px=rx-ux*t, pz=rz-uz*t, near2=px*px+pz*pz;
       const limit=ra+radius(other)+.42;
-      if (near>=limit || (toward<0 && dist>limit*.75)) return;
+      if (near2>=limit*limit || (toward<0 && dist>limit*.75)) return;
       if (dist>1.5 && b.world.blocked((ax+ox)*.5,(ay+other.y)*.5+.36,(az+other.z)*.5,.13,.68)) return;
+      const near=Math.sqrt(near2);
       const cross=rx*vz-rz*vx;
       const side=Math.abs(cross)<.42?1:cross>0?1:-1;
       const invD=1/dist, f=1-near/limit, weight=f*(dist<1.6?3.6:2.3);
@@ -150,35 +155,47 @@ export class NpcMotion {
         check(other,ox);
       }
     }
-    return [vx*slow+pushX,vz*slow+pushZ];
+    _avoidOut[0]=vx*slow+pushX;
+    _avoidOut[1]=vz*slow+pushZ;
+    return _avoidOut;
   }
 
   segment(a,x,z,r=radius(a),h=height(a)) {
-    const b=this.battle, n=Math.ceil(Math.hypot(x-a.x,z-a.z)/.36);
-    const stairs=stairLane(a.x,a.z), probe={x:a.x,y:a.y,z:a.z,radius:r,height:h};
+    const b=this.battle, dx=x-a.x, dz=z-a.z;
+    const n=Math.ceil(Math.sqrt(dx*dx+dz*dz)/.36);
+    if (!n) return true;
+    const stairs=stairLane(a.x,a.z);
+    const probe=_segProbe;
+    probe.x=a.x; probe.y=a.y; probe.z=a.z; probe.radius=r; probe.height=h;
+    const invN=1/n, sx=dx*invN, sz=dz*invN;
+    const world=b.world, stage=b.stage, vehicles=b.vehicles, car=a.car;
+    const transit=b.transit, metro=b.metro;
+    let px=a.x, py=a.y, pz=a.z;
     for (let i=1;i<=n;i++) {
-      probe.x=a.x+(x-a.x)*i/n;
-      probe.z=a.z+(z-a.z)*i/n;
-      const floor=b.world.support(probe.x,probe.y,probe.z);
-      if (Math.abs(floor.y-probe.y)>.42 || !stairs && floor.stair) return false;
-      probe.y=floor.y;
-      if (b.world.blocked(probe.x,probe.y+.028,probe.z,r,h) ||
-          b.stage.blocked(probe.x,probe.y+.028,probe.z,r,h) ||
-          b.vehicles?.blocked(probe.x,probe.y+.028,probe.z,r,h,a.car) ||
-          !b.stage.canEnter(a,probe.x,probe.y,probe.z) ||
-          b.transit.blocksActor(probe) || b.metro.blocksActor(probe)) return false;
+      px+=sx; pz+=sz;
+      const floor=world.support(px,py,pz);
+      const dy=floor.y-py;
+      if (dy>.42 || dy<-.42 || (!stairs && floor.stair)) return false;
+      py=floor.y;
+      if (world.blocked(px,py+.028,pz,r,h) ||
+          stage.blocked(px,py+.028,pz,r,h) ||
+          vehicles?.blocked(px,py+.028,pz,r,h,car) ||
+          !stage.canEnter(a,px,py,pz)) return false;
+      probe.x=px; probe.y=py; probe.z=pz;
+      if (transit.blocksActor(probe) || metro.blocksActor(probe)) return false;
     }
     return true;
   }
 
   canHop(a,x,z) {
     if (a.airborne || a.giant || zoneOf(a.x)>=2 || stairLane(a.x,a.z)) return false;
-    const b=this.battle,r=radius(a),h=height(a), sx=(a.x+x)/2, sz=(a.z+z)/2;
+    const b=this.battle, r=radius(a), h=height(a), sx=(a.x+x)*.5, sz=(a.z+z)*.5;
     const land=b.world.support(x,a.y+.98,z);
     if (land.y>a.y+.77 || land.y<a.y-.46 || this.segment(a,x,z,r,h)) return false;
-    return !b.world.blocked(sx,a.y+.81,sz,r,h) && !b.world.blocked(a.x,a.y+.73,a.z,r,h) &&
-      !b.stage.blocked(sx,a.y+.81,sz,r,h) &&
-      this.segment({...a,y:land.y,x:sx,z:sz},x,z,r,h);
+    if (b.world.blocked(sx,a.y+.81,sz,r,h) || b.world.blocked(a.x,a.y+.73,a.z,r,h) ||
+      b.stage.blocked(sx,a.y+.81,sz,r,h)) return false;
+    _hopProbe.x=sx; _hopProbe.y=land.y; _hopProbe.z=sz; _hopProbe.car=a.car??null; _hopProbe.apartmentVisits=a.apartmentVisits??0;
+    return this.segment(_hopProbe,x,z,r,h);
   }
 
   turn(a,yaw,pitch,dt) {
@@ -192,18 +209,22 @@ export class NpcMotion {
 
   drive(a,vx,vz,dt,{swim=false,jump=false,look,pitch,brace=0,peek=0,ready=0,emergency=false}={}) {
     const b=this.battle, previous=zoneOf(a.x), oldX=a.x, oldZ=a.z;
-    const desiredSpeed=Math.hypot(vx,vz);
+    const desiredSpeed=Math.sqrt(vx*vx+vz*vz);
     if (look!==undefined || desiredSpeed>.09) this.turn(a,look??heading(vx,vz),pitch,dt);
-    if (!a.isBoss) [vx,vz]=this.avoid(a,vx,vz);
-    const ax=vx-(a.driveX??0),az=vz-(a.driveZ??0);
+    if (!a.isBoss) {
+      const av=this.avoid(a,vx,vz);
+      vx=av[0]; vz=av[1];
+    }
+    const ax=vx-(a.driveX??0), az=vz-(a.driveZ??0);
     const rate=(emergency?68:a.isBoss?8:a.airborne?8.5:desiredSpeed<.12?33:27)*(a.agility??1);
-    const fraction=Math.min(1,rate*dt/Math.max(.001,Math.hypot(ax,az)));
+    const aMag=Math.sqrt(ax*ax+az*az);
+    const fraction=Math.min(1,rate*dt/(aMag>.001?aMag:.001));
     a.driveX=(a.driveX??0)+ax*fraction;
     a.driveZ=(a.driveZ??0)+az*fraction;
     if (a.isBoss) {
       b.stepActor(a,a.driveX*dt,a.driveZ*dt);
-      a.vx=(a.x-oldX)/dt;a.vz=(a.z-oldZ)/dt;
-      a.steps=(a.steps??0)+Math.hypot(a.vx,a.vz)*dt;
+      a.vx=(a.x-oldX)/dt; a.vz=(a.z-oldZ)/dt;
+      a.steps=(a.steps??0)+Math.sqrt(a.vx*a.vx+a.vz*a.vz)*dt;
     } else b.move(a,a.driveX,a.driveZ,dt,swim,jump);
     const current=zoneOf(a.x);
     if (current!==previous) {
@@ -211,17 +232,18 @@ export class NpcMotion {
       this.groups[current].push(a);
       return;
     }
-    const speed=Math.hypot(a.vx??0,a.vz??0);
-    const walkingYaw=heading(a.vx??0,a.vz??0);
+    const avx=a.vx??0, avz=a.vz??0;
+    const speed=Math.sqrt(avx*avx+avz*avz);
+    const walkingYaw=heading(avx,avz);
     const body=a.bodyYaw??a.yaw;
     const target=speed>1?look===undefined?walkingYaw:a.yaw+clamp(angle(a.yaw,walkingYaw),-.99,.99)*.60:a.yaw;
     a.bodyYaw=angle(0,body+clamp(angle(body,target),-dt*(a.isBoss?2.4:6.1),dt*(a.isBoss?2.4:6.1)));
-    const follow=(from,to)=>from+(to-from)*(1-Math.exp(-dt*13));
-    a.poseBank=follow(a.poseBank??0,clamp((ax*Math.cos(a.bodyYaw)+az*Math.sin(a.bodyYaw))*.048,-.26,.26));
-    a.brace=follow(a.brace??0,brace);
-    a.peek=follow(a.peek??0,peek);
-    a.readyPose=follow(a.readyPose??0,ready);
-    a.flare=follow(a.flare??0,a.damageAge<.11?Math.exp(-a.damageAge*15):0);
+    const blend=1-Math.exp(-dt*13);
+    a.poseBank=(a.poseBank??0)+(clamp((ax*Math.cos(a.bodyYaw)+az*Math.sin(a.bodyYaw))*.048,-.26,.26)-(a.poseBank??0))*blend;
+    a.brace=(a.brace??0)+(brace-(a.brace??0))*blend;
+    a.peek=(a.peek??0)+(peek-(a.peek??0))*blend;
+    a.readyPose=(a.readyPose??0)+(ready-(a.readyPose??0))*blend;
+    a.flare=(a.flare??0)+((a.damageAge<.11?Math.exp(-a.damageAge*15):0)-(a.flare??0))*blend;
     if (!a.isBoss && !a.isRaider) this.feet(a,dt,speed);
   }
 
@@ -231,42 +253,56 @@ export class NpcMotion {
       return;
     }
     const yaw=a.bodyYaw??a.yaw, b=this.battle;
+    const cy=Math.cos(yaw), sy=Math.sin(yaw);
     const place=(side,reach)=>{
-      const x=a.x-Math.cos(yaw)*side*.177+(a.vx??0)*reach;
-      const z=a.z-Math.sin(yaw)*side*.177+(a.vz??0)*reach;
+      const x=a.x-cy*side*.177+(a.vx??0)*reach;
+      const z=a.z-sy*side*.177+(a.vz??0)*reach;
       const floor=b.stage.support(x,a.y+.19,z,b.world.support(x,a.y+.19,z));
       if (Math.abs(floor.y-a.y)>.55 || b.world.blocked(x,floor.y+.02,z,.096,.26) ||
           b.stage.blocked(x,floor.y+.02,z,.096,.26)) return [a.x,a.y+.045,a.z,yaw];
       return [x,floor.y+.045,z,yaw];
     };
     if (!a.feet || !a.gait) {
-      a.feet=[...place(-1,0),...place(1,0)];
+      const l=place(-1,0), r=place(1,0);
+      a.feet=[l[0],l[1],l[2],l[3],r[0],r[1],r[2],r[3]];
       a.gait={leg:a.index%2,age:0,start:null,end:null,length:0};
     }
-    const gait=a.gait, offset=gait.leg*4, side=gait.leg===0?-1:1;
+    const gait=a.gait, offset=gait.leg*4, side=gait.leg===0?-1:1, feet=a.feet;
     if (!gait.start) {
-      const neutral=place(side,0), other=4-offset;
-      const stretch=i=>Math.hypot(a.feet[i]-a.x,a.feet[i+2]-a.z);
-      const turn=Math.abs(angle(a.feet[offset+3],yaw))>.88;
-      if (stretch(offset)<.35 && stretch(other)>stretch(offset)+.15) {
+      const other=4-offset;
+      const dx0=feet[offset]-a.x, dz0=feet[offset+2]-a.z, st0=Math.sqrt(dx0*dx0+dz0*dz0);
+      const dx1=feet[other]-a.x, dz1=feet[other+2]-a.z, st1=Math.sqrt(dx1*dx1+dz1*dz1);
+      if (st0<.35 && st1>st0+.15) {
         gait.leg=1-gait.leg;
         return;
       }
-      if (stretch(offset)<(speed>.25?.35:.29) && Math.abs(a.feet[offset+1]-neutral[1])<.16 && !turn) return;
-      gait.start=a.feet.slice(offset,offset+4);
+      const turn=Math.abs(angle(feet[offset+3],yaw))>.88;
+      if (st0<(speed>.25?.35:.29) && !turn) {
+        const nx=a.x-cy*side*.177, nz=a.z-sy*side*.177;
+        const nFloor=b.stage.support(nx,a.y+.19,nz,b.world.support(nx,a.y+.19,nz));
+        const ny=(Math.abs(nFloor.y-a.y)>.55 || b.world.blocked(nx,nFloor.y+.02,nz,.096,.26) ||
+          b.stage.blocked(nx,nFloor.y+.02,nz,.096,.26))?a.y+.045:nFloor.y+.045;
+        if (Math.abs(feet[offset+1]-ny)<.16) return;
+      }
+      gait.start=[feet[offset],feet[offset+1],feet[offset+2],feet[offset+3]];
       gait.end=place(side,Math.min(.115,.56/Math.max(.1,speed)));
       gait.age=0;
       gait.length=clamp(.217-speed*.019,.098,.217);
     }
     const t=clamp((gait.age+=dt)/gait.length,0,1), f=smooth(t);
-    for (let i=0;i<3;i++) a.feet[offset+i]=t===1?gait.end[i]:gait.start[i]+(gait.end[i]-gait.start[i])*f;
-    if (t<1) {
+    const gs=gait.start, ge=gait.end;
+    if (t===1) {
+      feet[offset]=ge[0]; feet[offset+1]=ge[1]; feet[offset+2]=ge[2];
+    } else {
+      feet[offset]=gs[0]+(ge[0]-gs[0])*f;
+      feet[offset+1]=gs[1]+(ge[1]-gs[1])*f;
+      feet[offset+2]=gs[2]+(ge[2]-gs[2])*f;
       const lift=Math.sin(t*Math.PI)*(.105+Math.min(speed,6)*.021);
-      const x=a.feet[offset],z=a.feet[offset+2], y=a.feet[offset+1];
+      const x=feet[offset], z=feet[offset+2], y=feet[offset+1];
       const ground=b.stage.support(x,y+.18,z,b.world.support(x,y+.18,z));
-      a.feet[offset+1]=Math.max(y,ground.y+.045)+lift;
+      feet[offset+1]=Math.max(y,ground.y+.045)+lift;
     }
-    a.feet[offset+3]=gait.start[3]+angle(gait.start[3],gait.end[3])*f;
+    feet[offset+3]=gs[3]+angle(gs[3],ge[3])*f;
     if (t===1) {
       gait.leg=1-gait.leg;
       gait.start=gait.end=null;

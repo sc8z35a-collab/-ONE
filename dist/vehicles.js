@@ -1,4 +1,4 @@
-import {TAU,add,clamp,cross,forward,mix,scale,unit} from './render.js';
+import {Renderer,STRIDE,TAU,add,clamp,cross,forward,mix,packInstance,scale,unit} from './render.js';
 import {TEAM_INK} from './world.js';
 import {PAINT_RADIUS_FACTOR} from './weapons.js';
 import {localX,sameLevel,zoneOf} from './layout.js';
@@ -11,6 +11,36 @@ export const CAR_ENTER_RANGE=5.6;
 
 const T=Math.PI/2;
 const INK_COLORS=[TEAM_INK[0],TEAM_INK[1],0xa66fbd];
+const _CAR_SHAPE_IDS={box:1,ramp:2,bevel:3,soft:4};
+const _CAR_SYMMETRIC=new Set(['box','bevel','cylinder','taper','cone','orb','soft','limb','mantle','ring']);
+
+function syncCarTrig(car) {
+  if (car._yawCached===car.yaw) return;
+  const y=car.yaw;
+  car._yawCached=y;
+  car._fx=Math.sin(y);
+  car._fz=-Math.cos(y);
+  car._rx=Math.cos(y);
+  car._rz=Math.sin(y);
+  if (car._rBound===undefined) car._rBound=Math.sqrt((car.w*.5)*(car.w*.5)+(car.d*.5)*(car.d*.5))+.25;
+}
+
+function recordCarTemplate(fn) {
+  const buckets=new Map();
+  const rec={
+    add(type,x,y,z,w,h,d,tint,kind=0,opts={}) {
+      let arr=buckets.get(type);
+      if (!arr) {arr=[];buckets.set(type,arr);}
+      const o=arr.length;
+      arr.length=o+STRIDE;
+      packInstance(arr,o,x,y,z,w,h,d,tint,kind,opts,_CAR_SHAPE_IDS[type]??0,_CAR_SYMMETRIC.has(type));
+    }
+  };
+  fn(rec);
+  const out=[];
+  for (const [type,arr] of buckets) out.push([type,new Float32Array(arr)]);
+  return out;
+}
 
 function lerpRgb(base,tint,t) {
   const f=clamp(t,0,1);
@@ -56,39 +86,95 @@ const _vDyn={dynamic:true};
 
 // Ray vs oriented bounding box in car-local space (local X = forward, local Z = right, local Y = up).
 function rayCar(car,start,end,clearance=0,limit=1) {
-  const dx=end[0]-start[0], dy=end[1]-start[1], dz=end[2]-start[2];
+  syncCarTrig(car);
+  const sx=start[0], sy=start[1], sz=start[2];
+  const ex=end[0], ey=end[1], ez=end[2];
   const hw=car.w*.5+clearance, hh=car.h*.5+clearance, hd=car.d*.5+clearance;
   const cx=car.x, cy=car.y+car.h*.5, cz=car.z;
-  const rBound=Math.hypot(hw,hd)+.25;
-  const minX=start[0]<end[0]?start[0]:end[0], maxX=start[0]>end[0]?start[0]:end[0];
-  const minZ=start[2]<end[2]?start[2]:end[2], maxZ=start[2]>end[2]?start[2]:end[2];
-  const minY=start[1]<end[1]?start[1]:end[1], maxY=start[1]>end[1]?start[1]:end[1];
-  if (maxX<cx-rBound || minX>cx+rBound || maxZ<cz-rBound || minZ>cz+rBound || maxY<car.y-clearance || minY>car.y+car.h+clearance) return null;
+  const rBound=car._rBound+clearance*1.415;
+  const minX=sx<ex?sx:ex, maxX=sx>ex?sx:ex;
+  if (maxX<cx-rBound || minX>cx+rBound) return null;
+  const minZ=sz<ez?sz:ez, maxZ=sz>ez?sz:ez;
+  if (maxZ<cz-rBound || minZ>cz+rBound) return null;
+  const minY=sy<ey?sy:ey, maxY=sy>ey?sy:ey;
+  if (maxY<car.y-clearance || minY>car.y+car.h+clearance) return null;
 
-  const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
-  const rx=Math.cos(car.yaw), rz=Math.sin(car.yaw);
-  const ox=start[0]-cx, oy=start[1]-cy, oz=start[2]-cz;
-  const lx=ox*fx+oz*fz, ly=oy, lz=ox*rx+oz*rz;
-  const dlx=dx*fx+dz*fz, dly=dy, dlz=dx*rx+dz*rz;
+  const dx=ex-sx, dy=ey-sy, dz=ez-sz;
+  const fx=car._fx, fz=car._fz, rx=car._rx, rz=car._rz;
+  const ox=sx-cx, oy=sy-cy, oz=sz-cz;
+  const lx=ox*fx+oz*fz, lz=ox*rx+oz*rz;
+  const dlx=dx*fx+dz*fz, dlz=dx*rx+dz*rz;
 
   let near=0, far=limit, axis=1, sign=1;
-  const test=(o,d,h,ax)=>{
-    if (d>-1e-6 && d<1e-6) return o>=-h && o<=h;
-    const inv=1/d, t0=(-h-o)*inv, t1=(h-o)*inv;
+  if (dlx>-1e-6 && dlx<1e-6) {if (lx<-hw || lx>hw) return null;}
+  else {
+    const inv=1/dlx, t0=(-hw-lx)*inv, t1=(hw-lx)*inv;
     const enter=t0<t1?t0:t1, leave=t0<t1?t1:t0;
-    if (enter>near) {near=enter;axis=ax;sign=t0<t1?-1:1;}
+    if (enter>near) {near=enter;axis=0;sign=t0<t1?-1:1;}
     if (leave<far) far=leave;
-    return far>=near;
-  };
-  if (!test(lx,dlx,hw,0) || !test(ly,dly,hh,1) || !test(lz,dlz,hd,2)) return null;
+    if (far<near) return null;
+  }
+  if (dy>-1e-6 && dy<1e-6) {if (oy<-hh || oy>hh) return null;}
+  else {
+    const inv=1/dy, t0=(-hh-oy)*inv, t1=(hh-oy)*inv;
+    const enter=t0<t1?t0:t1, leave=t0<t1?t1:t0;
+    if (enter>near) {near=enter;axis=1;sign=t0<t1?-1:1;}
+    if (leave<far) far=leave;
+    if (far<near) return null;
+  }
+  if (dlz>-1e-6 && dlz<1e-6) {if (lz<-hd || lz>hd) return null;}
+  else {
+    const inv=1/dlz, t0=(-hd-lz)*inv, t1=(hd-lz)*inv;
+    const enter=t0<t1?t0:t1, leave=t0<t1?t1:t0;
+    if (enter>near) {near=enter;axis=2;sign=t0<t1?-1:1;}
+    if (leave<far) far=leave;
+    if (far<near) return null;
+  }
   if (near<0 || near>=limit) return null;
   const normal=axis===0?[fx*sign,0,fz*sign]:axis===1?[0,sign,0]:[rx*sign,0,rz*sign];
   return {
     t:near,
-    position:[start[0]+dx*near,start[1]+dy*near,start[2]+dz*near],
+    position:[sx+dx*near,sy+dy*near,sz+dz*near],
     normal,
     vehicle:car
   };
+}
+
+function rayCarAny(car,sx,sy,sz,dx,dy,dz,minX,maxX,minY,maxY,minZ,maxZ,limit) {
+  syncCarTrig(car);
+  const cx=car.x, cz=car.z, rBound=car._rBound;
+  if (maxX<cx-rBound || minX>cx+rBound || maxZ<cz-rBound || minZ>cz+rBound || maxY<car.y || minY>car.y+car.h) return false;
+  const hw=car.w*.5, hh=car.h*.5, hd=car.d*.5;
+  const fx=car._fx, fz=car._fz, rx=car._rx, rz=car._rz;
+  const ox=sx-cx, oy=sy-(car.y+hh), oz=sz-cz;
+  const lx=ox*fx+oz*fz, lz=ox*rx+oz*rz;
+  const dlx=dx*fx+dz*fz, dlz=dx*rx+dz*rz;
+  let near=0, far=limit;
+  if (dlx>-1e-6 && dlx<1e-6) {if (lx<-hw || lx>hw) return false;}
+  else {
+    const inv=1/dlx, t0=(-hw-lx)*inv, t1=(hw-lx)*inv;
+    const enter=t0<t1?t0:t1, leave=t0<t1?t1:t0;
+    if (enter>near) near=enter;
+    if (leave<far) far=leave;
+    if (far<near) return false;
+  }
+  if (dy>-1e-6 && dy<1e-6) {if (oy<-hh || oy>hh) return false;}
+  else {
+    const inv=1/dy, t0=(-hh-oy)*inv, t1=(hh-oy)*inv;
+    const enter=t0<t1?t0:t1, leave=t0<t1?t1:t0;
+    if (enter>near) near=enter;
+    if (leave<far) far=leave;
+    if (far<near) return false;
+  }
+  if (dlz>-1e-6 && dlz<1e-6) {if (lz<-hd || lz>hd) return false;}
+  else {
+    const inv=1/dlz, t0=(-hd-lz)*inv, t1=(hd-lz)*inv;
+    const enter=t0<t1?t0:t1, leave=t0<t1?t1:t0;
+    if (enter>near) near=enter;
+    if (leave<far) far=leave;
+    if (far<near) return false;
+  }
+  return near>=0 && near<limit;
 }
 
 function pointInCar(car,x,y,z,radius,height) {
@@ -97,9 +183,8 @@ function pointInCar(car,x,y,z,radius,height) {
   const dx=x-car.x, dz=z-car.z;
   const maxR=car.w*.5+radius+.3;
   if (dx*dx+dz*dz>maxR*maxR) return false;
-  const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
-  const rx=Math.cos(car.yaw), rz=Math.sin(car.yaw);
-  const lx=dx*fx+dz*fz, lz=dx*rx+dz*rz;
+  syncCarTrig(car);
+  const lx=dx*car._fx+dz*car._fz, lz=dx*car._rx+dz*car._rz;
   const hw=car.w*.5, hd=car.d*.5;
   const cx=lx<-hw?lx+hw:lx>hw?lx-hw:0;
   const cz=lz<-hd?lz+hd:lz>hd?lz-hd:0;
@@ -112,6 +197,9 @@ export class Vehicles {
     const defs=battle.world?.vehicleDefs ?? [];
     this.cars=defs.map((def,index)=>this.makeCar(def,index));
     this.ramHits=new Map();
+    let maxY=0;
+    for (let i=0;i<this.cars.length;i++) {const y=this.cars[i].y+this.cars[i].h; if (y>maxY) maxY=y;}
+    this._maxCarY=maxY+.35;
   }
 
   makeCar(def,index) {
@@ -120,7 +208,7 @@ export class Vehicles {
     const maxHp=style===2?320:260;
     const y=this.battle.world?.floor(def.x,def.z).y ?? 0;
     const yaw=(def.dir??1)>0?T:-T;
-    return {
+    const car={
       id:def.id ?? ('car-'+index),
       index,
       spawnX:def.x, spawnY:y, spawnZ:def.z, spawnYaw:yaw,
@@ -135,8 +223,13 @@ export class Vehicles {
       stain:0, stainTeam:-1,
       ownerTeam:-1, driver:null,
       paintTimer:0, explodedAt:-99, explodeTeam:-1, respawnAt:0,
-      hitFlash:-9
+      hitFlash:-9,
+      _yawCached:NaN, _fx:0, _fz:0, _rx:0, _rz:0,
+      _rBound:Math.sqrt((w*.5)*(w*.5)+(d*.5)*(d*.5))+.25,
+      _tplHi:null, _tplLo:null
     };
+    syncCarTrig(car);
+    return car;
   }
 
   live() {
@@ -163,15 +256,16 @@ export class Vehicles {
     if (zoneOf(x)!==0) return surface;
     let top=surface.y;
     const maxY=y+.12;
-    for (let i=0;i<this.cars.length;i++) {
-      const car=this.cars[i];
+    const cars=this.cars;
+    for (let i=0;i<cars.length;i++) {
+      const car=cars[i];
       if (!car.alive || car.driver) continue;
       const roof=car.y+car.h;
       if (roof<=top+.12 || roof>maxY) continue;
       const dx=x-car.x, dz=z-car.z;
-      const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
-      const rx=Math.cos(car.yaw), rz=Math.sin(car.yaw);
-      const lx=dx*fx+dz*fz, lz=dx*rx+dz*rz;
+      if (dx*dx+dz*dz>car._rBound*car._rBound) continue;
+      syncCarTrig(car);
+      const lx=dx*car._fx+dz*car._fz, lz=dx*car._rx+dz*car._rz;
       if (Math.abs(lx)<car.w*.48 && Math.abs(lz)<car.d*.48) top=roof;
     }
     return top>surface.y?{...surface,y:top,raised:true}:surface;
@@ -180,13 +274,32 @@ export class Vehicles {
   trace(start,end,clearance=0,limit=1,ignoreCar=null) {
     if (zoneOf(start[0])!==0) return null;
     let best=null, bestT=limit ?? 1;
-    for (let i=0;i<this.cars.length;i++) {
-      const car=this.cars[i];
+    const cars=this.cars;
+    for (let i=0;i<cars.length;i++) {
+      const car=cars[i];
       if (car===ignoreCar || !car.alive) continue;
       const hit=rayCar(car,start,end,clearance,bestT);
       if (hit && hit.t<bestT) {bestT=hit.t;best=hit;}
     }
     return best;
+  }
+
+  traceAny(sx,sy,sz,ex,ey,ez,limit=1,ignoreCar=null) {
+    if (zoneOf(sx)!==0) return false;
+    const cars=this.cars, n=cars.length;
+    if (!n) return false;
+    const minY=sy<ey?sy:ey;
+    if (minY>this._maxCarY) return false;
+    const minX=sx<ex?sx:ex, maxX=sx>ex?sx:ex;
+    const maxY=sy>ey?sy:ey;
+    const minZ=sz<ez?sz:ez, maxZ=sz>ez?sz:ez;
+    const dx=ex-sx, dy=ey-sy, dz=ez-sz;
+    for (let i=0;i<n;i++) {
+      const car=cars[i];
+      if (car===ignoreCar || !car.alive) continue;
+      if (rayCarAny(car,sx,sy,sz,dx,dy,dz,minX,maxX,minY,maxY,minZ,maxZ,limit)) return true;
+    }
+    return false;
   }
 
   // ---- Boarding & Exiting ([R] key / transport button) ----
@@ -200,11 +313,13 @@ export class Vehicles {
       const car=this.cars[i];
       if (!car.alive || car.driver) continue;
       const dx=actor.x-car.x, dz=actor.z-car.z;
-      const fx=Math.sin(car.yaw), fz=-Math.cos(car.yaw);
-      const rx=Math.cos(car.yaw), rz=Math.sin(car.yaw);
-      const lx=Math.abs(dx*fx+dz*fz), lz=Math.abs(dx*rx+dz*rz);
-      const edgeDist=Math.hypot(Math.max(0,lx-car.w*.5),Math.max(0,lz-car.d*.5));
-      if (edgeDist<=2.85 && Math.hypot(dx,dz)<best+car.w*.5 && Math.abs(car.y-actor.y)<2.4) {
+      const maxD=best+car.w*.5;
+      if (dx*dx+dz*dz>=maxD*maxD || Math.abs(car.y-actor.y)>=2.4) continue;
+      syncCarTrig(car);
+      const lx=Math.abs(dx*car._fx+dz*car._fz), lz=Math.abs(dx*car._rx+dz*car._rz);
+      const ex=lx>car.w*.5?lx-car.w*.5:0, ez=lz>car.d*.5?lz-car.d*.5:0;
+      const edgeDist=Math.sqrt(ex*ex+ez*ez);
+      if (edgeDist<=2.85) {
         best=edgeDist; nearest=car;
       }
     }
@@ -615,6 +730,7 @@ export class Vehicles {
 
   update(dt) {
     const b=this.battle;
+    let maxCarY=0;
     for (let i=0;i<this.cars.length;i++) {
       const car=this.cars[i];
       if (!car.alive) {
@@ -627,6 +743,7 @@ export class Vehicles {
               rpm:900,gear:1,throttle:0,braking:false,drifting:false,driftCharge:0,boostFlame:0,impactShake:0,
               alive:true,hp:car.maxHp,stain:0,stainTeam:-1,ownerTeam:-1,driver:null,respawnAt:0
             });
+            const topY=car.y+car.h; if (topY>maxCarY) maxCarY=topY;
           }
         }
         continue;
@@ -659,6 +776,7 @@ export class Vehicles {
           }
         }
       }
+      const topY=car.y+car.h; if (topY>maxCarY) maxCarY=topY;
       // Dripping enemy ink & warning sparks when heavily dyed by enemy ink (>= 65%)
       if (car.stain>=.65 && b.rng()<dt*(8+car.stain*12)) {
         b.drops.push({
@@ -669,6 +787,7 @@ export class Vehicles {
         });
       }
     }
+    this._maxCarY=maxCarY+.35;
   }
 
   // ---- Cloud Snapshot & Checkpoint Serialization ----
@@ -749,14 +868,6 @@ function drawVehicle(r,car,clock,dist=10,raining=false,hasFrustum=false) {
   const {x,y,z,yaw,w,d,style,baseTint,stain,stainTeam,driver,hitFlash}=car;
   const hi=!r.lite && !r.ultralite && dist<42;
   const inView=!hasFrustum || r.inFrustum(x,y+1,z,w+2.4);
-  const inkColor=INK_COLORS[stainTeam>=0?stainTeam:1] ?? INK_COLORS[1];
-  const flash=clock-hitFlash<.10?.38:0;
-  const warnPulse=stain>=.72 && Math.sin(clock*22)>0?.26:0;
-  // Clearcoat metallic paint smoothly dyes toward enemy ink color as stain builds!
-  const bodyTint=lerpRgb(baseTint,inkColor,clamp(stain*.92+flash*.4,0,1));
-  const roofTint=lerpRgb(baseTint,inkColor,clamp(stain*1.05+warnPulse,0,1));
-  const trim=0x9ba6a4, chrome=0xcfd6d2, darkMetal=0x2c363b, rubber=0x1e2629, glass=driver?0x4c7e8f:0x36525c;
-  const bodyMat=20; // Metallic armor clearcoat sheen for automotive lacquer!
 
   // Soft grounded AO contact shadow beneath the car (skipped cleanly when off-screen!)
   const visualYaw=yaw+(car.driftAngle??0);
@@ -771,6 +882,49 @@ function drawVehicle(r,car,clock,dist=10,raining=false,hasFrustum=false) {
       r.add('orb',x,y+car.h+.78+bob,z,.24,.30,.24,hover?0x38ffe0:0xc4efe6,3,_vDyn);
     }
   }
+
+  // Stationary parked car fast path: blast-copy pre-packed Float32 templates in ~4 memcpy calls (works in rain too!).
+  if (!driver && car.speed===0 && stain<=.03 && clock-hitFlash>=.10 &&
+      !car.braking && !car.drifting && !(car.boostFlame>0) && !(car.impactShake>0) &&
+      Math.abs(car.susY??0)<1e-4 && Math.abs(car.pitch??0)<1e-4 &&
+      Math.abs(car.roll??0)<1e-4 && Math.abs(car.driftAngle??0)<1e-4 &&
+      typeof r.addPacked==='function') {
+    const spin=car.wheelSpin??0, steer=car.steer??0;
+    let tpl=hi?car._tplHi:car._tplLo;
+    if (!tpl || tpl.x!==x || tpl.y!==y || tpl.z!==z || tpl.yaw!==yaw || tpl.steer!==steer || tpl.spin!==spin) {
+      const buckets=recordCarTemplate(rec=>drawVehicleBody(rec,car,0,hi,false,false,hi));
+      tpl={x,y,z,yaw,steer,spin,buckets};
+      if (hi) car._tplHi=tpl; else car._tplLo=tpl;
+    }
+    const buckets=tpl.buckets, rad=car._rBound+.5, cy=y+car.h*.5;
+    for (let i=0;i<buckets.length;i++) r.addPacked(buckets[i][0],buckets[i][1],x,cy,z,rad);
+    if (hi && inView) {
+      const bf0=Math.sin(yaw), bf2=-Math.cos(yaw), br0=Math.cos(yaw), br2=Math.sin(yaw);
+      chassisBasisInto(yaw,-.42,0,_vAuxBasis);
+      const wipePhase=raining?Math.sin(clock*6.4)*.5+.5:0;
+      const wy=.98+Math.sin(wipePhase*Math.PI)*.14;
+      for (let k=0;k<2;k++) {
+        const wz=(k===0?-.32:.14)+wipePhase*.28;
+        r.add('box',x+bf0*.81+br0*wz,y+wy,z+bf2*.81+br2*wz,.022,.026,.34,0x151c20,4,_vAuxOpts);
+      }
+    }
+    return;
+  }
+
+  drawVehicleBody(r,car,clock,hi,raining,inView,false);
+}
+
+function drawVehicleBody(r,car,clock,hi,raining,inView,skipWipers=false) {
+  const {x,y,z,yaw,w,d,style,baseTint,stain,stainTeam,driver,hitFlash}=car;
+  const visualYaw=yaw+(car.driftAngle??0);
+  const inkColor=INK_COLORS[stainTeam>=0?stainTeam:1] ?? INK_COLORS[1];
+  const flash=clock-hitFlash<.10?.38:0;
+  const warnPulse=stain>=.72 && Math.sin(clock*22)>0?.26:0;
+  // Clearcoat metallic paint smoothly dyes toward enemy ink color as stain builds!
+  const bodyTint=lerpRgb(baseTint,inkColor,clamp(stain*.92+flash*.4,0,1));
+  const roofTint=lerpRgb(baseTint,inkColor,clamp(stain*1.05+warnPulse,0,1));
+  const trim=0x9ba6a4, chrome=0xcfd6d2, darkMetal=0x2c363b, rubber=0x1e2629, glass=driver?0x4c7e8f:0x36525c;
+  const bodyMat=20; // Metallic armor clearcoat sheen for automotive lacquer!
 
   // Full 3D sprung chassis coordinate frame (yaw+drift, pitch squat/dive, cornering roll, engine idle hum)
   const idleVib=driver?Math.sin(clock*(32+(car.rpm??900)*.008))*.0048:0;
@@ -890,7 +1044,7 @@ function drawVehicle(r,car,clock,dist=10,raining=false,hasFrustum=false) {
   chassisBasisInto(visualYaw,cPitch-.42,cRoll,_vAuxBasis);
   pAux('box',.75,1.15,0,.072,.50,d-.20,glass,8,_vAuxOpts);
   // Animated Working Windshield Wipers sweep automatically during rain or enemy ink contamination!
-  if (hi) {
+  if (hi && !skipWipers) {
     const wipeActive=raining || stain>.15;
     const wipePhase=wipeActive?Math.sin(clock*6.4)*.5+.5:0;
     for (let k=0;k<2;k++) {

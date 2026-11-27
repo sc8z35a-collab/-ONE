@@ -1,4 +1,4 @@
-import {TAU,add,clamp,cross,dot,forward,mix,scale,splatRadius,sub,unit} from './render.js';
+import {STRIDE,TAU,add,clamp,cross,dot,forward,mix,packInstance,scale,splatRadius,sub,unit} from './render.js';
 import {SPAWN_X,TEAM,TEAM_INK,randomGenerator} from './world.js';
 import {BASE_TANK,GIGA_TANK,METRO,RAIL,CITY_RADIUS,UNDER_Y,ZONES,cityExit,floorBounds,giantScale,isCabin,isUnder,localX,sameLevel,zoneOf} from './layout.js';
 import {Transit} from './transit.js';
@@ -43,15 +43,16 @@ function decalBasis(n,phase) {
 }
 const WHITE = 0xeae9d8, BOOT = 0x323f44, GRAPHITE = 0x425155, TRIM = 0x82908b;
 const DECAL_RIM=Array.from({length:12},(_,i)=>splatRadius(i*TAU/12));
-// Decals never move once placed, so their clipped triangle fan is built once
-// (kept outside the decal so checkpoints stay small).
+// Decals never move once placed, so their clipped triangle fan and packed
+// GPU instance buffers are built once (kept outside the decal so checkpoints stay small).
 const decalShapes=new WeakMap();
+const _decalPackOpts={dynamic:true,basis:null};
 function decalShape(geometry,decal) {
   let shape=decalShapes.get(decal);
   if (shape) return shape;
   const axes=decalBasis(decal.normal,decal.phase);
   const rim=geometry.coat(decal,axes,DECAL_RIM);
-  shape={axes,origin:decal.p.slice()};
+  shape={axes,origin:decal.p.slice(),packedTeam:-999,packedType:null,packedData:null};
   if (rim) {
     shape.fan=[];
     for (let j=0;j<rim.length;j++) {
@@ -62,6 +63,28 @@ function decalShape(geometry,decal) {
   }
   decalShapes.set(decal,shape);
   return shape;
+}
+function ensureDecalPacked(shape,decal) {
+  if (shape.packedTeam===decal.team && shape.packedData) return shape.packedData;
+  const tint=TEAM_INK[decal.team], org=shape.origin;
+  if (shape.fan) {
+    const fan=shape.fan, n=fan.length;
+    const buf=new Float32Array(n*STRIDE);
+    for (let j=0;j<n;j++) {
+      _decalPackOpts.basis=fan[j];
+      packInstance(buf,j*STRIDE,org[0],org[1],org[2],1,1,1,tint,26,_decalPackOpts,0,false);
+    }
+    shape.packedType='tri';
+    shape.packedData=buf;
+  } else {
+    const buf=new Float32Array(STRIDE);
+    _decalPackOpts.basis=shape.axes;
+    packInstance(buf,0,org[0],org[1],org[2],decal.radius*1.66,decal.radius*1.35,1,tint,26,_decalPackOpts,0,false);
+    shape.packedType='splat';
+    shape.packedData=buf;
+  }
+  shape.packedTeam=decal.team;
+  return shape.packedData;
 }
 export const INK_HIT_DURATION=.8;
 const distance = (a,b) => Math.hypot(a.x-b.x,a.z-b.z);
@@ -524,6 +547,7 @@ export class Battle {
     this.drops=[];
     this.inkImpacts=[];
     this.decals=[];
+    this._hasWetDecals=false;
     this.decalSequence=0;
     this.crewShapes=new WeakMap();
     this.events=[];
@@ -750,34 +774,53 @@ export class Battle {
   }
 
   findActor(start,end,team,joined=true,padding=0) {
-    const seam=joined && stairRay(start,end);
-    if (seam) {
-      const early=seam.t>0 && this.findActor(start,seam.point,team,false,padding);
-      if (early) return {...early,t:early.t*seam.t};
-      const offset=[seam.shift,0,0], late=seam.t<1 && this.findActor(add(seam.point,offset),add(end,offset),team,false,padding);
-      return late?{...late,t:seam.t+(1-seam.t)*late.t,shift:seam.shift}:null;
+    const sx=start[0], sy=start[1], sz=start[2], ex=end[0], ey=end[1], ez=end[2];
+    const zone=zoneOf(sx);
+    if (joined && zone<2) {
+      const minY=sy<ey?sy:ey, maxY=sy>ey?sy:ey;
+      if (minY<=-.97 && maxY>=-4.3 && (ex-sx>.00001 || ex-sx<-.00001)) {
+        const seam=stairRay(start,end);
+        if (seam) {
+          const early=seam.t>0 && this.findActor(start,seam.point,team,false,padding);
+          if (early) return {...early,t:early.t*seam.t};
+          const offset=[seam.shift,0,0], late=seam.t<1 && this.findActor(add(seam.point,offset),add(end,offset),team,false,padding);
+          return late?{...late,t:seam.t+(1-seam.t)*late.t,shift:seam.shift}:null;
+        }
+      }
     }
     let closest=null;
-    for (const actor of this.actors) {
-      if (actor.team===team || actor.down>0 || actor.shield>0 || actor.lift || actor.ride || actor.car || !sameLevel(actor.x,start[0])) continue;
+    const actors=this.actors;
+    for (let i=0;i<actors.length;i++) {
+      const actor=actors[i];
+      if (actor.team===team || actor.down>0 || actor.shield>0 || actor.lift || actor.ride || actor.car || zoneOf(actor.x)!==zone) continue;
       const t=this.bodyHit(start,end,actor,padding);
       if (t!==null && (!closest || t<closest.t)) closest={actor,t};
     }
-    if (team>=0) for (const raider of this.raiders.members) {
-      if (!raider.active || raider.shield>0 || raider.ride || raider.lift || !sameLevel(raider.x,start[0])) continue;
-      const t=this.bodyHit(start,end,raider,padding);
-      if (t!==null && (!closest || t<closest.t)) closest={actor:raider,t};
+    if (team>=0) {
+      const raiders=this.raiders.members;
+      for (let i=0;i<raiders.length;i++) {
+        const raider=raiders[i];
+        if (!raider.active || raider.shield>0 || raider.ride || raider.lift || zoneOf(raider.x)!==zone) continue;
+        const t=this.bodyHit(start,end,raider,padding);
+        if (t!==null && (!closest || t<closest.t)) closest={actor:raider,t};
+      }
+      if (this.hazards) {
+        const hzTargets=this.hazards.targetsView?this.hazards.targetsView(zone):this.hazards.targets(sx);
+        const dx=ex-sx, dy=ey-sy, dz=ez-sz, len2=dx*dx+dy*dy+dz*dz, invLen2=len2>1e-8?1/len2:0;
+        for (let i=0;i<hzTargets.length;i++) {
+          const target=hzTargets[i];
+          if (target.active===false) continue;
+          const cy=target.y+(target.isGoat?1.5:target.isHeli?1.05:target.isSniper?.95:0);
+          let t=invLen2?((target.x-sx)*dx+(cy-sy)*dy+(target.z-sz)*dz)*invLen2:0;
+          if (t<0) t=0; else if (t>1) t=1;
+          const px=sx+dx*t-target.x, py=sy+dy*t-cy, pz=sz+dz*t-target.z;
+          const r=(target.radius??.55)+padding+(target.isGoat?.35:target.isHeli?.85:.18);
+          const ry=target.isGoat?2.05+padding:target.isHeli?1.45+padding:target.isSniper?.95+padding:.52+padding;
+          if (px*px+pz*pz<=r*r && (py<0?-py:py)<=ry && (!closest || t<closest.t)) closest={actor:target,t};
+        }
+      }
     }
-    if (team>=0 && this.hazards) for (const target of this.hazards.targets(start[0])) {
-      const dx=end[0]-start[0], dy=end[1]-start[1], dz=end[2]-start[2], len2=dx*dx+dy*dy+dz*dz;
-      const cy=target.y+(target.isGoat?1.5:target.isHeli?1.05:target.isSniper?.95:0);
-      const t=len2>1e-8?clamp(((target.x-start[0])*dx+(cy-start[1])*dy+(target.z-start[2])*dz)/len2,0,1):0;
-      const px=start[0]+dx*t-target.x, py=start[1]+dy*t-cy, pz=start[2]+dz*t-target.z;
-      const r=(target.radius??.55)+padding+(target.isGoat?.35:target.isHeli?.85:.18);
-      const ry=target.isGoat?2.05+padding:target.isHeli?1.45+padding:target.isSniper?.95+padding:.52+padding;
-      if (px*px+pz*pz<=r*r && Math.abs(py)<=ry && (!closest || t<closest.t)) closest={actor:target,t};
-    }
-    if (this.boss.active && sameLevel(this.boss.x,start[0])) {
+    if (this.boss.active && zoneOf(this.boss.x)===zone) {
       const t=this.bodyHit(start,end,this.boss,padding);
       if (t!==null && (!closest || t<closest.t)) closest={actor:this.boss,t};
     }
@@ -824,6 +867,67 @@ export class Battle {
     const train1=this.metro.trace(start,end,precise,clearance);
     if (train1 && (!best || train1.t<best.t)) best=train1;
     return best;
+  }
+
+  // Zero-allocation boolean line-of-sight occlusion test equivalent to (traceShot(start, end, true, joined, 0, ignoreCar)?.t < limit).
+  lineBlocked(sx,sy,sz,ex,ey,ez,limit=1,ignoreCar=null,joined=true) {
+    const zone=zoneOf(sx);
+    if (joined && zone<2) {
+      const minY=sy<ey?sy:ey, maxY=sy>ey?sy:ey;
+      if (minY<=-.97 && maxY>=-4.3 && (ex-sx>.00001 || ex-sx<-.00001)) {
+        const seam=stairRay([sx,sy,sz],[ex,ey,ez]);
+        if (seam) {
+          const sp=seam.point;
+          if (seam.t>0 && this.lineBlocked(sx,sy,sz,sp[0],sp[1],sp[2],Math.min(1,limit/seam.t),ignoreCar,false)) return true;
+          if (seam.t<limit && seam.t<1) {
+            const remLimit=(limit-seam.t)/(1-seam.t);
+            if (this.lineBlocked(sp[0]+seam.shift,sp[1],sp[2],ex+seam.shift,ey,ez,remLimit,ignoreCar,false)) return true;
+          }
+          return false;
+        }
+      }
+    }
+    if (this.world.traceExactAny(sx,sy,sz,ex,ey,ez,limit)) return true;
+    if (this.stage.traceAny(sx,sy,sz,ex,ey,ez,limit)) return true;
+    if (this.vehicles?.traceAny(sx,sy,sz,ex,ey,ez,limit,ignoreCar)) return true;
+    if (this.dynamicStage && (this.dynamicStage.active || this.dynamicStage.manualOverride)) {
+      const dyn=this.dynamicStage.trace([sx,sy,sz],[ex,ey,ez],0,limit);
+      if (dyn && dyn.t<limit) return true;
+    }
+    const tb=this.hazards?.trainBoss;
+    if (tb?.active && tb.stageMode && zone===0) {
+      const hit=this.hazards.traceTrainBoss([sx,sy,sz],[ex,ey,ez],0,limit);
+      if (hit && hit.t<limit) return true;
+    }
+    if (zone>=2) {
+      if (sameLevel(sx,ex)) {
+        const rail=this.cabinTrain(sx);
+        if (!rail.cabinGlassAt || rail.cabinGlassAt!==rail.train || rail.cabinDoorAt!==rail.train.doorOpen || rail.cabinDoorSide!==rail.line.doorSide) {
+          rail.cabinDoorShapes=collectShapes(r=>{
+            drawCabinDoors(r,rail);
+            drawCabinWindows(r,rail);
+          });
+          rail.cabinGlassAt=rail.train;
+          rail.cabinDoorAt=rail.train.doorOpen;
+          rail.cabinDoorSide=rail.line.doorSide;
+        }
+        const door=traceShapes(rail.cabinDoorShapes,[sx,sy,sz],[ex,ey,ez],0);
+        if (door && door.t<limit) return true;
+      }
+      return false;
+    }
+    const hiY=sy>ey?sy:ey, loY=sy<ey?sy:ey;
+    const tr0=this.transit;
+    if (zone===tr0.section && hiY>=tr0.line.y-.05 && loY<=tr0.line.y+5.3) {
+      const hit=tr0.trace([sx,sy,sz],[ex,ey,ez],true,0);
+      if (hit && hit.t<limit) return true;
+    }
+    const tr1=this.metro;
+    if (zone===tr1.section && hiY>=tr1.line.y-.05 && loY<=tr1.line.y+5.3) {
+      const hit=tr1.trace([sx,sy,sz],[ex,ey,ez],true,0);
+      if (hit && hit.t<limit) return true;
+    }
+    return false;
   }
 
   aim(eye,dir,range=38) {
@@ -1440,6 +1544,7 @@ export class Battle {
   }
 
   coat(hit,team,radius,phase,volume=0) {
+    if (volume>0) this._hasWetDecals=true;
     this.decals.push({p:add(hit.position,scale(hit.normal,.023)),normal:hit.normal,team,phase,radius,
       shape:hit.shape?.id??-1,id:++this.decalSequence,volume});
     if (this.decals.length>310) this.decals.shift();
@@ -1609,10 +1714,15 @@ export class Battle {
     if (this.inkImpacts.length>48) this.inkImpacts.shift();
   }
 
-  impactShot(shot,from,to,wall=this.traceShot(from,to,true)) {
+  impactShot(shot,from,to,wall=undefined) {
+    if (wall===undefined) {
+      wall=this.lineBlocked(from[0],from[1],from[2],to[0],to[1],to[2],1.0001)?this.traceShot(from,to,true):null;
+    }
     const tolerance=clamp(shot.weapon.size*.36,.055,.115);
     const actor=this.findActor(from,to,shot.actor.team,true,tolerance);
-    const curtain=this.subweapons.block(from,to,shot.actor.team);
+    const curtain=this.subweapons.blockAny
+      ? (this.subweapons.blockAny(from[0],from[1],from[2],to[0],to[1],to[2],shot.actor.team)?this.subweapons.block(from,to,shot.actor.team):null)
+      : this.subweapons.block(from,to,shot.actor.team);
     if (curtain && (!wall || curtain.t<wall.t) && (!actor || curtain.t<actor.t)) {
       curtain.item.hp-=shot.weapon.damage*shot.power*(shot.dmg??1);
       this.burst(curtain.p,shot.actor.team,4,1.7);
@@ -1631,12 +1741,14 @@ export class Battle {
     const aim=sub(target,start), length=Math.hypot(...aim);
     if (length<.01) return null;
     let best=null, bestAngle=Infinity;
-    for (const enemy of this.abilities.enemies(actor,start[0])) {
-      if (enemy.down>0 || enemy.shield>0) continue;
-      const chest=[enemy.x-start[0],enemy.y+(enemy.isBoss?2.2:enemy.swimming?.36:.9)-start[1],enemy.z-start[2]];
-      const gap=Math.hypot(...chest);
+    const list=this.abilities.enemiesView?this.abilities.enemiesView(actor.team,start[0]):this.abilities.enemies(actor,start[0]);
+    for (let i=0;i<list.length;i++) {
+      const enemy=list[i];
+      if (enemy.down>0 || enemy.shield>0 || enemy.active===false) continue;
+      const cx=enemy.x-start[0], cy=enemy.y+(enemy.isBoss?2.2:enemy.swimming?.36:.9)-start[1], cz=enemy.z-start[2];
+      const gap=Math.sqrt(cx*cx+cy*cy+cz*cz);
       if (gap>reach || gap<.3) continue;
-      const angle=Math.acos(clamp(dot(chest,aim)/(gap*length),-1,1));
+      const angle=Math.acos(clamp((cx*aim[0]+cy*aim[1]+cz*aim[2])/(gap*length),-1,1));
       const width=(enemy.isBoss?4.8:enemy.giant?2.2:AUTO_AIM_LOCK.body)/gap+AUTO_AIM_LOCK.slack;
       if (angle<width && angle<bestAngle) {best=enemy;bestAngle=angle;}
     }
@@ -1646,47 +1758,83 @@ export class Battle {
   // Turns a tracking round toward the best opponent inside its seeker cone,
   // or toward the enemy it was locked on to.
   guideShot(shot,dt) {
-    const {turn,cone,reach,target}=shot.homing, [vx,vy,vz]=shot.vel, speed=Math.hypot(vx,vy,vz);
+    const homing=shot.homing, turn=homing.turn, cone=homing.cone, reach=homing.reach, target=homing.target;
+    const vel=shot.vel, vx=vel[0], vy=vel[1], vz=vel[2];
+    const speed=Math.sqrt(vx*vx+vy*vy+vz*vz);
     if (speed<1) return;
-    const [px,py,pz]=shot.pos, limit=Math.cos(cone);
+    const pos=shot.pos, px=pos[0], py=pos[1], pz=pos[2], limit=Math.cos(cone);
+    const invSpeed=1/speed, reach2=reach*reach, invReach=.1/reach;
     let best=-Infinity, wx=0, wy=0, wz=0;
-    for (const enemy of target?[target]:this.abilities.enemies(shot.actor,px)) {
-      if (target && (enemy.down>0 || !sameLevel(enemy.x,px))) break;
-      if (enemy.shield>0) continue;
-      const dx=enemy.x-px, dy=enemy.y+(enemy.isBoss?2.2:enemy.swimming?.36:.9)-py, dz=enemy.z-pz, gap=Math.hypot(dx,dy,dz);
-      if (gap>reach || gap<.25) continue;
-      const facing=(dx*vx+dy*vy+dz*vz)/(gap*speed), value=facing-gap/reach*.1;
-      if (facing<limit || value<=best) continue;
-      best=value;
-      wx=dx/gap;wy=dy/gap;wz=dz/gap;
+    if (target) {
+      if (target.down<=0 && target.active!==false && target.shield<=0 && sameLevel(target.x,px)) {
+        const dx=target.x-px, dy=target.y+(target.isBoss?2.2:target.swimming?.36:.9)-py, dz=target.z-pz;
+        const g2=dx*dx+dy*dy+dz*dz;
+        if (g2<=reach2 && g2>=.0625) {
+          const gap=Math.sqrt(g2), invGap=1/gap;
+          const facing=(dx*vx+dy*vy+dz*vz)*invGap*invSpeed;
+          if (facing>=limit) {
+            best=facing-gap*invReach;
+            wx=dx*invGap; wy=dy*invGap; wz=dz*invGap;
+          }
+        }
+      }
+    } else {
+      const enemies=this.abilities.enemiesView?this.abilities.enemiesView(shot.actor.team,px):this.abilities.enemies(shot.actor,px);
+      for (let i=0;i<enemies.length;i++) {
+        const enemy=enemies[i];
+        if (enemy.down>0 || enemy.active===false || enemy.shield>0) continue;
+        const dx=enemy.x-px, dy=enemy.y+(enemy.isBoss?2.2:enemy.swimming?.36:.9)-py, dz=enemy.z-pz;
+        const g2=dx*dx+dy*dy+dz*dz;
+        if (g2>reach2 || g2<.0625) continue;
+        const gap=Math.sqrt(g2), invGap=1/gap;
+        const facing=(dx*vx+dy*vy+dz*vz)*invGap*invSpeed, value=facing-gap*invReach;
+        if (facing<limit || value<=best) continue;
+        best=value;
+        wx=dx*invGap; wy=dy*invGap; wz=dz*invGap;
+      }
     }
     if (best===-Infinity) return;
-    const ux=vx/speed, uy=vy/speed, uz=vz/speed;
-    const angle=Math.acos(clamp(ux*wx+uy*wy+uz*wz,-1,1));
+    const ux=vx*invSpeed, uy=vy*invSpeed, uz=vz*invSpeed;
+    let d=ux*wx+uy*wy+uz*wz;
+    if (d<-1) d=-1; else if (d>1) d=1;
+    const angle=Math.acos(d);
     if (angle<1e-4) return;
-    const t=Math.min(1,turn*dt/angle), sine=Math.sin(angle);
-    const keep=Math.sin((1-t)*angle)/sine, steer=Math.sin(t*angle)/sine;
-    shot.vel=[(ux*keep+wx*steer)*speed,(uy*keep+wy*steer)*speed,(uz*keep+wz*steer)*speed];
+    const t=turn*dt/angle;
+    const tc=t<1?t:1, invSine=1/Math.sin(angle);
+    const keep=Math.sin((1-tc)*angle)*invSine, steer=Math.sin(tc*angle)*invSine;
+    vel[0]=(ux*keep+wx*steer)*speed;
+    vel[1]=(uy*keep+wy*steer)*speed;
+    vel[2]=(uz*keep+wz*steer)*speed;
   }
 
   drainWalls(dt) {
-    for (const mark of this.decals) {
+    if (this.drops.length>=630) return;
+    const decals=this.decals;
+    if (!decals.length || (!this._hasWetDecals && this._wetDecalRef===decals)) return;
+    let anyWet=false;
+    for (let i=0;i<decals.length;i++) {
+      const mark=decals[i];
+      if (!(mark.volume>0)) continue;
+      anyWet=true;
       const volume=wallRunoff(mark,dt);
       if (!volume) continue;
+      if (this.drops.length>=630) {
+        mark.volume+=volume;
+        return;
+      }
       const n=mark.normal, down=unit([n[0]*n[1],n[1]*n[1]-1,n[2]*n[1]]);
       const rim=this.world.geometry.coat(mark,decalBasis(n,mark.phase),DECAL_RIM);
       let foot=mark.p;
       if (rim?.length) {
-        foot=rim.reduce((lowest,p)=>p[1]<lowest[1]?p:lowest,rim[0]);
+        foot=rim[0];
+        for (let j=1;j<rim.length;j++) if (rim[j][1]<foot[1]) foot=rim[j];
         foot=add(foot,scale(n,.034));
-      }
-      if (this.drops.length>=630) {
-        mark.volume+=volume;
-        continue;
       }
       this.drops.push({p:foot.slice(),v:add(scale(down,.9),scale(n,.27)),team:mark.team,volume,
         life:7.2,max:7.2,size:Math.max(.058,Math.cbrt(volume)*1.75)});
     }
+    this._wetDecalRef=decals;
+    if (!anyWet) this._hasWetDecals=false;
   }
 
   landDrop(drop,hit) {
@@ -1702,15 +1850,18 @@ export class Battle {
 
   updateShots(dt) {
     this.drainWalls(dt);
-    while (this.inkImpacts.length && this.clock-this.inkImpacts[0].at>=INK_HIT_DURATION) this.inkImpacts.shift();
+    const impacts=this.inkImpacts;
+    while (impacts.length && this.clock-impacts[0].at>=INK_HIT_DURATION) impacts.shift();
     const toBuf=this._shotTo ?? (this._shotTo=[0,0,0]);
     const endBuf=this._shotEnd ?? (this._shotEnd=[0,0,0]);
-    const halfDt2=.5*dt*dt, gDrop=9.81*dt;
-    for (let i=this.shots.length-1;i>=0;i--) {
-      const shot=this.shots[i];
+    const halfDt2=.5*dt*dt, gDrop=9.81*dt, fluid=this.fluid, shots=this.shots;
+    for (let i=shots.length-1;i>=0;i--) {
+      const shot=shots[i];
       if (shot.life!==undefined && shot.age>=shot.life) {
         this.burst(shot.pos,shot.actor.team,3,1.2);
-        this.shots.splice(i,1);
+        const last=shots.length-1;
+        if (i!==last) shots[i]=shots[last];
+        shots.pop();
         continue;
       }
       if (shot.homing) this.guideShot(shot,dt);
@@ -1723,8 +1874,8 @@ export class Battle {
       const g=shot.weapon.gravity;
       const sx0=pos[0], sy0=pos[1], sz0=pos[2];
       let fRes=null;
-      if (this.fluid) {
-        fRes=this.fluid.stepProjectileFluid(shot,g,dt,this.rng);
+      if (fluid) {
+        fRes=fluid.stepProjectileFluid(shot,g,dt,this.rng);
         toBuf[0]=pos[0]; toBuf[1]=pos[1]; toBuf[2]=pos[2];
         pos[0]=sx0; pos[1]=sy0; pos[2]=sz0;
       } else {
@@ -1741,10 +1892,12 @@ export class Battle {
         end=endBuf;
       }
       if (fraction>0 && this.impactShot(shot,pos,end) || fraction<1 || toBuf[1]<ZONES[zoneOf(pos[0])].y-18) {
-        this.shots.splice(i,1);
+        const last=shots.length-1;
+        if (i!==last) shots[i]=shots[last];
+        shots.pop();
         continue;
       }
-      if (!this.fluid) vel[1]-=g*dt;
+      if (!fluid) vel[1]-=g*dt;
       if (fRes?.breakup && this.drops.length<48 && (shot.weapon?.size??.2)>=.24) {
         const dp=fRes.drop;
         this.drops.push({
@@ -1752,28 +1905,31 @@ export class Battle {
           size:clamp((shot.weapon.size??.2)*.55,.06,.16),life:.45,max:.45,wet:true,volume:.006
         });
       }
-      const seam=stairRay(pos,toBuf);
+      const minY=pos[1]<toBuf[1]?pos[1]:toBuf[1], maxY=pos[1]>toBuf[1]?pos[1]:toBuf[1];
+      const seam=(minY<=-.97 && maxY>=-4.3)?stairRay(pos,toBuf):null;
       pos[0]=seam?toBuf[0]+seam.shift:toBuf[0];
       pos[1]=toBuf[1];
       pos[2]=toBuf[2];
       shot.age+=dt;
     }
-    const world=this.world;
-    for (let i=this.drops.length-1;i>=0;i--) {
-      const drop=this.drops[i];
-      const from=drop.p, v=drop.v, fy=from[1];
-      toBuf[0]=from[0]+v[0]*dt;
-      toBuf[1]=fy+v[1]*dt;
-      toBuf[2]=from[2]+v[2]*dt;
+    const world=this.world, drops=this.drops;
+    for (let i=drops.length-1;i>=0;i--) {
+      const drop=drops[i];
+      const from=drop.p, v=drop.v, fx=from[0], fy=from[1], fz=from[2];
+      const tx=fx+v[0]*dt, ty=fy+v[1]*dt, tz=fz+v[2]*dt;
+      toBuf[0]=tx; toBuf[1]=ty; toBuf[2]=tz;
       const wet=(drop.wet || drop.volume) && drop.team>=0;
-      const hit=wet && this.traceShot(from,toBuf,true);
+      const hit=wet && this.lineBlocked(fx,fy,fz,tx,ty,tz,1.0001)?this.traceShot(from,toBuf,true):null;
       if (hit) {
         this.landDrop(drop,hit);
-        this.drops.splice(i,1);
+        const last=drops.length-1;
+        if (i!==last) drops[i]=drops[last];
+        drops.pop();
         continue;
       }
-      const seam=stairRay(from,toBuf);
-      const dx=seam?toBuf[0]+seam.shift:toBuf[0], dy=toBuf[1], dz=toBuf[2];
+      const minY=fy<ty?fy:ty, maxY=fy>ty?fy:ty;
+      const seam=(minY<=-.97 && maxY>=-4.3)?stairRay(from,toBuf):null;
+      const dx=seam?tx+seam.shift:tx, dy=ty, dz=tz;
       from[0]=dx; from[1]=dy; from[2]=dz;
       v[1]-=gDrop;
       drop.life-=dt;
@@ -1781,11 +1937,19 @@ export class Battle {
       const landsOnRail=line && fy>=line.y && dy<=line.y && Math.abs(dx-line.center)<line.edge && Math.abs(dz-line.z)<line.halfWidth;
       if (landsOnRail) {
         if (wet) this.landDrop(drop,{position:from,layer:line.layer});
-        this.drops.splice(i,1);
+        const last=drops.length-1;
+        if (i!==last) drops[i]=drops[last];
+        drops.pop();
       } else if (dy<=world.floorY(dx,dz)) {
         if (wet) this.landDrop(drop,{position:from,layer:world.floor(dx,dz).layer});
-        this.drops.splice(i,1);
-      } else if (drop.life<=0) this.drops.splice(i,1);
+        const last=drops.length-1;
+        if (i!==last) drops[i]=drops[last];
+        drops.pop();
+      } else if (drop.life<=0) {
+        const last=drops.length-1;
+        if (i!==last) drops[i]=drops[last];
+        drops.pop();
+      }
     }
   }
 
@@ -1886,7 +2050,14 @@ export class Battle {
     for (const raider of this.raiders.members) if (raider.active) this.pickupChip(raider);
     if (this.mode==='watch' && this.cameraActor().down>0) this.cycle();
     this.paint.advance(dt);
-    this.events=this.events.filter(event=>event.until>this.clock);
+    const evs=this.events;
+    if (evs.length) {
+      let w=0;
+      for (let i=0;i<evs.length;i++) {
+        if (evs[i].until>this.clock) {if (w!==i) evs[w]=evs[i]; w++;}
+      }
+      evs.length=w;
+    }
     if (!this.unlimited && this.left<=0) this.finishMatch();
   }
 
@@ -2063,18 +2234,24 @@ export class Battle {
       }
     }
     const markReach=Math.min(140,reach*.8), markReach2=markReach*markReach, decals=this.decals;
+    const canPackDecal=typeof renderer.addPacked==='function';
     for (let i=0;i<decals.length;i++) {
       const decal=decals[i], dp=decal.p;
       if (!sameLevel(dp[0],viewX)) continue;
       const dx=dp[0]-viewX, dz=dp[2]-viewZ;
       if (dx*dx+dz*dz>markReach2) continue;
       if (hasFrustum && !renderer.inFrustum(dp[0],dp[1],dp[2],decal.radius*1.8)) continue;
-      const tint=TEAM_INK[decal.team];
       const shape=decalShape(this.world.geometry,decal), org=shape.origin;
-      if (shape.fan) {
-        const fan=shape.fan;
-        for (let j=0;j<fan.length;j++) {_dynBasis.basis=fan[j];renderer.add('tri',org[0],org[1],org[2],1,1,1,tint,26,_dynBasis);}
-      } else {_dynBasis.basis=shape.axes;renderer.add('splat',org[0],org[1],org[2],decal.radius*1.66,decal.radius*1.35,1,tint,26,_dynBasis);}
+      if (canPackDecal) {
+        const packed=ensureDecalPacked(shape,decal);
+        if (packed.length) renderer.addPacked(shape.packedType,packed,org[0],org[1],org[2],decal.radius*1.8);
+      } else {
+        const tint=TEAM_INK[decal.team];
+        if (shape.fan) {
+          const fan=shape.fan;
+          for (let j=0;j<fan.length;j++) {_dynBasis.basis=fan[j];renderer.add('tri',org[0],org[1],org[2],1,1,1,tint,26,_dynBasis);}
+        } else {_dynBasis.basis=shape.axes;renderer.add('splat',org[0],org[1],org[2],decal.radius*1.66,decal.radius*1.35,1,tint,26,_dynBasis);}
+      }
     }
   }
 }
